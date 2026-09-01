@@ -16,7 +16,7 @@ def _key_pipeline():
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
     utp = parse_utp(utp_path)
-    program = parse_program(program_path.read_bytes(), program_path.name)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     return run_calendar_pipeline(
         utp,
         program,
@@ -50,7 +50,11 @@ def test_tour_guides_pipeline_without_program_is_limited_qa_reference() -> None:
     )
     assert len(result.resolved_lessons) == 36
     assert all(
-        not row.theory_text and not row.practice_text and not row.lesson_type
+        not row.theory_text and not row.practice_text
+        for row in result.resolved_lessons
+    )
+    assert all(
+        row.lesson_type and row.planned_result and row.assessment_method
         for row in result.resolved_lessons
     )
     assert any("программа не загружена" in warning.casefold() for warning in result.warnings)

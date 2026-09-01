@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import os
 
 import streamlit as st
 
 from calendar_pedagoga.ai_provider import AIProviderError
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
-from calendar_pedagoga.lesson_content import build_lesson_content, calculate_fill_metrics
+from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.normative_registry import (
     CalendarRegistryReference,
     NormativeUpdateChoice,
@@ -23,17 +24,17 @@ from calendar_pedagoga.organization_template import (
     select_calendar_template,
 )
 from calendar_pedagoga.pipeline import PipelineError, run_calendar_pipeline
+from calendar_pedagoga.resolve_utp import UtpResolutionError, resolve_utp
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
-    MAX_UPLOAD_BYTES,
     UploadPurpose,
     UploadValidationError,
     ValidatedUpload,
     validate_upload,
 )
 from calendar_pedagoga.parsing import UtpParseResult
-from calendar_pedagoga.matching import MatchStatus, match_utp_to_program
-from calendar_pedagoga.program_parsing import ProgramData
+from calendar_pedagoga.matching import ContentMatch, MatchStatus, match_utp_to_program
+from calendar_pedagoga.program_parsing import ProgramData, infer_study_year_number, parse_program
 from calendar_pedagoga.scheduling import (
     ScheduleResult,
     ScheduleValidationError,
@@ -41,378 +42,477 @@ from calendar_pedagoga.scheduling import (
 )
 
 
-SUPPORTED_ACADEMIC_YEAR = "2026–2027"
+ACADEMIC_YEARS: tuple[str, ...] = ("2026–2027",)
+SUPPORTED_ACADEMIC_YEAR = ACADEMIC_YEARS[0]
 
 
-def _value(value: object | None) -> str:
-    return str(value) if value is not None else "Не найдено"
+def _reset_analysis_state() -> None:
+    st.session_state["analysis_ready"] = False
+    for key in (
+        "analysis_warnings",
+        "calendar_download",
+        "calendar_warnings",
+        "calendar_ai_usage",
+        "calendar_context",
+    ):
+        st.session_state.pop(key, None)
 
 
-def _show_utp(result: UtpParseResult) -> None:
-    metadata = result.metadata
-    st.subheader("Что найдено в УТП")
-    st.write(
-        {
-            "Название программы": _value(metadata.program_name),
-            "Учебный год": _value(metadata.academic_year),
-            "Год обучения": _value(metadata.study_year),
-            "Возраст обучающихся": _value(metadata.student_age),
-            "Часов в неделю": _value(metadata.hours_per_week),
-            "Часов в год (информационная справка)": _value(
-                metadata.hours_per_year
-            ),
-            "Учебных недель": _value(metadata.study_weeks),
-            "Педагог": _value(metadata.teacher_name),
-            "Количество разделов": len(result.sections),
-            "Количество учебных тем/позиций": len(result.topics),
-        }
-    )
-
-    if result.sections:
-        st.markdown("**Разделы**")
-        st.table(
-            [
-                {
-                    "№": section.number or "",
-                    "Раздел": section.title,
-                    "Всего": section.hours.total,
-                    "Теория": section.hours.theory,
-                    "Практика": section.hours.practice,
-                    "Тип": (
-                        "Самостоятельная учебная позиция"
-                        if section.is_standalone_position
-                        else "Раздел с дочерними темами"
-                    ),
-                }
-                for section in result.sections
-            ]
-        )
-
-    st.markdown("**Учебные темы/позиции для календаря**")
-    st.dataframe(
-        [
-            {
-                "№": topic.number or "",
-                "Тема": topic.title,
-                "Родительский раздел": topic.parent_section or "",
-                "Тип": (
-                    "Самостоятельная позиция раздела"
-                    if topic.is_standalone_section
-                    else "Дочерняя тема"
-                ),
-                "Всего": topic.hours.total,
-                "Теория": topic.hours.theory,
-                "Практика": topic.hours.practice,
-            }
-            for topic in result.topics
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-
-    totals = result.table_totals
-    st.markdown("**Контрольные суммы по итоговой строке УТП**")
-    if totals is None:
-        st.warning("Итоговая строка УТП не найдена.")
-    else:
-        st.write(
-            f"Всего: **{totals.total}** · Теория: **{totals.theory}** · "
-            f"Практика: **{totals.practice}**"
-        )
-    for warning in result.warnings:
-        st.warning(warning)
+def _clear_upload_slot(slot: str) -> None:
+    nonce_key = f"upload_nonce_{slot}"
+    st.session_state[nonce_key] = int(st.session_state.get(nonce_key, 0)) + 1
+    st.session_state.pop(f"upload_name_{slot}", None)
+    _reset_analysis_state()
+    st.rerun()
 
 
-def _preview(value: str, limit: int = 320) -> str:
-    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+def _remember_upload(slot: str, uploaded: object | None) -> None:
+    name_key = f"upload_name_{slot}"
+    previous = st.session_state.get(name_key)
+    current = getattr(uploaded, "name", None)
+    if previous is not None and current is None:
+        st.session_state.pop(name_key, None)
+        if st.session_state.get("analysis_ready"):
+            _reset_analysis_state()
+    elif current is not None:
+        st.session_state[name_key] = current
 
 
-def _show_program(program: ProgramData, utp: UtpParseResult) -> None:
-    st.subheader("Что найдено в образовательной программе")
-    st.write(
-        {
-            "Название программы": _value(program.title),
-            "Срок реализации": _value(program.duration),
-            "Возраст обучающихся": _value(program.student_age),
-            "Цель": _value(program.goal),
-            "Задачи": list(program.tasks) or ["Не найдены"],
-            "Формы организации занятий": list(program.lesson_forms)
-            or ["Не найдены"],
-            "Методы обучения": list(program.teaching_methods) or ["Не найдены"],
-            "Ожидаемые результаты": list(program.expected_results)
-            or ["Не найдены"],
-        }
-    )
-    matches = match_utp_to_program(utp.topics, program.content_items)
-    st.subheader("Сопоставление УТП и программы")
-    st.dataframe(
-        [
-            {
-                "Раздел УТП": match.utp_position.parent_section or "",
-                "Тема УТП": match.utp_position.title,
-                "Часы": match.utp_position.hours.total,
-                "Раздел/тема программы": (
-                    match.program_item.title if match.program_item else ""
-                ),
-                "Содержание": (
-                    _preview(match.program_item.content)
-                    if match.program_item
-                    else ""
-                ),
-                "Статус": match.status.value,
-                "Уверенность": f"{match.confidence:.0%}",
-            }
-            for match in matches
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-    matched = sum(match.status is not MatchStatus.NOT_MATCHED for match in matches)
-    st.write(f"Сопоставлено: **{matched} из {len(matches)}**.")
-    ambiguous = [match for match in matches if match.ambiguous_candidates]
-    if ambiguous:
-        for match in ambiguous:
-            st.warning(
-                f"Неоднозначное соответствие для «{match.utp_position.title}»: "
-                + "; ".join(match.ambiguous_candidates)
-            )
-
-
-def _show_schedule(utp: UtpParseResult, academic_year: str) -> ScheduleResult:
-    schedule = build_schedule(utp, academic_year)
-    rows: list[dict[str, object]] = []
-    row_keys: dict[tuple[int, str | None, str], int] = {}
-    for element in schedule.elements:
-        key = (element.week.number, element.topic_number, element.topic)
-        if key not in row_keys:
-            row_keys[key] = len(rows)
-            rows.append(
-                {
-                    "Неделя": element.week.number,
-                    "Даты": element.week.date_range,
-                    "Месяц": element.week.month,
-                    "Раздел": element.section,
-                    "Тема": element.topic,
-                    "Теория": 0,
-                    "Практика": 0,
-                    "Всего часов": 0,
-                }
-            )
-        row = rows[row_keys[key]]
-        column = "Теория" if element.part_type == "theory" else "Практика"
-        row[column] = int(row[column]) + element.hours
-        row["Всего часов"] = int(row["Всего часов"]) + element.hours
-    st.subheader("Календарное распределение")
-    st.dataframe(rows, hide_index=True, use_container_width=True)
-    totals = utp.table_totals
-    if totals:
-        st.write(
-            f"Распределено: **{totals.total} ч.** · теория: "
-            f"**{totals.theory} ч.** · практика: **{totals.practice} ч.** · "
-            f"учебных недель: **{len(schedule.weeks)}**."
-        )
-    return schedule
-
-
-def _show_content_sources(
-    schedule: ScheduleResult,
-    utp: UtpParseResult,
-    program: ProgramData | None,
-    source_utp_name: str,
-) -> tuple[CalendarContentRow, ...]:
-    rows = build_content_model(schedule, utp, program, source_utp_name)
-    st.subheader("Источники содержания календаря")
-    st.dataframe(
-        [
-            {
-                "Неделя": row.week_number,
-                "Даты": row.date_range,
-                "Тема УТП": row.topic_title,
-                "Теория": row.theory_hours,
-                "Практика": row.practice_hours,
-                "Тема программы": row.program_topic,
-                "Статус": row.match_status.value,
-                "Содержание программы": row.program_content_preview,
-            }
-            for row in rows
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-    warnings = sorted({warning for row in rows for warning in row.warnings})
-    for warning in warnings:
-        st.warning(warning)
-    return rows
-
-
-def _show_lesson_content(rows: tuple[CalendarContentRow, ...]) -> None:
-    lessons = build_lesson_content(rows)
-    st.subheader("Поля календарного плана — rule-based")
-    st.dataframe(
-        [
-            {
-                "Неделя": row.source.week_number,
-                "Тема": row.source.topic_title,
-                "Теоретические занятия": _preview(row.theory_text),
-                "Практические занятия": _preview(row.practice_text),
-                "Тип занятия": row.lesson_type,
-                "Планируемый результат": row.planned_result,
-                "Вид контроля": row.assessment_method,
-            }
-            for row in lessons
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-    metrics = calculate_fill_metrics(lessons)
-    st.write(
-        f"Заполненность: теория **{metrics.theory_percent:.1f}%**, "
-        f"практика **{metrics.practice_percent:.1f}%**, "
-        f"тип занятия **{metrics.lesson_type_percent:.1f}%**, "
-        f"результат **{metrics.planned_result_percent:.1f}%**, "
-        f"контроль **{metrics.assessment_method_percent:.1f}%**."
-    )
-    warnings = sorted({warning for row in lessons for warning in row.warnings})
-    for warning in warnings:
-        st.warning(warning)
-
-
-def _store_analysis_context(
+def _file_uploader_with_clear(
+    slot: str,
     *,
-    validated_utp: ValidatedUpload,
-    validated_program: ValidatedUpload | None,
-    template_selection: CalendarTemplateSelection,
-    academic_year: str,
-) -> None:
-    st.session_state["calendar_context"] = {
-        "validated_utp": validated_utp,
-        "validated_program": validated_program,
-        "template_selection": template_selection,
-        "academic_year": academic_year,
-    }
-
-
-def _show_generation_controls(
-    *,
-    validated_utp: ValidatedUpload,
-    validated_program: ValidatedUpload | None,
-    template_selection: CalendarTemplateSelection,
-    academic_year: str,
-) -> None:
-    st.subheader("Формирование календарного плана")
-    ai_available = bool(os.getenv("OPENAI_API_KEY"))
-    use_ai = False
-    if validated_program is None:
-        st.info(
-            "Без образовательной программы календарь формируется с пустым "
-            "содержанием занятий; AI недоступен."
-        )
-    elif ai_available:
-        use_ai = st.checkbox(
-            "Дополнить поля занятий через OpenAI",
-            help=(
-                "AI заполняет тип занятия, результат и контроль только из "
-                "данных программы. Ключ API берётся из OPENAI_API_KEY."
-            ),
-        )
-    else:
-        st.caption(
-            "OpenAI API не настроен (OPENAI_API_KEY). "
-            "Будут использованы только rule-based поля."
-        )
-
-    if st.button("Сформировать календарный план", type="primary", use_container_width=True):
-        utp = validated_utp.parsed
-        assert isinstance(utp, UtpParseResult)
-        program = None
-        if validated_program is not None:
-            program = validated_program.parsed
-            assert isinstance(program, ProgramData)
-
-        with TransientDocumentSession() as operation:
-            try:
-                result = run_calendar_pipeline(
-                    utp,
-                    program,
-                    academic_year=academic_year,
-                    template=template_selection,
-                    source_utp_name=validated_utp.filename,
-                    use_ai=use_ai,
-                )
-            except (PipelineError, ScheduleValidationError, ValueError, AIProviderError) as error:
-                st.error(f"Не удалось сформировать календарный план: {error}")
-                return
-
-            operation.publish_result(result.filename, result.content)
-            st.session_state["calendar_download"] = operation.take_result_for_download()
-            st.session_state["calendar_warnings"] = result.warnings
-            if result.ai_usage:
-                st.session_state["calendar_ai_usage"] = {
-                    "tokens": result.ai_usage.total_tokens,
-                    "cost": result.ai_usage.estimated_cost_usd,
-                }
-
-        st.success("Календарный план сформирован и прошёл QA.")
-        for warning in st.session_state.get("calendar_warnings", ()):
-            st.warning(warning)
-        usage = st.session_state.get("calendar_ai_usage")
-        if usage:
-            st.caption(
-                f"AI: {usage['tokens']} токенов, "
-                f"≈ ${usage['cost']:.4f}."
+    label: str,
+    type: tuple[str, ...],
+    help: str,
+) -> object | None:
+    nonce = int(st.session_state.setdefault(f"upload_nonce_{slot}", 0))
+    uploaded = st.file_uploader(
+        label,
+        type=type,
+        help=help,
+        label_visibility="collapsed",
+        key=f"upload_{slot}_{nonce}",
+    )
+    if uploaded is not None:
+        name_col, clear_col = st.columns([0.88, 0.12])
+        with name_col:
+            st.markdown(
+                f'<p class="kp-uploaded-name">{html.escape(uploaded.name)}</p>',
+                unsafe_allow_html=True,
             )
+        with clear_col:
+            if st.button(
+                "×",
+                key=f"clear_{slot}",
+                help="Удалить файл",
+                use_container_width=True,
+            ):
+                _clear_upload_slot(slot)
+    _remember_upload(slot, uploaded)
+    return uploaded
 
-    download = st.session_state.get("calendar_download")
-    if download is not None:
-        st.download_button(
-            "Скачать календарный план",
-            data=download.content,
-            file_name=download.filename,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
+
+def _inject_landing_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .block-container {
+            padding-top: 2.75rem !important;
+            padding-bottom: 0.5rem;
+            max-width: 900px;
+        }
+        section.main .block-container {
+            padding-top: 2.75rem !important;
+        }
+        html, body {
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            height: auto !important;
+            max-height: none !important;
+        }
+        html body .stApp,
+        html body [data-testid="stApp"] {
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+        }
+        html body .stAppViewContainer,
+        html body [data-testid="stAppViewContainer"] {
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            max-height: none !important;
+            scrollbar-width: auto;
+            scrollbar-color: #6b7280 #e5e7eb;
+        }
+        html body [data-testid="stAppViewContainer"] > div {
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            height: 100% !important;
+            max-height: none !important;
+            scrollbar-width: auto;
+            scrollbar-color: #6b7280 #e5e7eb;
+        }
+        html body [data-testid="stAppViewContainer"] > div::-webkit-scrollbar {
+            width: 12px;
+        }
+        html body [data-testid="stAppViewContainer"] > div::-webkit-scrollbar-track {
+            background: #e5e7eb;
+        }
+        html body [data-testid="stAppViewContainer"] > div::-webkit-scrollbar-thumb {
+            background: #6b7280;
+            border-radius: 8px;
+        }
+        html body .stMain,
+        html body [data-testid="stMain"],
+        html body section.main,
+        html body .main {
+            overflow-x: hidden !important;
+            overflow-y: visible !important;
+            height: auto !important;
+            max-height: none !important;
+        }
+        html body .block-container,
+        html body [data-testid="stMainBlockContainer"] {
+            overflow-x: hidden !important;
+            overflow-y: visible !important;
+            max-height: none !important;
+        }
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 0.75rem;
+        }
+        header[data-testid="stHeader"] {
+            height: 2.25rem;
+        }
+        .kp-hero-top {
+            overflow: visible !important;
+            margin: 0 0 0.2rem 0 !important;
+            padding-top: 0.25rem;
+        }
+        [data-testid="stHeading"],
+        .stHeading {
+            overflow: visible !important;
+            height: auto !important;
+            min-height: 2.85rem !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        .element-container:has([data-testid="stHeading"]),
+        .element-container:has(h1) {
+            overflow: visible !important;
+            height: auto !important;
+            min-height: 2.85rem !important;
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+        .kp-hero-title, h1 {
+            font-size: 2rem !important;
+            font-weight: 700 !important;
+            line-height: 1.35 !important;
+            margin: 0 0 0.45rem 0 !important;
+            color: #1f2937 !important;
+            padding-top: 0.125rem !important;
+            overflow: visible !important;
+            height: auto !important;
+            min-height: 2.5rem !important;
+            transform: none !important;
+        }
+        .kp-hero-subtitle {
+            font-size: 1.02rem;
+            line-height: 1.4;
+            color: #4b5563;
+            margin: 0 0 0.55rem 0;
+        }
+        .kp-step-card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 0.55rem 0.85rem 0.15rem 0.85rem;
+            margin-bottom: 0.15rem;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .kp-step-title {
+            font-size: 1.02rem;
+            font-weight: 600;
+            color: #111827;
+            margin: 0;
+        }
+        .kp-step-note {
+            font-size: 0.92rem;
+            color: #6b7280;
+            margin: 0.15rem 0 0.35rem 0;
+        }
+        .kp-badge {
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            border-radius: 999px;
+            padding: 0.15rem 0.55rem;
+            margin-left: 0.35rem;
+            vertical-align: middle;
+        }
+        .kp-badge-required {
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+        .kp-badge-optional {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+        .element-container:has(.kp-step-card-year-header) .kp-step-card {
+            margin-bottom: 0;
+            border-radius: 10px 10px 0 0;
+            border-bottom: none;
+            padding-bottom: 0.15rem;
+        }
+        .element-container:has(.kp-step-card-year-header) + .element-container {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-top: none;
+            border-radius: 0 0 10px 10px;
+            padding: 0 0.85rem 0.55rem 0.85rem;
+            margin-top: -0.15rem !important;
+            margin-bottom: 0.15rem;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .element-container:has(.kp-step-card-year-header) + .element-container [data-testid="stSelectbox"] {
+            margin-top: 0;
+            margin-bottom: 0;
+        }
+        .element-container:has(.kp-step-card-year-header) + .element-container [data-testid="stSelectbox"] > div {
+            margin-top: 0;
+        }
+        .kp-normative {
+            margin: 0.1rem 0 0.2rem 0;
+        }
+        .kp-normative details {
+            border: 1px solid #eef2f7;
+            border-radius: 10px;
+            background: #fafbfc;
+            padding: 0.15rem 0.65rem;
+            margin: 0;
+        }
+        .kp-normative summary {
+            color: #6b7280;
+            font-size: 0.86rem;
+            cursor: pointer;
+        }
+        div[data-testid="stFileUploader"] {
+            margin-top: -0.2rem;
+            margin-bottom: 0.25rem;
+        }
+        div[data-testid="stFileUploader"] label {
+            display: none !important;
+        }
+        div[data-testid="stFileUploader"] section {
+            padding-top: 0.15rem;
+            padding-bottom: 0.15rem;
+        }
+        [data-testid="stFileUploaderDropzoneInstructions"],
+        [data-testid="stFileUploaderDropzoneInstructions"] span,
+        div[data-testid="stFileUploader"] small {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            max-height: 0 !important;
+            overflow: hidden !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+        }
+        [data-testid="stFileUploaderDropzone"] {
+            min-height: 2.4rem !important;
+            padding: 0.35rem 0.5rem !important;
+        }
+        [data-testid="stExpander"] {
+            margin-top: 0.15rem;
+            margin-bottom: 0.25rem;
+        }
+        [data-testid="stExpander"] details {
+            border: 1px solid #eef2f7;
+            border-radius: 10px;
+            background: #fafbfc;
+        }
+        [data-testid="stExpander"] summary {
+            color: #6b7280;
+            font-size: 0.86rem;
+        }
+        div[data-testid="stButton"] {
+            margin-top: 0.15rem;
+        }
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+            border: none;
+            font-size: 1rem;
+            font-weight: 600;
+            padding: 0.62rem 1rem;
+            border-radius: 10px;
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: linear-gradient(180deg, #1d4ed8 0%, #1e40af 100%);
+            border: none;
+            color: #ffffff;
+        }
+        .kp-results {
+            margin-top: 0.35rem;
+        }
+        .kp-results-title {
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: #111827;
+            margin: 0 0 0.35rem 0;
+        }
+        .kp-results-summary {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 0.85rem 1rem;
+            margin: 0.75rem 0 0.55rem 0;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .kp-results-summary p {
+            margin: 0.15rem 0;
+            color: #374151;
+            line-height: 1.45;
+        }
+        .kp-results-summary .kp-summary-label {
+            color: #6b7280;
+            font-size: 0.92rem;
+            margin-top: 0.55rem;
+        }
+        .kp-results-status {
+            margin: 0.45rem 0 0.15rem 0;
+        }
+        .kp-results-note {
+            color: #6b7280;
+            font-size: 0.9rem;
+            margin: 0.35rem 0 0.15rem 0;
+        }
+        [data-testid="stFileUploaderFile"] {
+            display: none !important;
+        }
+        .kp-uploaded-name {
+            margin: 0.2rem 0 0.1rem 0;
+            color: #374151;
+            font-size: 0.9rem;
+            line-height: 1.3;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        button[title="Удалить файл"] {
+            min-width: 2rem !important;
+            height: 2rem !important;
+            padding: 0 !important;
+            font-size: 1.15rem !important;
+            line-height: 1 !important;
+            color: #6b7280 !important;
+            background: #ffffff !important;
+            border: 1px solid #e5e7eb !important;
+            border-radius: 8px !important;
+        }
+        button[title="Удалить файл"]:hover {
+            color: #b91c1c !important;
+            border-color: #fecaca !important;
+            background: #fef2f2 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def run_app() -> None:
-    """Показать экран загрузки, анализа и формирования календарного плана."""
-    st.set_page_config(page_title="Календарь педагога", page_icon="📅")
+def _render_upload_screen() -> tuple[object | None, object | None, object | None, str]:
+    _inject_landing_styles()
 
+    st.markdown('<div class="kp-hero-top">', unsafe_allow_html=True)
     st.title("Календарь педагога")
-    st.write(
-        "Загрузите учебно-тематический план и образовательную программу, "
-        "проверьте данные и сформируйте календарный план DOCX."
+    st.markdown(
+        '<p class="kp-hero-subtitle">Загрузите документы — приложение проверит часы, '
+        "составит расписание занятий и подготовит календарный план в Word.</p>",
+        unsafe_allow_html=True,
     )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    utp_file = st.file_uploader(
-        "Загрузите УТП",
-        type=("docx",),
-        help="УТП — учебно-тематический план, DOCX, до 10 МБ.",
-    )
-    program_file = st.file_uploader(
-        "Загрузите образовательную программу",
-        type=("doc", "docx"),
-        help="Программа — образовательная программа, DOC/DOCX, до 10 МБ.",
-    )
-    organization_template_file = st.file_uploader(
-        "Шаблон календарного плана вашей организации",
-        type=("docx",),
-        help=(
-            "Шаблон — только образец календарного плана организации, "
-            "DOCX, до 10 МБ."
-        ),
+    st.markdown(
+        '<div class="kp-step-card kp-step-card-year-header">'
+        '<p class="kp-step-title">1. Учебный год</p>'
+        '<p class="kp-step-note">Выберите год, на который составляется календарный план</p>'
+        "</div>",
+        unsafe_allow_html=True,
     )
     academic_year = st.selectbox(
         "Учебный год",
-        options=(SUPPORTED_ACADEMIC_YEAR,),
+        options=ACADEMIC_YEARS,
         index=0,
         help="Расписание поддерживает учебный год 2026–2027 (36 недель).",
+        label_visibility="collapsed",
     )
+
+    st.markdown(
+        '<div class="kp-step-card">'
+        '<p class="kp-step-title">2. Программа обучения'
+        '<span class="kp-badge kp-badge-required">обязательно</span></p>'
+        '<p class="kp-step-note">Документ с содержанием программы и, если есть, '
+        "учебно-тематическим планом</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    program_file = _file_uploader_with_clear(
+        "program",
+        label="Загрузите образовательную программу",
+        type=("doc", "docx"),
+        help="Программа — образовательная программа, DOC/DOCX, до 10 МБ.",
+    )
+
+    utp_col, template_col = st.columns(2, gap="medium")
+    with utp_col:
+        st.markdown(
+            '<div class="kp-step-card">'
+            '<p class="kp-step-title">3. Учебно-тематический план'
+            '<span class="kp-badge kp-badge-optional">необязательно</span></p>'
+            '<p class="kp-step-note">Загрузите отдельно, только если УТП находится в другом файле</p>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        utp_file = _file_uploader_with_clear(
+            "utp",
+            label="Загрузите УТП",
+            type=("docx",),
+            help="УТП — учебно-тематический план, DOCX, до 10 МБ.",
+        )
+    with template_col:
+        st.markdown(
+            '<div class="kp-step-card">'
+            '<p class="kp-step-title">4. Шаблон календарного плана'
+            '<span class="kp-badge kp-badge-optional">необязательно</span></p>'
+            '<p class="kp-step-note">Если есть образец вашей организации — загрузите его; иначе используем стандартный</p>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        organization_template_file = _file_uploader_with_clear(
+            "template",
+            label="Шаблон календарного плана вашей организации",
+            type=("docx",),
+            help=(
+                "Шаблон — только образец календарного плана организации, "
+                "DOCX, до 10 МБ."
+            ),
+        )
+
+    _render_normative_panel()
+
+    return utp_file, program_file, organization_template_file, academic_year
+
+
+def _render_normative_panel() -> None:
     normative_registry = get_builtin_normative_registry()
     registry_snapshot = normative_registry.current
-    with st.expander("Нормативная база"):
+    st.markdown('<div class="kp-normative">', unsafe_allow_html=True)
+    with st.expander("Нормативная база", expanded=False):
         st.caption(
-            "Нормативная база носит справочный характер и не меняет "
-            "календарь автоматически."
+            "Справочная информация; на календарь автоматически не влияет."
         )
         st.write(
             f"Версия: **{registry_snapshot.registry_version}** · действует с: "
@@ -475,20 +575,225 @@ def run_app() -> None:
                     CalendarRegistryReference(saved_version), normative_registry, choice
                 )
                 st.session_state["calendar_registry_version"] = reference.registry_version
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _value(value: object | None) -> str:
+    return str(value) if value is not None else "Не найдено"
+
+
+def _collect_analysis_warnings(
+    utp: UtpParseResult,
+    matches: tuple[ContentMatch, ...],
+    content_rows: tuple[CalendarContentRow, ...],
+    lessons: tuple[LessonContentRow, ...],
+) -> tuple[str, ...]:
+    collected: list[str] = list(utp.warnings)
+    for match in matches:
+        if match.ambiguous_candidates:
+            collected.append(
+                f"Неоднозначное соответствие для «{match.utp_position.title}»: "
+                + "; ".join(match.ambiguous_candidates)
+            )
+    collected.extend(warning for row in content_rows for warning in row.warnings)
+    collected.extend(warning for row in lessons for warning in row.warnings)
+    return tuple(dict.fromkeys(collected))
+
+
+def _render_teacher_analysis_screen(
+    *,
+    utp: UtpParseResult,
+    program: ProgramData | None,
+    schedule: ScheduleResult,
+    matches: tuple[ContentMatch, ...],
+    detail_warnings: tuple[str, ...],
+) -> None:
+    metadata = utp.metadata
+    totals = utp.table_totals
+    weeks = metadata.study_weeks or len(schedule.weeks)
+
+    st.markdown('<div class="kp-results">', unsafe_allow_html=True)
+    st.markdown('<p class="kp-results-title">Документы проверены</p>', unsafe_allow_html=True)
+    st.success("Данные успешно прочитаны. Можно формировать календарный план.")
+
+    program_name = metadata.program_name or (program.title if program else None)
+    study_year = metadata.study_year
+    student_age = metadata.student_age or (program.student_age if program else None)
+    summary_lines = [
+        f"<p><strong>Программа:</strong> {_value(program_name)}</p>",
+        f"<p><strong>Год обучения:</strong> {_value(study_year)}</p>",
+        f"<p><strong>Возраст:</strong> {_value(student_age)}</p>",
+        '<p class="kp-summary-label"><strong>Учебная нагрузка:</strong></p>',
+    ]
+    if totals:
+        summary_lines.extend(
+            [
+                f"<p>{weeks} недель</p>",
+                f"<p>{totals.total} часов</p>",
+                f"<p>{totals.theory} ч теория</p>",
+                f"<p>{totals.practice} ч практика</p>",
+            ]
+        )
+    else:
+        summary_lines.append(f"<p>{weeks} недель</p>")
+
+    st.markdown(
+        '<div class="kp-results-summary">' + "".join(summary_lines) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if program and matches:
+        matched = sum(
+            match.status is not MatchStatus.NOT_MATCHED for match in matches
+        )
+        total = len(matches)
+        if matched == total:
+            st.markdown(
+                '<div class="kp-results-status">',
+                unsafe_allow_html=True,
+            )
+            st.success(f"Все {total} тем найдены в программе")
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.warning(f"Найдено {matched} из {total} тем в программе")
+    elif program is None:
+        st.info("Образовательная программа не загружена.")
+
+    if totals:
+        st.markdown(
+            '<div class="kp-results-status">',
+            unsafe_allow_html=True,
+        )
+        st.success(
+            f"{totals.total} часа распределены на {len(schedule.weeks)} учебных недель."
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if detail_warnings:
+        st.info(
+            "Некоторые поля отсутствуют в исходных документах. "
+            "Приложение сможет дополнить их при формировании плана."
+        )
+        with st.expander("Подробнее"):
+            for warning in detail_warnings:
+                st.write(f"• {warning}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _store_analysis_context(
+    *,
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    template_selection: CalendarTemplateSelection,
+    academic_year: str,
+) -> None:
+    st.session_state["calendar_context"] = {
+        "validated_utp": validated_utp,
+        "validated_program": validated_program,
+        "template_selection": template_selection,
+        "academic_year": academic_year,
+    }
+
+
+def _show_generation_controls(
+    *,
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    template_selection: CalendarTemplateSelection,
+    academic_year: str,
+) -> None:
+    st.subheader("Формирование календарного плана")
+    ai_available = bool(os.getenv("OPENAI_API_KEY"))
+    use_ai = False
+    if validated_program is None:
+        st.info(
+            "Без образовательной программы календарь формируется с пустым "
+            "содержанием занятий; автоматическое дополнение недоступно."
+        )
+    elif ai_available:
+        use_ai = st.checkbox("Дополнить содержание с помощью ИИ")
+        st.caption(
+            "ИИ поможет сформулировать тип занятия, планируемый результат "
+            "и вид контроля. Даты, часы и темы он не изменяет."
+        )
+    else:
+        st.info(
+            "Автоматическое дополнение содержания сейчас недоступно. "
+            "Можно сформировать план на основе данных документов."
+        )
+
+    if st.button("Сформировать календарный план", type="primary", use_container_width=True):
+        utp = validated_utp.parsed
+        assert isinstance(utp, UtpParseResult)
+        program = None
+        if validated_program is not None:
+            program = validated_program.parsed
+            assert isinstance(program, ProgramData)
+
+        with TransientDocumentSession() as operation:
+            try:
+                result = run_calendar_pipeline(
+                    utp,
+                    program,
+                    academic_year=academic_year,
+                    template=template_selection,
+                    source_utp_name=validated_utp.filename,
+                    use_ai=use_ai,
+                )
+            except (PipelineError, ScheduleValidationError, ValueError, AIProviderError) as error:
+                st.error(f"Не удалось сформировать календарный план: {error}")
+                return
+
+            operation.publish_result(result.filename, result.content)
+            st.session_state["calendar_download"] = operation.take_result_for_download()
+            st.session_state["calendar_warnings"] = result.warnings
+            if result.ai_usage:
+                st.session_state["calendar_ai_usage"] = {
+                    "tokens": result.ai_usage.total_tokens,
+                    "cost": result.ai_usage.estimated_cost_usd,
+                }
+
+        st.success("Календарный план сформирован и прошёл QA.")
+        for warning in st.session_state.get("calendar_warnings", ()):
+            st.warning(warning)
+        usage = st.session_state.get("calendar_ai_usage")
+        if usage:
+            st.caption(
+                f"AI: {usage['tokens']} токенов, "
+                f"≈ ${usage['cost']:.4f}."
+            )
+
+    download = st.session_state.get("calendar_download")
+    if download is not None:
+        st.download_button(
+            "Скачать календарный план",
+            data=download.content,
+            file_name=download.filename,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+
+
+def run_app() -> None:
+    """Показать экран загрузки, анализа и формирования календарного плана."""
+    st.set_page_config(page_title="Календарь педагога", page_icon="📅", layout="centered")
+
+    utp_file, program_file, organization_template_file, academic_year = _render_upload_screen()
 
     if st.button("Проверить документы", type="primary", use_container_width=True):
-        if utp_file is None:
-            st.warning("Загрузите УТП.")
+        if program_file is None:
+            st.error("Загрузите программу обучения.")
             return
 
         with TransientDocumentSession() as uploads:
-            uploads.replace(UploadPurpose.UTP, utp_file.name, utp_file.getvalue())
-            if program_file is not None:
-                uploads.replace(
-                    UploadPurpose.PROGRAM,
-                    program_file.name,
-                    program_file.getvalue(),
-                )
+            uploads.replace(
+                UploadPurpose.PROGRAM,
+                program_file.name,
+                program_file.getvalue(),
+            )
+            if utp_file is not None:
+                uploads.replace(UploadPurpose.UTP, utp_file.name, utp_file.getvalue())
             if organization_template_file is not None:
                 uploads.replace(
                     UploadPurpose.CALENDAR_TEMPLATE,
@@ -496,21 +801,21 @@ def run_app() -> None:
                     organization_template_file.getvalue(),
                 )
             try:
-                transient_utp = uploads.get(UploadPurpose.UTP)
-                assert transient_utp is not None
-                validated_utp = validate_upload(
-                    UploadPurpose.UTP,
-                    transient_utp.filename,
-                    transient_utp.content,
-                )
                 transient_program = uploads.get(UploadPurpose.PROGRAM)
-                validated_program = (
+                assert transient_program is not None
+                validated_program = validate_upload(
+                    UploadPurpose.PROGRAM,
+                    transient_program.filename,
+                    transient_program.content,
+                )
+                transient_utp = uploads.get(UploadPurpose.UTP)
+                validated_utp_upload = (
                     validate_upload(
-                        UploadPurpose.PROGRAM,
-                        transient_program.filename,
-                        transient_program.content,
+                        UploadPurpose.UTP,
+                        transient_utp.filename,
+                        transient_utp.content,
                     )
-                    if transient_program is not None
+                    if transient_utp is not None
                     else None
                 )
                 transient_template = uploads.get(UploadPurpose.CALENDAR_TEMPLATE)
@@ -523,7 +828,11 @@ def run_app() -> None:
                     if transient_template is not None
                     else None
                 )
+                resolved_utp = resolve_utp(validated_utp_upload, validated_program)
             except UploadValidationError as error:
+                st.error(str(error))
+                return
+            except UtpResolutionError as error:
                 st.error(str(error))
                 return
 
@@ -536,48 +845,118 @@ def run_app() -> None:
                 )
             except OrganizationTemplateError:
                 st.error(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
-        st.success("Документы проверены и готовы к анализу.")
-        st.write(f"**УТП:** {validated_utp.filename}")
-        st.write(
-            f"**Образовательная программа:** "
-            f"{validated_program.filename if validated_program else 'не загружена'}"
+                return
+
+        validated_utp = ValidatedUpload(
+            UploadPurpose.UTP,
+            (
+                validated_utp_upload.filename
+                if validated_utp_upload is not None
+                else f"УТП из файла «{validated_program.filename}»"
+            ),
+            (
+                validated_utp_upload.content
+                if validated_utp_upload is not None
+                else validated_program.content
+            ),
+            resolved_utp,
         )
-        st.write(f"**Учебный год:** {academic_year}")
-        st.write(
-            "**Шаблон календарного плана:** "
-            + (
-                template_selection.filename or "шаблон организации"
-                if template_selection.uses_organization_template
-                else "стандартный шаблон приложения"
-            )
+        program = parse_program(
+            validated_program.content,
+            validated_program.filename,
+            study_year=infer_study_year_number(resolved_utp.metadata.study_year),
         )
-        st.caption(
-            f"Загрузки проверяются в памяти и не сохраняются на сервере. "
-            f"Лимит: {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ."
+        validated_program = ValidatedUpload(
+            validated_program.purpose,
+            validated_program.filename,
+            validated_program.content,
+            program,
         )
+        utp = resolved_utp
+
+        try:
+            build_schedule(utp, academic_year)
+        except (ScheduleValidationError, ValueError) as error:
+            st.error(f"Не удалось построить календарное распределение: {error}")
+            return
+
+        _store_analysis_context(
+            validated_utp=validated_utp,
+            validated_program=validated_program,
+            template_selection=template_selection,
+            academic_year=academic_year,
+        )
+        st.session_state["analysis_ready"] = True
+        st.session_state.pop("analysis_warnings", None)
+        st.session_state.pop("calendar_download", None)
+        st.session_state.pop("calendar_warnings", None)
+        st.session_state.pop("calendar_ai_usage", None)
+
+    if st.session_state.get("analysis_ready") and "calendar_context" in st.session_state:
+        context = st.session_state["calendar_context"]
+        validated_utp = context["validated_utp"]
+        validated_program = context["validated_program"]
+        template_selection = context["template_selection"]
+        academic_year = context["academic_year"]
+
         utp = validated_utp.parsed
         assert isinstance(utp, UtpParseResult)
-        _show_utp(utp)
         program = None
         if validated_program is not None:
             program = validated_program.parsed
             assert isinstance(program, ProgramData)
-            _show_program(program, utp)
+
         try:
-            schedule = _show_schedule(utp, academic_year)
-            content_rows = _show_content_sources(schedule, utp, program, utp_file.name)
-            _show_lesson_content(content_rows)
-            _store_analysis_context(
-                validated_utp=validated_utp,
-                validated_program=validated_program,
-                template_selection=template_selection,
-                academic_year=academic_year,
+            schedule = build_schedule(utp, academic_year)
+            content_rows = build_content_model(
+                schedule,
+                utp,
+                program,
+                validated_utp.filename,
             )
-            _show_generation_controls(
-                validated_utp=validated_utp,
-                validated_program=validated_program,
-                template_selection=template_selection,
-                academic_year=academic_year,
+            lessons = build_lesson_content(content_rows)
+            matches = (
+                tuple(match_utp_to_program(utp.topics, program.content_items))
+                if program is not None
+                else ()
             )
         except (ScheduleValidationError, ValueError) as error:
             st.error(f"Не удалось построить календарное распределение: {error}")
+            st.session_state["analysis_ready"] = False
+            return
+
+        detail_warnings = st.session_state.get("analysis_warnings")
+        if detail_warnings is None:
+            detail_warnings = _collect_analysis_warnings(
+                utp,
+                matches,
+                content_rows,
+                lessons,
+            )
+            st.session_state["analysis_warnings"] = detail_warnings
+
+        st.markdown(
+            '<p class="kp-results-note">Чтобы заменить документы, измените файлы '
+            "выше и нажмите «Проверить документы» снова.</p>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Заменить документы", key="replace_documents"):
+            _reset_analysis_state()
+            st.rerun()
+
+        if validated_utp.filename.startswith("УТП из файла"):
+            st.info("Учебно-тематический план найден внутри программы обучения.")
+
+        _render_teacher_analysis_screen(
+            utp=utp,
+            program=program,
+            schedule=schedule,
+            matches=matches,
+            detail_warnings=tuple(detail_warnings),
+        )
+        _show_generation_controls(
+            validated_utp=validated_utp,
+            validated_program=validated_program,
+            template_selection=template_selection,
+            academic_year=academic_year,
+        )

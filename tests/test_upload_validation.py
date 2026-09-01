@@ -34,7 +34,19 @@ def _normative_docx() -> bytes:
     return _docx(("ПРИКАЗ МИНИСТЕРСТВА", "Нормативный правовой акт"))
 
 
-def test_valid_utp_and_calendar_template_are_recognized() -> None:
+def test_calendar_plan_is_rejected_outside_template_slot() -> None:
+    source = REFERENCES / "Календарный план.docx"
+    with pytest.raises(UploadValidationError, match="формой календарного плана, а не УТП"):
+        validate_upload(UploadPurpose.UTP, source.name, source.read_bytes())
+    with pytest.raises(
+        UploadValidationError,
+        match="формой календарного плана, а не образовательной программой",
+    ):
+        validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
+    uploaded = validate_upload(
+        UploadPurpose.CALENDAR_TEMPLATE, source.name, source.read_bytes()
+    )
+    assert uploaded.purpose is UploadPurpose.CALENDAR_TEMPLATE
     utp = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     template = REFERENCES / "Календарный план Образец.docx"
     assert validate_upload(UploadPurpose.UTP, utp.name, utp.read_bytes()).parsed

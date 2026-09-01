@@ -46,6 +46,7 @@ class UtpMetadata:
     study_weeks: int | None = None
     teacher_name: str | None = None
     stated_schedule_hours: int | None = None
+    workload_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,103 @@ def _metadata(paragraphs: list[str]) -> UtpMetadata:
         teacher_name=_match(text, r"Педагог дополнительного образования:\s*([^\n]+)"),
         stated_schedule_hours=int(schedule_hours) if schedule_hours else None,
     )
+
+
+_CALENDAR_TABLE_MARKERS = (
+    "месяц",
+    "неделя",
+    "теоретические занятия",
+    "практические занятия",
+    "планируемый результат",
+    "вид контроля",
+)
+
+
+def _header_blob(table: object, rows: int = 3) -> str:
+    parts: list[str] = []
+    for row in table.rows[: min(rows, len(table.rows))]:
+        parts.extend(cell.text for cell in row.cells)
+    return " ".join(parts).casefold()
+
+
+def _is_calendar_table(table: object) -> bool:
+    blob = _header_blob(table)
+    return sum(marker in blob for marker in _CALENDAR_TABLE_MARKERS) >= 3
+
+
+def _utp_table_score(table: object) -> int:
+    if _is_calendar_table(table):
+        return -1
+    blob = _header_blob(table)
+    score = 0
+    if "час" in blob:
+        score += 3
+    if "тем" in blob or "раздел" in blob:
+        score += 2
+    if re.search(r"теор|лекц", blob):
+        score += 2
+    if "практик" in blob:
+        score += 2
+    if "всего" in blob:
+        score += 1
+    joined_rows = [" ".join(cell.text for cell in row.cells) for row in table.rows]
+    if any(re.search(r"\bитого\b", text, re.IGNORECASE) for text in joined_rows):
+        score += 5
+    columns = len(table.columns)
+    if columns in {4, 5, 6}:
+        score += 2
+    if columns >= 8:
+        score -= 4
+    return score
+
+
+def _parse_numbered_hours_rows(
+    rows: list[list[str]],
+    *,
+    label_idx: int,
+    title_idx: int,
+    hour_idxs: tuple[int, int, int],
+) -> tuple[list[Section], list[Topic], Hours | None]:
+    sections: list[Section] = []
+    topics: list[Topic] = []
+    totals: Hours | None = None
+    current_section: str | None = None
+    started = False
+    for raw_cells in rows:
+        cells = [_clean(cell) for cell in raw_cells]
+        if not any(cells):
+            continue
+        label = cells[label_idx] if label_idx < len(cells) else ""
+        title = cells[title_idx] if title_idx < len(cells) else ""
+        blob = " ".join(cells)
+        if re.search(r"\bитого\b", blob, re.IGNORECASE):
+            totals = Hours(*(_integer(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
+            continue
+        number, label_title = _number_and_title(label)
+        if number is None:
+            if started:
+                continue
+            continue
+        started = True
+        hours = Hours(*(_integer(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
+        if "." not in number:
+            section_title = label_title or _number_and_title(title)[1]
+            current_section = section_title
+            sections.append(Section(number, section_title, hours))
+        else:
+            topic_title = title
+            if topic_title == label or topic_title == f"{number}.":
+                fallback = cells[1] if len(cells) > 1 else title
+                topic_title = fallback
+            topics.append(
+                Topic(
+                    number,
+                    _number_and_title(topic_title)[1],
+                    hours,
+                    parent_section=current_section,
+                )
+            )
+    return sections, topics, totals
 
 
 def _parse_six_column_table(
@@ -199,18 +297,52 @@ def _parse_compact_table(
     return sections, topics, totals
 
 
-def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
-    """Разобрать УТП DOCX, не изменяя исходный файл."""
-    document = Document(BytesIO(source) if isinstance(source, bytes) else source)
-    if not document.tables:
-        raise ValueError("В УТП не найдена таблица с темами.")
-    rows = [[cell.text for cell in row.cells] for row in document.tables[0].rows]
-    if len(rows[0]) >= 6:
-        sections, topics, table_totals = _parse_six_column_table(rows)
-    elif len(rows[0]) >= 4:
-        sections, topics, table_totals = _parse_compact_table(document.tables[0])
-    else:
-        raise ValueError("Не удалось распознать структуру таблицы УТП.")
+def _looks_like_valid_utp(
+    sections: list[Section],
+    topics: list[Topic],
+    table_totals: Hours | None,
+) -> bool:
+    if not sections or not topics:
+        return False
+    titled = [
+        topic
+        for topic in topics
+        if topic.title and topic.title.casefold() not in {"тема", "№ п/п", "№ пп"}
+    ]
+    if len(titled) < 3:
+        return False
+    if table_totals is not None and table_totals.total > 0:
+        return True
+    return any(topic.hours.total > 0 for topic in titled)
+
+
+def _parse_table_structure(
+    table: object,
+) -> tuple[list[Section], list[Topic], Hours | None]:
+    rows = [[cell.text for cell in row.cells] for row in table.rows]
+    if not rows:
+        raise ValueError("Пустая таблица УТП.")
+    width = len(rows[0])
+    if width >= 6:
+        return _parse_six_column_table(rows)
+    if width == 5:
+        return _parse_numbered_hours_rows(
+            rows,
+            label_idx=0,
+            title_idx=1,
+            hour_idxs=(2, 3, 4),
+        )
+    if width >= 4:
+        return _parse_compact_table(table)
+    raise ValueError("Не удалось распознать структуру таблицы УТП.")
+
+
+def _finalize_utp_parse(
+    document,
+    sections: list[Section],
+    topics: list[Topic],
+    table_totals: Hours | None,
+) -> UtpParseResult:
     for section in sections:
         if not any(topic.parent_section == section.title for topic in topics):
             topics.append(
@@ -237,3 +369,29 @@ def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
         table_totals=result.table_totals,
         warnings=tuple(validate_utp(result)),
     )
+
+
+def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
+    """Разобрать УТП DOCX, не изменяя исходный файл."""
+    document = Document(BytesIO(source) if isinstance(source, bytes) else source)
+    if not document.tables:
+        raise ValueError("В УТП не найдена таблица с темами.")
+    ranked = sorted(
+        document.tables,
+        key=_utp_table_score,
+        reverse=True,
+    )
+    last_error: Exception | None = None
+    for table in ranked:
+        if _utp_table_score(table) < 0:
+            continue
+        try:
+            sections, topics, table_totals = _parse_table_structure(table)
+        except (ValueError, IndexError) as error:
+            last_error = error
+            continue
+        if _looks_like_valid_utp(sections, topics, table_totals):
+            return _finalize_utp_parse(document, sections, topics, table_totals)
+    if last_error is not None:
+        raise ValueError("Не удалось распознать структуру таблицы УТП.") from last_error
+    raise ValueError("В документе не найдена таблица УТП с темами и часами.")

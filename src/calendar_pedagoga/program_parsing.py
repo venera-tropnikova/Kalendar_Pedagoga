@@ -140,15 +140,50 @@ def _is_bold_heading(paragraph) -> bool:
     return bool(runs) and all(run.bold is True for run in runs)
 
 
-def _content_items(document, study_year: int) -> tuple[ProgramContentItem, ...]:
-    paragraphs = document.paragraphs
-    start = next(
+def _find_content_start(paragraphs, study_year: int | None) -> int | None:
+    texts = [_clean(paragraph.text) for paragraph in paragraphs]
+    if study_year is not None:
+        specific = next(
+            (
+                index
+                for index, text in enumerate(texts)
+                if re.search(
+                    rf"содержание\s+программы\s+{study_year}-го\s+года\s+обучения",
+                    text,
+                    re.I,
+                )
+            ),
+            None,
+        )
+        if specific is not None:
+            return specific
+    numbered = next(
         (
-            index for index, paragraph in enumerate(paragraphs)
-            if re.search(rf"содержание\s+программы\s+{study_year}-го\s+года\s+обучения", _clean(paragraph.text), re.I)
+            index
+            for index, text in enumerate(texts)
+            if re.search(
+                r"содержание\s+программы\s+\d+-го\s+года\s+обучения",
+                text,
+                re.I,
+            )
         ),
         None,
     )
+    if numbered is not None:
+        return numbered
+    return next(
+        (
+            index
+            for index, text in enumerate(texts)
+            if re.search(r"содержание\s+программы", text, re.I)
+        ),
+        None,
+    )
+
+
+def _content_items(document, study_year: int | None = None) -> tuple[ProgramContentItem, ...]:
+    paragraphs = document.paragraphs
+    start = _find_content_start(paragraphs, study_year)
     if start is None:
         return ()
     items: list[ProgramContentItem] = []
@@ -172,7 +207,11 @@ def _content_items(document, study_year: int) -> tuple[ProgramContentItem, ...]:
         text = _clean(paragraph.text)
         if not text:
             continue
+        if re.search(r"^\(\d+-й\s+год\s+обучения\)", text, re.I):
+            continue
         if re.search(r"по окончани[юя].*года обучения", text, re.I):
+            break
+        if re.search(r"^(?:ожидаемые|планируемые)\s+результаты", text, re.I):
             break
         number, title = _number_title(text)
         if _is_bold_heading(paragraph):
@@ -190,7 +229,7 @@ def _content_items(document, study_year: int) -> tuple[ProgramContentItem, ...]:
     return tuple(items)
 
 
-def parse_program_docx(data: bytes, study_year: int = 2) -> ProgramData:
+def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramData:
     """Извлечь только явно присутствующие формулировки из DOCX."""
     document = Document(BytesIO(data))
     paragraphs = [_clean(p.text) for p in document.paragraphs if _clean(p.text)]
@@ -239,11 +278,32 @@ def parse_program_docx(data: bytes, study_year: int = 2) -> ProgramData:
     )
 
 
-def parse_program(data: bytes, filename: str) -> ProgramData:
+def infer_study_year_number(value: str | None) -> int | None:
+    """Преобразовать «второй», «2 год» и т.п. в номер года обучения."""
+    if not value:
+        return None
+    text = value.casefold()
+    for token, number in (
+        ("перв", 1),
+        ("втор", 2),
+        ("трет", 3),
+        ("четв", 4),
+    ):
+        if token in text:
+            return number
+    found = re.search(r"\d+", value)
+    return int(found.group()) if found else None
+
+
+def parse_program(
+    data: bytes,
+    filename: str,
+    study_year: int | None = None,
+) -> ProgramData:
     """Разобрать загруженную программу с безопасной обработкой расширения."""
     suffix = Path(filename).suffix.lower()
     if suffix == ".doc":
-        return parse_program_docx(convert_legacy_doc(data))
+        return parse_program_docx(convert_legacy_doc(data), study_year=study_year)
     if suffix == ".docx":
-        return parse_program_docx(data)
+        return parse_program_docx(data, study_year=study_year)
     raise ValueError("Поддерживаются только файлы DOC и DOCX.")

@@ -12,8 +12,10 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
+from calendar_pedagoga.lesson_display import format_practice_cell, format_theory_cell
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
+from calendar_pedagoga.content_generation import WeekTopicPart
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -69,36 +71,6 @@ def _topic_display_numbers(utp: UtpParseResult) -> dict[tuple[str | None, str, s
     return numbers
 
 
-def _first_snippet(text: str, limit: int = 90) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if not cleaned:
-        return ""
-    for delimiter in (". ", "; ", "? ", "! "):
-        if delimiter in cleaned:
-            part = cleaned.split(delimiter, 1)[0].strip()
-            if part:
-                cleaned = part + delimiter.strip()
-                break
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[: limit - 1].rstrip() + "…"
-
-
-def _format_topic_cell(
-    display_number: str,
-    topic_title: str,
-    content_text: str,
-    hours: int,
-) -> str:
-    if hours <= 0:
-        return ""
-    label = f"{display_number}. {topic_title}"
-    snippet = _first_snippet(content_text)
-    if snippet and snippet.casefold() not in label.casefold():
-        label = f"{label}. {snippet}"
-    return f"{label} ({hours})"
-
-
 def _subtitle_line(utp: UtpParseResult) -> str:
     metadata = utp.metadata
     program = metadata.program_name or "название программы"
@@ -112,8 +84,16 @@ def _subtitle_line(utp: UtpParseResult) -> str:
     return f"«{program}» {study_year} {weekly_part}"
 
 
+def _enable_cell_wrap(cell) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    no_wrap = tc_pr.find(qn("w:noWrap"))
+    if no_wrap is not None:
+        tc_pr.remove(no_wrap)
+
+
 def _set_cell_text(cell, value: str) -> None:
     cell.text = value
+    _enable_cell_wrap(cell)
 
 
 def _write_row(
@@ -142,6 +122,54 @@ def _write_row(
         _set_cell_text(cells[columns.lesson_type_mirror], lesson_type)
     if columns.planned_result_mirror is not None:
         _set_cell_text(cells[columns.planned_result_mirror], planned_result)
+
+
+def _week_topic_parts(source_row) -> tuple[WeekTopicPart, ...]:
+    if source_row.week_parts:
+        return source_row.week_parts
+    return (
+        WeekTopicPart(
+            topic_number=source_row.topic_number,
+            topic_title=source_row.topic_title,
+            section=source_row.section,
+            theory_hours=source_row.theory_hours,
+            practice_hours=source_row.practice_hours,
+            match_status=source_row.match_status,
+            program_section=source_row.program_section,
+            program_topic=source_row.program_topic,
+            program_content_full=source_row.program_content_full,
+            warnings=source_row.warnings,
+        ),
+    )
+
+
+def _topic_cells_for_lesson(
+    lesson: ResolvedLessonRow,
+    display_numbers: dict[tuple[str | None, str, str], str],
+) -> tuple[str, str]:
+    source_row = lesson.source.source
+    theory_lines: list[str] = []
+    practice_lines: list[str] = []
+    for part in _week_topic_parts(source_row):
+        key = (part.topic_number, part.topic_title, part.section)
+        display_number = display_numbers.get(key, part.topic_number or "?")
+        theory_cell = format_theory_cell(
+            display_number,
+            part.topic_title,
+            part.program_content_full,
+            part.theory_hours,
+        )
+        practice_cell = format_practice_cell(
+            display_number,
+            part.topic_title,
+            part.program_content_full,
+            part.practice_hours,
+        )
+        if theory_cell:
+            theory_lines.append(theory_cell)
+        if practice_cell:
+            practice_lines.append(practice_cell)
+    return "\n".join(theory_lines), "\n".join(practice_lines)
 
 
 def _load_template(template: CalendarTemplateSelection) -> Document:
@@ -191,21 +219,8 @@ def generate_calendar_docx(
     _ensure_data_rows(table, len(rows))
 
     for index, lesson in enumerate(rows):
+        theory_cell, practice_cell = _topic_cells_for_lesson(lesson, display_numbers)
         source = lesson.source.source
-        key = (source.topic_number, source.topic_title, source.section)
-        display_number = display_numbers.get(key, source.topic_number or "?")
-        theory_cell = _format_topic_cell(
-            display_number,
-            source.topic_title,
-            lesson.theory_text,
-            source.theory_hours,
-        )
-        practice_cell = _format_topic_cell(
-            display_number,
-            source.topic_title,
-            lesson.practice_text,
-            source.practice_hours,
-        )
         _write_row(
             table.rows[index + 2],
             columns,

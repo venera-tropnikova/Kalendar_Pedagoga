@@ -110,9 +110,38 @@ def _reject_normative(text: str, filename: str) -> None:
         )
 
 
+def _looks_like_calendar_form(text: str) -> bool:
+    markers = (
+        "календарный план",
+        "теоретические занятия",
+        "практические занятия",
+        "тип занятия",
+        "планируемый результат",
+        "вид контроля",
+    )
+    return sum(marker in text for marker in markers) >= 3
+
+
+def _reject_calendar_in_wrong_slot(text: str, filename: str, purpose: UploadPurpose) -> None:
+    if purpose is UploadPurpose.CALENDAR_TEMPLATE:
+        return
+    if not _looks_like_calendar_form(text):
+        return
+    expected = (
+        "УТП"
+        if purpose is UploadPurpose.UTP
+        else "образовательной программой"
+    )
+    raise UploadValidationError(
+        f"Неправильный тип документа: файл «{filename}» является формой "
+        f"календарного плана, а не {expected}."
+    )
+
+
 def _validate_utp(filename: str, data: bytes) -> UtpParseResult:
     text = _docx_text(data)
     _reject_normative(text, filename)
+    _reject_calendar_in_wrong_slot(text, filename, UploadPurpose.UTP)
     try:
         result = parse_utp(data)
     except Exception as error:
@@ -128,7 +157,9 @@ def _validate_utp(filename: str, data: bytes) -> UtpParseResult:
 
 def _validate_program(filename: str, data: bytes) -> ProgramData:
     if Path(filename).suffix.lower() == ".docx":
-        _reject_normative(_docx_text(data), filename)
+        text = _docx_text(data)
+        _reject_normative(text, filename)
+        _reject_calendar_in_wrong_slot(text, filename, UploadPurpose.PROGRAM)
     try:
         result = parse_program(data, filename)
     except UploadValidationError:
@@ -148,15 +179,7 @@ def _validate_program(filename: str, data: bytes) -> ProgramData:
 def _validate_calendar_template(filename: str, data: bytes) -> None:
     text = _docx_text(data)
     _reject_normative(text, filename)
-    markers = (
-        "календарный план",
-        "теоретические занятия",
-        "практические занятия",
-        "тип занятия",
-        "планируемый результат",
-        "вид контроля",
-    )
-    if sum(marker in text for marker in markers) < 3:
+    if not _looks_like_calendar_form(text):
         raise UploadValidationError(
             f"Неправильный тип документа: файл «{filename}» не распознан как форма календарного плана — "
             "не найдены ожидаемые колонки календаря."

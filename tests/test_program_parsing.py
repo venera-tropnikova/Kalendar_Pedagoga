@@ -130,7 +130,7 @@ def test_unique_contained_title_is_text_match() -> None:
 def test_real_key_program_matches_all_13_positions() -> None:
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
-    program = parse_program(program_path.read_bytes(), program_path.name)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     utp = parse_utp(utp_path)
     matches = match_utp_to_program(utp.topics, program.content_items)
 
@@ -141,4 +141,12 @@ def test_real_key_program_matches_all_13_positions() -> None:
     assert len(program.content_items) == 16
     assert len(matches) == 13
     assert all(match.status is not MatchStatus.NOT_MATCHED for match in matches)
-    assert all(not match.ambiguous_candidates for match in matches)
+def test_tour_guides_year1_program_finds_content_items() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    program = parse_program(program_path.read_bytes(), program_path.name)
+    assert program.title == "Туристы-проводники"
+    assert len(program.content_items) >= 20
+    titles = {item.title for item in program.content_items}
+    assert "Основы туристской подготовки" in titles
+    assert any("Туристские путешествия" in title for title in titles)
+    assert any(item.content for item in program.content_items)

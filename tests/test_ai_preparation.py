@@ -17,7 +17,7 @@ def _key_requests():
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
     utp = parse_utp(utp_path)
-    program = parse_program(program_path.read_bytes(), program_path.name)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     content = build_content_model(build_schedule(utp), utp, program, utp_path.name)
     return prepare_ai_requests(
         build_lesson_content(content),

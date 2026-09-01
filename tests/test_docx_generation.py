@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 from functools import lru_cache
 
+import pytest
 from calendar_pedagoga.docx_generation import (
     STANDARD_TEMPLATE_PATH,
     build_output_filename,
@@ -26,7 +27,7 @@ def _key_docx() -> bytes:
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
     utp = parse_utp(utp_path)
-    program = parse_program(program_path.read_bytes(), program_path.name)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     content = build_content_model(build_schedule(utp), utp, program, utp_path.name)
     resolved = resolve_lesson_content(build_lesson_content(content))
     return generate_calendar_docx(
@@ -115,3 +116,33 @@ def test_visual_qa_checks_all_data_rows_have_week_and_month() -> None:
         assert row.cells[0].text.strip(), f"month missing row {index}"
         assert row.cells[1].text.strip(), f"week missing row {index}"
         assert str(index) in row.cells[1].text.splitlines()[0]
+
+
+def test_key_docx_does_not_truncate_source_with_ellipsis() -> None:
+    document = Document(BytesIO(_key_docx()))
+    table = document.tables[0]
+    week3 = table.rows[4].cells[2].text  # week 3 theory
+    week7 = table.rows[8].cells[4].text  # week 7 practice
+    week16 = table.rows[17].cells[4].text  # week 16 practice
+    for text in (week3, week7, week16):
+        assert "…" not in text
+        assert "..." not in text
+    assert "строительства города" in week3
+    assert "Праздник курая" in week7
+    assert "Найди середину" in week16
+    assert "Мой город" in week3
+    assert "История родного края" in week7
+    assert "Ориентирование" in week16
+
+
+def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
+    document = Document(BytesIO(_key_docx()))
+    data_rows = document.tables[0].rows[2:]
+    assert len(data_rows) == 36
+    for index, row in enumerate(data_rows, start=1):
+        cells = [cell.text.strip() for cell in row.cells]
+        assert cells[5], f"lesson type empty week {index}"
+        assert cells[6], f"planned result empty week {index}"
+        assert cells[7], f"assessment empty week {index}"
+        assert cells[6].startswith("Учащийся сможет")
+        assert cells[3] == ""
