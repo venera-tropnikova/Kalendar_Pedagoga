@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from io import BytesIO
+import json
 from pathlib import Path
 import re
 import shutil
@@ -259,6 +260,104 @@ def _png_ink_ratio_fallback(path: Path) -> float:
     return 0.05 if path.stat().st_size >= _MIN_PAGE_FILE_BYTES else 0.0
 
 
+def _save_libreoffice_failure(
+    temp_path: Path,
+    command: list[str],
+    *,
+    return_code: int | None,
+    stdout: str | None,
+    stderr: str | None,
+) -> Path:
+    diagnostics_path = temp_path / "libreoffice_failure.json"
+    diagnostics_path.write_text(
+        json.dumps(
+            {
+                "command": command,
+                "return_code": return_code,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "temp_directory": str(temp_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return diagnostics_path
+
+
+def _run_soffice(
+    soffice: Path,
+    arguments: list[str],
+    temp_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    profile = Path(tempfile.mkdtemp(prefix="lo_profile_", dir=temp_path))
+    command = [
+        str(soffice),
+        "--headless",
+        "--norestore",
+        f"-env:UserInstallation={profile.as_uri()}",
+        *arguments,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        diagnostics = _save_libreoffice_failure(
+            temp_path,
+            command,
+            return_code=None,
+            stdout=error.stdout,
+            stderr=error.stderr,
+        )
+        raise RuntimeError(
+            f"LibreOffice convert timed out; diagnostics and temp files: {diagnostics}"
+        ) from error
+    except OSError as error:
+        diagnostics = _save_libreoffice_failure(
+            temp_path,
+            command,
+            return_code=None,
+            stdout=None,
+            stderr=str(error),
+        )
+        raise RuntimeError(
+            f"LibreOffice could not start; diagnostics and temp files: {diagnostics}"
+        ) from error
+
+    if result.returncode != 0:
+        diagnostics = _save_libreoffice_failure(
+            temp_path,
+            command,
+            return_code=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        raise RuntimeError(
+            f"LibreOffice convert failed; diagnostics and temp files: {diagnostics}"
+        )
+    return result
+
+
+def _raise_missing_libreoffice_output(
+    temp_path: Path,
+    result: subprocess.CompletedProcess[str],
+    message: str,
+) -> None:
+    diagnostics = _save_libreoffice_failure(
+        temp_path,
+        list(result.args),
+        return_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+    raise RuntimeError(f"{message}; diagnostics and temp files: {diagnostics}")
+
+
 def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
     """Отрендерить все страницы DOCX в PNG через LibreOffice (DOCX→PDF→PNG)."""
 
@@ -267,36 +366,33 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
         raise RuntimeError("LibreOffice не найден для visual QA.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="calendar_pedagoga_qa_") as temp_name:
-        temp_path = Path(temp_name)
+    temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_qa_"))
+    succeeded = False
+    try:
         docx_path = temp_path / "calendar.docx"
         docx_path.write_bytes(content)
         pdf_dir = temp_path / "pdf_full"
         pdf_dir.mkdir()
 
-        result = subprocess.run(
+        pdf_result = _run_soffice(
+            soffice,
             [
-                str(soffice),
-                "--headless",
-                "--norestore",
                 "--convert-to",
                 "pdf",
                 "--outdir",
                 str(pdf_dir),
                 str(docx_path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=180,
+            temp_path,
         )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"LibreOffice PDF convert failed: {result.stderr or result.stdout}"
-            )
 
         pdfs = sorted(pdf_dir.glob("*.pdf"))
         if not pdfs:
-            raise RuntimeError("LibreOffice не создал PDF для visual QA.")
+            _raise_missing_libreoffice_output(
+                temp_path,
+                pdf_result,
+                "LibreOffice не создал PDF для visual QA",
+            )
         page_count = _pdf_page_count(pdfs[0])
         if page_count <= 0:
             raise RuntimeError("Не удалось определить число страниц PDF.")
@@ -311,55 +407,51 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
                 "pdf:writer_pdf_Export:"
                 f'{{"PageRange":{{"type":"string","value":"{page_number}"}}}}'
             )
-            page_pdf = subprocess.run(
+            page_pdf_result = _run_soffice(
+                soffice,
                 [
-                    str(soffice),
-                    "--headless",
-                    "--norestore",
                     "--convert-to",
                     page_filter,
                     "--outdir",
                     str(page_pdf_dir),
                     str(docx_path),
                 ],
-                capture_output=True,
-                text=True,
-                timeout=180,
+                temp_path,
             )
-            if page_pdf.returncode != 0:
-                raise RuntimeError(
-                    f"LibreOffice page PDF export failed for page {page_number}."
-                )
             single_pdfs = sorted(page_pdf_dir.glob("*.pdf"))
             if not single_pdfs:
-                raise RuntimeError(f"LibreOffice не создал PDF для страницы {page_number}.")
+                _raise_missing_libreoffice_output(
+                    temp_path,
+                    page_pdf_result,
+                    f"LibreOffice не создал PDF для страницы {page_number}",
+                )
 
-            page_png = subprocess.run(
+            page_png_result = _run_soffice(
+                soffice,
                 [
-                    str(soffice),
-                    "--headless",
-                    "--norestore",
                     "--convert-to",
                     "png",
                     "--outdir",
                     str(page_png_dir),
                     str(single_pdfs[0]),
                 ],
-                capture_output=True,
-                text=True,
-                timeout=180,
+                temp_path,
             )
-            if page_png.returncode != 0:
-                raise RuntimeError(
-                    f"LibreOffice PNG convert failed for page {page_number}."
-                )
             pngs = sorted(page_png_dir.glob("*.png"))
             if not pngs:
-                raise RuntimeError(f"LibreOffice не создал PNG для страницы {page_number}.")
+                _raise_missing_libreoffice_output(
+                    temp_path,
+                    page_png_result,
+                    f"LibreOffice не создал PNG для страницы {page_number}",
+                )
             target = output_dir / f"page_{page_number:02d}.png"
             shutil.copy2(pngs[0], target)
             copied.append(target)
+        succeeded = True
         return tuple(copied)
+    finally:
+        if succeeded:
+            shutil.rmtree(temp_path)
 
 
 def analyze_visual_pages(png_paths: tuple[Path, ...]) -> tuple[VisualPageReport, ...]:
