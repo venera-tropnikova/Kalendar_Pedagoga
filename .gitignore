@@ -14,3 +14,7 @@ dist/
 build/
 *.egg-info/
 
+# Project archive and generated calendar QA outputs
+Kalendar_Pedagoga.zip
+references/Календарный_план_*.docx
+
