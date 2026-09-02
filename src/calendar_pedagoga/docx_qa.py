@@ -14,8 +14,168 @@ import subprocess
 import tempfile
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from calendar_pedagoga.program_parsing import find_libreoffice
+
+_WD_ACTIVE_END_PAGE_NUMBER = 3
+_WD_EXPORT_FORMAT_PDF = 17
+_WD_ALERTS_NONE = 0
+
+
+def find_microsoft_word() -> bool:
+    """Проверить, доступен ли Microsoft Word через COM."""
+
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return False
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+    except Exception:
+        return False
+    try:
+        word.Quit()
+    except Exception:
+        pass
+    return True
+
+
+def _run_with_word_document(content: bytes, callback):
+    """Открыть DOCX в Microsoft Word и выполнить callback(word, doc)."""
+
+    import pythoncom
+    import win32com.client
+
+    temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_word_"))
+    docx_path = temp_path / "calendar.docx"
+    docx_path.write_bytes(content)
+    pythoncom.CoInitialize()
+    word = None
+    document = None
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = _WD_ALERTS_NONE
+        document = word.Documents.Open(
+            str(docx_path),
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Visible=False,
+        )
+        return callback(word, document)
+    finally:
+        if document is not None:
+            try:
+                document.Close(SaveChanges=False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        shutil.rmtree(temp_path, ignore_errors=True)
+
+
+def _detect_data_row_indices_by_page_word(
+    content: bytes,
+    *,
+    total_rows: int,
+) -> tuple[tuple[int, ...], ...] | None:
+    """Определить строки данных по страницам через пагинацию Microsoft Word."""
+
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return None
+
+    def _collect(_word, document) -> tuple[tuple[int, ...], ...] | None:
+        if document.Tables.Count < 1:
+            return None
+        table = document.Tables(1)
+        pages: dict[int, list[int]] = {}
+        for data_index in range(total_rows):
+            row_number = data_index + 3  # две строки заголовка
+            if row_number > table.Rows.Count:
+                break
+            # Колонка недели: не зависит от вертикального merge месяца.
+            cell = table.Cell(row_number, 2)
+            page_number = int(cell.Range.Information(_WD_ACTIVE_END_PAGE_NUMBER))
+            pages.setdefault(page_number, []).append(data_index)
+        if not pages:
+            return None
+        return tuple(tuple(pages[page]) for page in sorted(pages))
+
+    try:
+        return _run_with_word_document(content, _collect)
+    except Exception:
+        return None
+
+
+def _docx_to_pdf_bytes_word(content: bytes) -> bytes | None:
+    """Сконвертировать DOCX в PDF через Microsoft Word (пагинация как в Word)."""
+
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return None
+
+    temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_word_pdf_"))
+    docx_path = temp_path / "calendar.docx"
+    pdf_path = temp_path / "calendar.pdf"
+    docx_path.write_bytes(content)
+
+    import pythoncom
+    import win32com.client
+
+    pythoncom.CoInitialize()
+    word = None
+    document = None
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = _WD_ALERTS_NONE
+        document = word.Documents.Open(
+            str(docx_path),
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Visible=False,
+        )
+        document.ExportAsFixedFormat(
+            OutputFileName=str(pdf_path),
+            ExportFormat=_WD_EXPORT_FORMAT_PDF,
+            OpenAfterExport=False,
+            OptimizeFor=0,
+            BitmapMissingFonts=True,
+            DocStructureTags=True,
+            CreateBookmarks=0,
+        )
+        if not pdf_path.is_file():
+            return None
+        return pdf_path.read_bytes()
+    except Exception:
+        return None
+    finally:
+        if document is not None:
+            try:
+                document.Close(SaveChanges=False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        shutil.rmtree(temp_path, ignore_errors=True)
 
 
 class QASeverity(StrEnum):
@@ -52,6 +212,17 @@ _REQUIRED_HEADER_MARKERS = (
 _MIN_PAGE_FILE_BYTES = 8_000
 _MIN_INK_RATIO = 0.01
 _MIN_PAGE_DIMENSION = 400
+
+
+def _month_cell_is_continuation(cell) -> bool:
+    """Пустая ячейка месяца допустима как продолжение w:vMerge."""
+    tc_pr = cell._tc.tcPr
+    if tc_pr is None:
+        return False
+    merge = tc_pr.find(qn("w:vMerge"))
+    if merge is None:
+        return False
+    return merge.get(qn("w:val")) != "restart"
 
 
 def validate_calendar_docx(
@@ -166,7 +337,7 @@ def validate_calendar_docx(
 
         month = cells[0].text.strip()
         week_cell = cells[1].text.strip()
-        if not month:
+        if not month and not _month_cell_is_continuation(cells[0]):
             issues.append(
                 QAIssue(QASeverity.ERROR, f"Строка {index + 2}: пустой месяц.")
             )
@@ -358,14 +529,248 @@ def _raise_missing_libreoffice_output(
     raise RuntimeError(f"{message}; diagnostics and temp files: {diagnostics}")
 
 
-def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
-    """Отрендерить все страницы DOCX в PNG через LibreOffice (DOCX→PDF→PNG)."""
+def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
+    """Сконвертировать DOCX в PDF: сначала Word (эталон), иначе LibreOffice."""
+
+    word_pdf = _docx_to_pdf_bytes_word(content)
+    if word_pdf is not None:
+        return word_pdf
 
     soffice = find_libreoffice()
     if soffice is None:
-        raise RuntimeError("LibreOffice не найден для visual QA.")
+        return None
+
+    temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_pdf_"))
+    try:
+        docx_path = temp_path / "calendar.docx"
+        docx_path.write_bytes(content)
+        pdf_dir = temp_path / "pdf"
+        pdf_dir.mkdir()
+        _run_soffice(
+            soffice,
+            [
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(pdf_dir),
+                str(docx_path),
+            ],
+            temp_path,
+        )
+        pdfs = sorted(pdf_dir.glob("*.pdf"))
+        if not pdfs:
+            return None
+        return pdfs[0].read_bytes()
+    finally:
+        shutil.rmtree(temp_path, ignore_errors=True)
+
+
+def detect_data_row_indices_by_page(
+    content: bytes,
+    *,
+    total_rows: int,
+) -> tuple[tuple[int, ...], ...] | None:
+    """Определить индексы строк данных (0-based) на каждой странице.
+
+    Эталон — пагинация Microsoft Word. LibreOffice/PDF используется только
+    как запасной вариант, если Word COM недоступен.
+    """
+
+    word_pages = _detect_data_row_indices_by_page_word(content, total_rows=total_rows)
+    if word_pages is not None:
+        return word_pages
+
+    pdf_bytes = _docx_to_pdf_bytes(content)
+    if pdf_bytes is None:
+        return None
+
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+
+    document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        rows_by_page: list[tuple[int, ...]] = []
+        for page in document:
+            page_height = page.rect.height
+            week_positions: list[tuple[int, float]] = []
+            for x0, y0, _x1, _y1, text, *_rest in page.get_text("words"):
+                if y0 > page_height - 45:
+                    continue
+                if re.fullmatch(r"\d{1,2}", text):
+                    week_number = int(text)
+                    if 1 <= week_number <= total_rows:
+                        week_positions.append((week_number, y0))
+            week_positions.sort(key=lambda item: item[1])
+            rows_by_page.append(
+                tuple(week_number - 1 for week_number, _y in week_positions)
+            )
+        return tuple(rows_by_page)
+    finally:
+        document.close()
+
+
+def _month_words_on_page(page, month: str) -> list[tuple[float, float, str]]:
+    import pymupdf
+
+    assert isinstance(page, pymupdf.Page)
+    tokens: list[tuple[float, float, str]] = []
+    for x0, y0, _x1, _y1, text, *_rest in page.get_text("words"):
+        cleaned = text.strip()
+        if cleaned:
+            tokens.append((x0, y0, cleaned))
+    month_lower = month.casefold()
+    return [
+        token
+        for token in tokens
+        if month_lower in token[2].casefold() or token[2].casefold() in month_lower
+    ]
+
+
+def verify_month_labels_by_page(
+    content: bytes,
+    *,
+    months: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Проверить, что месяц виден у начала каждого месячного блока на каждой странице PDF."""
+
+    rows_by_page = detect_data_row_indices_by_page(content, total_rows=len(months))
+    pdf_bytes = _docx_to_pdf_bytes(content)
+    if rows_by_page is None or pdf_bytes is None:
+        return ("Не удалось проверить подписи месяцев: PDF/pymupdf недоступны.",)
+
+    try:
+        import pymupdf
+    except ImportError:
+        return ("Не удалось проверить подписи месяцев: pymupdf недоступен.",)
+
+    issues: list[str] = []
+    document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for page_number, page_rows in enumerate(rows_by_page, start=1):
+            if not page_rows:
+                continue
+            page = document[page_number - 1]
+            page_height = page.rect.height
+            week_positions: dict[int, float] = {}
+            for x0, y0, _x1, _y1, text, *_rest in page.get_text("words"):
+                if y0 > page_height - 45:
+                    continue
+                if re.fullmatch(r"\d{1,2}", text):
+                    week_number = int(text)
+                    if week_number - 1 in page_rows:
+                        week_positions.setdefault(week_number - 1, y0)
+
+            group_start = page_rows[0]
+            for index in range(1, len(page_rows)):
+                row_index = page_rows[index]
+                if months[row_index] != months[group_start]:
+                    issues.extend(
+                        _month_label_issues_for_segment(
+                            page_number=page_number,
+                            page=page,
+                            months=months,
+                            group_start=group_start,
+                            group_end=page_rows[index - 1],
+                            week_positions=week_positions,
+                        )
+                    )
+                    group_start = row_index
+            issues.extend(
+                _month_label_issues_for_segment(
+                    page_number=page_number,
+                    page=page,
+                    months=months,
+                    group_start=group_start,
+                    group_end=page_rows[-1],
+                    week_positions=week_positions,
+                )
+            )
+    finally:
+        document.close()
+    return tuple(issues)
+
+
+def _month_label_issues_for_segment(
+    *,
+    page_number: int,
+    page,
+    months: tuple[str, ...],
+    group_start: int,
+    group_end: int,
+    week_positions: dict[int, float],
+) -> list[str]:
+    month = months[group_start]
+    segment_week_positions = [
+        week_positions[row_index]
+        for row_index in range(group_start, group_end + 1)
+        if row_index in week_positions
+    ]
+    if not segment_week_positions:
+        return [
+            f"Страница {page_number}: не найдены недели "
+            f"{group_start + 1}–{group_end + 1} для проверки месяца «{month}»."
+        ]
+
+    month_hits = _month_words_on_page(page, month)
+    min_y = min(segment_week_positions)
+    max_y = max(segment_week_positions)
+    nearby_hits = [
+        hit for hit in month_hits if hit[0] <= 120 and min_y - 20 <= hit[1] <= max_y + 20
+    ]
+    if not nearby_hits:
+        return [
+            f"Страница {page_number}: у недели {group_start + 1} не видна подпись "
+            f"месяца «{month}» (блок до недели {group_end + 1})."
+        ]
+
+    # Подпись должна быть внутри сегмента и ближе к его вертикальному центру,
+    # а не у первой/последней строки блока.
+    segment_height = max(max_y - min_y, 1.0)
+    mid_y = (min_y + max_y) / 2
+    label_y = sum(hit[1] for hit in nearby_hits) / len(nearby_hits)
+    if abs(label_y - mid_y) > segment_height * 0.4 and segment_height > 40:
+        return [
+            f"Страница {page_number}: подпись «{month}» (y={label_y:.1f}) "
+            f"не по центру блока недель {group_start + 1}–{group_end + 1} "
+            f"(центр y={mid_y:.1f})."
+        ]
+    return []
+
+
+def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
+    """Отрендерить все страницы DOCX в PNG.
+
+    Приоритет: Microsoft Word → PDF → PNG (пагинация как в Word).
+    Запасной путь: LibreOffice.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    word_pdf = _docx_to_pdf_bytes_word(content)
+    if word_pdf is not None:
+        try:
+            import pymupdf
+        except ImportError as error:
+            raise RuntimeError("pymupdf недоступен для рендера страниц Word.") from error
+
+        document = pymupdf.open(stream=word_pdf, filetype="pdf")
+        try:
+            copied: list[Path] = []
+            for page_number, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                target = output_dir / f"page_{page_number:02d}.png"
+                pixmap.save(str(target))
+                copied.append(target)
+            return tuple(copied)
+        finally:
+            document.close()
+
+    soffice = find_libreoffice()
+    if soffice is None:
+        raise RuntimeError("Ни Microsoft Word, ни LibreOffice недоступны для visual QA.")
+
     temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_qa_"))
     succeeded = False
     try:
@@ -447,11 +852,12 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
             target = output_dir / f"page_{page_number:02d}.png"
             shutil.copy2(pngs[0], target)
             copied.append(target)
+
         succeeded = True
         return tuple(copied)
     finally:
         if succeeded:
-            shutil.rmtree(temp_path)
+            shutil.rmtree(temp_path, ignore_errors=True)
 
 
 def analyze_visual_pages(png_paths: tuple[Path, ...]) -> tuple[VisualPageReport, ...]:
@@ -475,12 +881,11 @@ def validate_calendar_docx_visual(content: bytes) -> tuple[QAIssue, ...]:
     """Visual QA: отрендерить все страницы и проверить читаемость/целостность."""
 
     issues: list[QAIssue] = []
-    soffice = find_libreoffice()
-    if soffice is None:
+    if not find_microsoft_word() and find_libreoffice() is None:
         return (
             QAIssue(
                 QASeverity.ERROR,
-                "LibreOffice недоступен; visual QA всех страниц невозможен.",
+                "Ни Microsoft Word, ни LibreOffice недоступны; visual QA невозможен.",
             ),
         )
 

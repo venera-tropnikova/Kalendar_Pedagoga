@@ -53,6 +53,9 @@ def _reset_analysis_state() -> None:
         "calendar_download",
         "calendar_warnings",
         "calendar_ai_usage",
+        "calendar_generation_pending",
+        "calendar_generation_error",
+        "calendar_generation_succeeded",
         "calendar_context",
     ):
         st.session_state.pop(key, None)
@@ -723,7 +726,23 @@ def _show_generation_controls(
             "Можно сформировать план на основе данных документов."
         )
 
-    if st.button("Сформировать календарный план", type="primary", use_container_width=True):
+    generation_pending = bool(st.session_state.get("calendar_generation_pending"))
+    generation_requested = st.button(
+        "Сформировать календарный план",
+        type="primary",
+        use_container_width=True,
+        disabled=generation_pending,
+    )
+    if generation_requested:
+        st.session_state["calendar_generation_pending"] = True
+        st.session_state.pop("calendar_generation_error", None)
+        st.session_state.pop("calendar_generation_succeeded", None)
+        st.session_state.pop("calendar_download", None)
+        st.session_state.pop("calendar_warnings", None)
+        st.session_state.pop("calendar_ai_usage", None)
+        st.rerun()
+
+    if generation_pending:
         utp = validated_utp.parsed
         assert isinstance(utp, UtpParseResult)
         program = None
@@ -731,30 +750,39 @@ def _show_generation_controls(
             program = validated_program.parsed
             assert isinstance(program, ProgramData)
 
-        with TransientDocumentSession() as operation:
-            try:
-                result = run_calendar_pipeline(
-                    utp,
-                    program,
-                    academic_year=academic_year,
-                    template=template_selection,
-                    source_utp_name=validated_utp.filename,
-                    use_ai=use_ai,
-                )
-            except (PipelineError, ScheduleValidationError, ValueError, AIProviderError) as error:
-                st.error(f"Не удалось сформировать календарный план: {error}")
-                return
+        try:
+            with st.spinner("Формируем календарный план…"):
+                with TransientDocumentSession() as operation:
+                    result = run_calendar_pipeline(
+                        utp,
+                        program,
+                        academic_year=academic_year,
+                        template=template_selection,
+                        source_utp_name=validated_utp.filename,
+                        use_ai=use_ai,
+                    )
+                    operation.publish_result(result.filename, result.content)
+                    st.session_state["calendar_download"] = operation.take_result_for_download()
+                    st.session_state["calendar_warnings"] = result.warnings
+                    if result.ai_usage:
+                        st.session_state["calendar_ai_usage"] = {
+                            "tokens": result.ai_usage.total_tokens,
+                            "cost": result.ai_usage.estimated_cost_usd,
+                        }
+        except (PipelineError, ScheduleValidationError, ValueError, AIProviderError) as error:
+            st.session_state["calendar_generation_error"] = str(error)
+        else:
+            st.session_state["calendar_generation_succeeded"] = True
+        finally:
+            st.session_state["calendar_generation_pending"] = False
+        st.rerun()
 
-            operation.publish_result(result.filename, result.content)
-            st.session_state["calendar_download"] = operation.take_result_for_download()
-            st.session_state["calendar_warnings"] = result.warnings
-            if result.ai_usage:
-                st.session_state["calendar_ai_usage"] = {
-                    "tokens": result.ai_usage.total_tokens,
-                    "cost": result.ai_usage.estimated_cost_usd,
-                }
+    generation_error = st.session_state.get("calendar_generation_error")
+    if generation_error:
+        st.error(f"Не удалось сформировать календарный план: {generation_error}")
 
-        st.success("Календарный план сформирован и прошёл QA.")
+    if st.session_state.get("calendar_generation_succeeded"):
+        st.success("Календарный план готов")
         for warning in st.session_state.get("calendar_warnings", ()):
             st.warning(warning)
         usage = st.session_state.get("calendar_ai_usage")
@@ -891,6 +919,9 @@ def run_app() -> None:
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
+        st.session_state.pop("calendar_generation_pending", None)
+        st.session_state.pop("calendar_generation_error", None)
+        st.session_state.pop("calendar_generation_succeeded", None)
 
     if st.session_state.get("analysis_ready") and "calendar_context" in st.session_state:
         context = st.session_state["calendar_context"]

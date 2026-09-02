@@ -8,15 +8,25 @@ from calendar_pedagoga.docx_generation import (
     build_output_filename,
     generate_calendar_docx,
 )
-from calendar_pedagoga.docx_qa import QASeverity, has_blocking_qa_issues, validate_calendar_docx
+from calendar_pedagoga.docx_qa import (
+    QASeverity,
+    _month_cell_is_continuation,
+    detect_data_row_indices_by_page,
+    has_blocking_qa_issues,
+    validate_calendar_docx,
+    verify_month_labels_by_page,
+)
 from calendar_pedagoga.lesson_resolution import resolve_lesson_content
 from calendar_pedagoga.organization_template import select_calendar_template
 from calendar_pedagoga.parsing import parse_utp
 from calendar_pedagoga.program_parsing import parse_program
+from calendar_pedagoga.resolve_utp import resolve_utp
+from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.lesson_content import build_lesson_content
 from calendar_pedagoga.scheduling import build_schedule
 from docx import Document
+from docx.oxml.ns import qn
 
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
@@ -78,8 +88,13 @@ def test_tour_guides_without_program_generates_valid_empty_content_docx() -> Non
     issues = validate_calendar_docx(docx_bytes, expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
     document = Document(BytesIO(docx_bytes))
-    data_row = document.tables[0].rows[2]
-    assert data_row.cells[0].text.strip() == "Сентябрь"
+    first_page_rows = detect_data_row_indices_by_page(docx_bytes, total_rows=36)
+    assert first_page_rows is not None and first_page_rows[0]
+    first_page_labels = [
+        document.tables[0].rows[2 + index].cells[0].text.strip()
+        for index in first_page_rows[0]
+    ]
+    assert "Сентябрь" in first_page_labels
 
 
 def test_key_reference_calendar_matches_generated_structure() -> None:
@@ -113,7 +128,9 @@ def test_visual_qa_checks_all_data_rows_have_week_and_month() -> None:
     content = _key_docx()
     document = Document(BytesIO(content))
     for index, row in enumerate(document.tables[0].rows[2:], start=1):
-        assert row.cells[0].text.strip(), f"month missing row {index}"
+        month_cell = row.cells[0]
+        if not month_cell.text.strip():
+            assert _month_cell_is_continuation(month_cell), f"month missing row {index}"
         assert row.cells[1].text.strip(), f"week missing row {index}"
         assert str(index) in row.cells[1].text.splitlines()[0]
 
@@ -146,3 +163,101 @@ def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
         assert cells[7], f"assessment empty week {index}"
         assert cells[6].startswith("Учащийся сможет")
         assert cells[3] == ""
+
+
+def test_organization_template_preserves_vertical_columns_and_merges_months() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    template_path = REFERENCES / "Календарный план.docx"
+    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
+    validated_program = validate_upload(
+        UploadPurpose.PROGRAM,
+        program_path.name,
+        program_path.read_bytes(),
+    )
+    utp = resolve_utp(None, validated_program)
+    schedule = build_schedule(utp)
+    content = build_content_model(schedule, utp, program_upload, program_path.name)
+    resolved = resolve_lesson_content(build_lesson_content(content))
+    generated = generate_calendar_docx(
+        utp,
+        resolved,
+        select_calendar_template(template_path.name, template_path.read_bytes()),
+        "2026–2027",
+    )
+
+    table = Document(BytesIO(generated)).tables[0]
+    data_rows = table.rows[2:]
+    expected_months = tuple(week.month for week in schedule.weeks)
+    rows_by_page = detect_data_row_indices_by_page(generated, total_rows=len(expected_months))
+    assert rows_by_page is not None
+
+    expected_label_rows: set[int] = set()
+    expected_continue_rows: set[int] = set()
+    multi_row_starts: set[int] = set()
+    for page_rows in rows_by_page:
+        if not page_rows:
+            continue
+        group_start_pos = 0
+        for pos in range(1, len(page_rows) + 1):
+            if pos < len(page_rows) and expected_months[page_rows[pos]] == expected_months[page_rows[group_start_pos]]:
+                continue
+            group = page_rows[group_start_pos:pos]
+            expected_label_rows.add(group[0])
+            if len(group) > 1:
+                multi_row_starts.add(group[0])
+                expected_continue_rows.update(group[1:])
+            group_start_pos = pos
+
+    for index, row in enumerate(data_rows):
+        raw_cells = row._tr.tc_lst
+        for column in (0, 1):
+            direction = raw_cells[column].tcPr.find(qn("w:textDirection"))
+            assert direction is not None
+            assert direction.get(qn("w:val")) == "btLr"
+            vertical_alignment = raw_cells[column].tcPr.find(qn("w:vAlign"))
+            assert vertical_alignment is not None
+            assert vertical_alignment.get(qn("w:val")) == "center"
+
+        month_merge = raw_cells[0].tcPr.find(qn("w:vMerge"))
+        month_xml_text = "".join(raw_cells[0].xpath(".//w:t/text()")).strip()
+        if index in expected_label_rows:
+            assert month_xml_text == expected_months[index]
+            if index in multi_row_starts:
+                assert month_merge is not None
+                assert month_merge.get(qn("w:val")) == "restart"
+            else:
+                assert month_merge is None
+        elif index in expected_continue_rows:
+            assert month_xml_text == ""
+            assert month_merge is not None
+            assert month_merge.get(qn("w:val")) != "restart"
+        else:
+            assert False, f"row {index} not classified"
+
+
+def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    template_path = REFERENCES / "Календарный план.docx"
+    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
+    validated_program = validate_upload(
+        UploadPurpose.PROGRAM,
+        program_path.name,
+        program_path.read_bytes(),
+    )
+    utp = resolve_utp(None, validated_program)
+    schedule = build_schedule(utp)
+    content = build_content_model(schedule, utp, program_upload, program_path.name)
+    resolved = resolve_lesson_content(build_lesson_content(content))
+    generated = generate_calendar_docx(
+        utp,
+        resolved,
+        select_calendar_template(template_path.name, template_path.read_bytes()),
+        "2026–2027",
+    )
+
+    expected_months = tuple(week.month for week in schedule.weeks)
+    rows_by_page = detect_data_row_indices_by_page(generated, total_rows=len(expected_months))
+    assert rows_by_page is not None
+
+    issues = verify_month_labels_by_page(generated, months=expected_months)
+    assert not issues, "; ".join(issues)

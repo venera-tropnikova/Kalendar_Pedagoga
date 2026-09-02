@@ -1,5 +1,7 @@
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from docx import Document
 from streamlit.testing.v1 import AppTest
@@ -173,3 +175,30 @@ def test_cleared_slot_accepts_new_upload() -> None:
     assert program.name in names
     assert template.name in names
     assert len(_clear_buttons(app)) == 2
+
+
+def test_generation_click_runs_pipeline_and_exposes_download() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 2, _template_file())
+    app.run()
+    _check_button(app).click().run()
+
+    generated = SimpleNamespace(
+        filename="calendar.docx",
+        content=b"generated-docx",
+        warnings=(),
+        ai_usage=None,
+    )
+    generate = next(
+        button for button in app.button if button.label == "Сформировать календарный план"
+    )
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
+        generate.click().run()
+
+    pipeline.assert_called_once()
+    assert app.session_state["calendar_generation_pending"] is False
+    assert app.session_state["calendar_generation_succeeded"] is True
+    assert app.session_state["calendar_download"].content == b"generated-docx"
+    assert [item.value for item in app.success][-1] == "Календарный план готов"
+    assert app.get("download_button")[0].label == "Скачать календарный план"

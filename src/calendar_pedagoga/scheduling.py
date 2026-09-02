@@ -68,13 +68,16 @@ def build_academic_weeks(
     while len(ranges) < weeks_count:
         ranges.append((start, start + timedelta(days=6)))
         start += timedelta(days=7)
-    month_by_week = (
-        ["Сентябрь"] * 5 + ["Октябрь"] * 4 + ["Ноябрь"] * 5
-        + ["Декабрь"] * 3 + ["Январь"] * 3 + ["Февраль"] * 4
-        + ["Март"] * 5 + ["Апрель"] * 4 + ["Май"] * 3
-    )
+    # Если учебная неделя пересекает границу месяцев, показываем оба месяца.
+    # Такая строка получает собственную подпись (например, «Сентябрь / Октябрь»)
+    # и поэтому не объединяется с соседними месячными блоками в DOCX.
+    def month_label(start: date, end: date) -> str:
+        if start.month == end.month:
+            return MONTHS[start.month]
+        return f"{MONTHS[start.month]} / {MONTHS[end.month]}"
+
     return tuple(
-        AcademicWeek(index, start, end, month_by_week[index - 1], "2026–2027")
+        AcademicWeek(index, start, end, month_label(start, end), "2026–2027")
         for index, (start, end) in enumerate(ranges, start=1)
     )
 

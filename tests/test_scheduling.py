@@ -45,3 +45,18 @@ def test_key_week_boundaries_follow_reference_calendar() -> None:
     assert weeks[17].date_range == "28–30.12"
     assert weeks[18].date_range == "11–17.01"
     assert weeks[-1].date_range == "10–16.05"
+
+
+def test_cross_month_weeks_show_both_months() -> None:
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    weeks = build_schedule(utp).weeks
+
+    by_range = {week.date_range: week.month for week in weeks}
+    assert by_range["28.09–04.10"] == "Сентябрь / Октябрь"
+    assert by_range["26.10–01.11"] == "Октябрь / Ноябрь"
+    assert by_range["30.11–06.12"] == "Ноябрь / Декабрь"
+    assert by_range["29.03–04.04"] == "Март / Апрель"
+    assert by_range["26.04–02.05"] == "Апрель / Май"
+
+    # Короткая декабрьская неделя не пересекает месяц.
+    assert by_range["28–30.12"] == "Декабрь"
