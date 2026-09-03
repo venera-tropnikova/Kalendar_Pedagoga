@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 import html
-import os
 
 import streamlit as st
 
-from calendar_pedagoga.ai_provider import (
-    AIProviderError,
-    GigaChatProvider,
-    OpenAIProvider,
-    _read_secret,
-)
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.normative_registry import (
@@ -39,7 +32,12 @@ from calendar_pedagoga.upload_validation import (
 )
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.matching import ContentMatch, MatchStatus, match_utp_to_program
-from calendar_pedagoga.program_parsing import ProgramData, infer_study_year_number, parse_program
+from calendar_pedagoga.program_parsing import (
+    ProgramData,
+    infer_study_year_number,
+    parse_program,
+    study_year_label,
+)
 from calendar_pedagoga.scheduling import (
     ScheduleResult,
     ScheduleValidationError,
@@ -277,11 +275,12 @@ def _inject_landing_styles() -> None:
             background: #ffffff;
             border: 1px solid #e5e7eb;
             border-top: none;
-            border-radius: 0 0 10px 10px;
-            padding: 0 0.85rem 0.55rem 0.85rem;
+            border-bottom: none;
+            border-radius: 0;
+            padding: 0 0.85rem 0.15rem 0.85rem;
             margin-top: -0.15rem !important;
-            margin-bottom: 0.15rem;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            margin-bottom: 0;
+            box-shadow: none;
         }
         .element-container:has(.kp-step-card-year-header) + .element-container [data-testid="stSelectbox"] {
             margin-top: 0;
@@ -289,6 +288,16 @@ def _inject_landing_styles() -> None:
         }
         .element-container:has(.kp-step-card-year-header) + .element-container [data-testid="stSelectbox"] > div {
             margin-top: 0;
+        }
+        .element-container:has(.kp-step-card-year-header) + .element-container + .element-container {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-top: none;
+            border-radius: 0 0 10px 10px;
+            padding: 0 0.85rem 0.55rem 0.85rem;
+            margin-top: 0 !important;
+            margin-bottom: 0.15rem;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
         }
         .kp-normative {
             margin: 0.1rem 0 0.2rem 0;
@@ -431,7 +440,24 @@ def _inject_landing_styles() -> None:
     )
 
 
-def _render_upload_screen() -> tuple[object | None, object | None, object | None, str]:
+def _render_group_class_fields() -> tuple[str, str]:
+    group_col, class_col = st.columns(2)
+    with group_col:
+        group_number = st.text_input(
+            "Группа №",
+            key="group_number",
+            help="Необязательно. Если не заполнить, в документе останется линия.",
+        )
+    with class_col:
+        class_name = st.text_input(
+            "Класс",
+            key="class_name",
+            help="Необязательно. Если не заполнить, в документе останется линия.",
+        )
+    return group_number or "", class_name or ""
+
+
+def _render_upload_screen() -> tuple[object | None, object | None, object | None, str, str, str]:
     _inject_landing_styles()
 
     st.markdown('<div class="kp-hero-top">', unsafe_allow_html=True)
@@ -457,6 +483,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         help="Расписание поддерживает учебный год 2026–2027 (36 недель).",
         label_visibility="collapsed",
     )
+    group_number, class_name = _render_group_class_fields()
 
     st.markdown(
         '<div class="kp-step-card">'
@@ -511,7 +538,14 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
 
     _render_normative_panel()
 
-    return utp_file, program_file, organization_template_file, academic_year
+    return (
+        utp_file,
+        program_file,
+        organization_template_file,
+        academic_year,
+        group_number,
+        class_name,
+    )
 
 
 def _render_normative_panel() -> None:
@@ -615,6 +649,8 @@ def _render_teacher_analysis_screen(
     schedule: ScheduleResult,
     matches: tuple[ContentMatch, ...],
     detail_warnings: tuple[str, ...],
+    source_utp_name: str | None = None,
+    program_filename: str | None = None,
 ) -> None:
     metadata = utp.metadata
     totals = utp.table_totals
@@ -625,7 +661,11 @@ def _render_teacher_analysis_screen(
     st.success("Данные успешно прочитаны. Можно формировать календарный план.")
 
     program_name = metadata.program_name or (program.title if program else None)
-    study_year = metadata.study_year
+    study_year = study_year_label(
+        metadata.study_year,
+        source_utp_name,
+        program_filename,
+    )
     student_age = metadata.student_age or (program.student_age if program else None)
     summary_lines = [
         f"<p><strong>Программа:</strong> {_value(program_name)}</p>",
@@ -710,45 +750,10 @@ def _show_generation_controls(
     validated_program: ValidatedUpload | None,
     template_selection: CalendarTemplateSelection,
     academic_year: str,
+    group_number: str,
+    class_name: str,
 ) -> None:
     st.subheader("Формирование календарного плана")
-    gigachat_ready = bool(_read_secret("GIGACHAT_CREDENTIALS"))
-    openai_ready = bool(os.getenv("OPENAI_API_KEY"))
-    ai_available = gigachat_ready or openai_ready
-    use_ai = False
-    if validated_program is None:
-        st.info(
-            "Без образовательной программы календарь формируется с пустым "
-            "содержанием занятий; автоматическое дополнение недоступно."
-        )
-    elif ai_available:
-        use_ai = st.checkbox(
-            "Дополнить содержание с помощью ИИ",
-            value=gigachat_ready,
-        )
-        st.caption(
-            "ИИ поможет сформулировать тип занятия, планируемый результат "
-            "и вид контроля. Даты, часы и темы он не изменяет."
-        )
-    else:
-        st.info(
-            "Автоматическое дополнение содержания сейчас недоступно. "
-            "Можно сформировать план на основе данных документов."
-        )
-
-    group_col, class_col = st.columns(2)
-    with group_col:
-        group_number = st.text_input(
-            "Группа №",
-            value="",
-            help="Необязательно. Если не заполнить, в документе останется линия.",
-        )
-    with class_col:
-        class_name = st.text_input(
-            "Класс",
-            value="",
-            help="Необязательно. Если не заполнить, в документе останется линия.",
-        )
 
     generation_pending = bool(st.session_state.get("calendar_generation_pending"))
     generation_requested = st.button(
@@ -777,19 +782,13 @@ def _show_generation_controls(
         try:
             with st.spinner("Формируем календарный план…"):
                 with TransientDocumentSession() as operation:
-                    ai_provider = None
-                    if use_ai:
-                        ai_provider = (
-                            GigaChatProvider() if gigachat_ready else OpenAIProvider()
-                        )
                     result = run_calendar_pipeline(
                         utp,
                         program,
                         academic_year=academic_year,
                         template=template_selection,
                         source_utp_name=validated_utp.filename,
-                        use_ai=use_ai,
-                        ai_provider=ai_provider,
+                        use_ai=False,
                         program_filename=(
                             validated_program.filename
                             if validated_program is not None
@@ -801,12 +800,7 @@ def _show_generation_controls(
                     operation.publish_result(result.filename, result.content)
                     st.session_state["calendar_download"] = operation.take_result_for_download()
                     st.session_state["calendar_warnings"] = result.warnings
-                    if result.ai_usage:
-                        st.session_state["calendar_ai_usage"] = {
-                            "tokens": result.ai_usage.total_tokens,
-                            "cost": result.ai_usage.estimated_cost_usd,
-                        }
-        except (PipelineError, ScheduleValidationError, ValueError, AIProviderError) as error:
+        except (PipelineError, ScheduleValidationError, ValueError) as error:
             st.session_state["calendar_generation_error"] = str(error)
         else:
             st.session_state["calendar_generation_succeeded"] = True
@@ -822,15 +816,6 @@ def _show_generation_controls(
         st.success("Календарный план готов")
         for warning in st.session_state.get("calendar_warnings", ()):
             st.warning(warning)
-        usage = st.session_state.get("calendar_ai_usage")
-        if usage:
-            if usage.get("cost") is None:
-                st.caption(f"AI: {usage['tokens']} токенов.")
-            else:
-                st.caption(
-                    f"AI: {usage['tokens']} токенов, "
-                    f"≈ ${usage['cost']:.4f}."
-                )
 
     download = st.session_state.get("calendar_download")
     if download is not None:
@@ -847,7 +832,14 @@ def run_app() -> None:
     """Показать экран загрузки, анализа и формирования календарного плана."""
     st.set_page_config(page_title="Календарь педагога", page_icon="📅", layout="centered")
 
-    utp_file, program_file, organization_template_file, academic_year = _render_upload_screen()
+    (
+        utp_file,
+        program_file,
+        organization_template_file,
+        academic_year,
+        group_number,
+        class_name,
+    ) = _render_upload_screen()
 
     if st.button("Проверить документы", type="primary", use_container_width=True):
         if program_file is None:
@@ -1024,10 +1016,16 @@ def run_app() -> None:
             schedule=schedule,
             matches=matches,
             detail_warnings=tuple(detail_warnings),
+            source_utp_name=validated_utp.filename,
+            program_filename=(
+                validated_program.filename if validated_program is not None else None
+            ),
         )
         _show_generation_controls(
             validated_utp=validated_utp,
             validated_program=validated_program,
             template_selection=template_selection,
             academic_year=academic_year,
+            group_number=group_number,
+            class_name=class_name,
         )

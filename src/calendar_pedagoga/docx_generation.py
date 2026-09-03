@@ -13,6 +13,7 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Cm
 
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
 from calendar_pedagoga.lesson_display import format_practice_cell, format_theory_cell
@@ -25,6 +26,7 @@ from calendar_pedagoga.program_parsing import infer_study_year_number
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
 _MONTH_CELL_MARGIN_DXA = 40
+PRINT_TOP_MARGIN_CM = 1.0
 
 
 @dataclass(frozen=True)
@@ -478,15 +480,26 @@ def _topic_cells_for_lesson(
     return "\n".join(theory_lines), "\n".join(practice_lines)
 
 
+def _apply_print_safe_margins(document) -> None:
+    """Верхнее поле 1 см — заголовок и шапка таблицы в безопасной зоне печати."""
+
+    target = Cm(PRINT_TOP_MARGIN_CM)
+    for section in document.sections:
+        section.top_margin = target
+
+
 def _load_template(template: CalendarTemplateSelection) -> Document:
     if template.source is CalendarTemplateSource.STANDARD:
         if not STANDARD_TEMPLATE_PATH.is_file():
             raise FileNotFoundError(
                 f"Стандартный шаблон не найден: {STANDARD_TEMPLATE_PATH}"
             )
-        return Document(str(STANDARD_TEMPLATE_PATH))
-    assert template.content is not None
-    return Document(BytesIO(template.content))
+        document = Document(str(STANDARD_TEMPLATE_PATH))
+    else:
+        assert template.content is not None
+        document = Document(BytesIO(template.content))
+    _apply_print_safe_margins(document)
+    return document
 
 
 def _ensure_data_rows(table, expected_rows: int) -> None:

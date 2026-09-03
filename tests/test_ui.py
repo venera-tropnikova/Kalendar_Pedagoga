@@ -81,6 +81,11 @@ def test_initial_screen_contains_required_controls() -> None:
     ]
     assert app.selectbox[0].label == "Учебный год"
     assert app.selectbox[0].options == ["2026–2027"]
+    assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
+    assert all(item.value in {"", None} for item in app.text_input)
+    assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
+    assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
+    assert "Группа Нет" not in _page_text(app)
     assert app.button[0].label == "Проверить документы"
     notes = " ".join(item.value or "" for item in app.markdown)
     assert "Документ с содержанием программы и, если есть, учебно-тематическим планом" in notes
@@ -177,6 +182,19 @@ def test_cleared_slot_accepts_new_upload() -> None:
     assert len(_clear_buttons(app)) == 2
 
 
+def test_analysis_screen_shows_study_year_from_program_filename() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    _check_button(app).click().run()
+
+    text = _page_text(app)
+    assert not app.exception
+    assert "Документы проверены" in text
+    assert "Год обучения:</strong> 1 год обучения" in text
+    assert "Возраст:</strong> Не найдено" in text
+
+
 def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
@@ -191,6 +209,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         ai_usage=None,
     )
     assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
+    assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
     generate = next(
         button for button in app.button if button.label == "Сформировать календарный план"
     )
@@ -198,10 +217,14 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         generate.click().run()
 
     pipeline.assert_called_once()
+    assert pipeline.call_args.kwargs["use_ai"] is False
+    assert "ai_provider" not in pipeline.call_args.kwargs
     assert pipeline.call_args.kwargs["group_number"] == ""
     assert pipeline.call_args.kwargs["class_name"] == ""
     assert pipeline.call_args.kwargs["academic_year"] == "2026–2027"
     assert "1 г" in (pipeline.call_args.kwargs["program_filename"] or "")
+    assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
+    assert "Группа Нет" not in _page_text(app)
     assert app.session_state["calendar_generation_pending"] is False
     assert app.session_state["calendar_generation_succeeded"] is True
     assert app.session_state["calendar_download"].content == b"generated-docx"

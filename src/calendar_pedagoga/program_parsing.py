@@ -475,6 +475,22 @@ def infer_study_year_number(value: str | None) -> int | None:
     return int(found.group()) if found else None
 
 
+def study_year_label(
+    metadata_year: str | None,
+    *hints: str | None,
+) -> str | None:
+    """Тот же год обучения, что подставляет pipeline в DOCX, или None."""
+
+    for raw in (metadata_year, *hints):
+        number = infer_study_year_number(raw)
+        if number is not None:
+            return f"{number} год обучения"
+    raw = (metadata_year or "").strip()
+    if raw:
+        return raw if "год" in raw.casefold() else f"{raw} год обучения"
+    return None
+
+
 def parse_program(
     data: bytes,
     filename: str,

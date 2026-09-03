@@ -4,6 +4,7 @@ from functools import lru_cache
 
 import pytest
 from calendar_pedagoga.docx_generation import (
+    PRINT_TOP_MARGIN_CM,
     STANDARD_TEMPLATE_PATH,
     _fill_organization_header_paragraph,
     _group_class_line,
@@ -86,6 +87,23 @@ def test_key_generation_produces_36_data_rows() -> None:
 def test_key_generation_passes_structural_qa() -> None:
     issues = validate_calendar_docx(_key_docx(), expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
+
+
+def _assert_print_safe_margins(document, source) -> None:
+    generated = document.sections[0]
+    template = source.sections[0]
+    assert abs(generated.top_margin.cm - PRINT_TOP_MARGIN_CM) < 0.02
+    assert abs(generated.bottom_margin.cm - template.bottom_margin.cm) < 0.02
+    assert abs(generated.left_margin.cm - template.left_margin.cm) < 0.02
+    assert abs(generated.right_margin.cm - template.right_margin.cm) < 0.02
+
+
+def test_key_generation_sets_print_safe_top_margin() -> None:
+    content = _key_docx()
+    document = Document(BytesIO(content))
+    source = Document(str(STANDARD_TEMPLATE_PATH))
+    _assert_print_safe_margins(document, source)
+    assert "Группа Нет" not in " ".join(paragraph.text for paragraph in document.paragraphs[:6])
 
 
 def test_header_line_uses_program_title_and_filename_year() -> None:
@@ -392,6 +410,26 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
     assert "2 г.об." in sample
     assert "2 часа в неделю" in sample
 
+    filled_group = _fill_organization_header_paragraph(
+        "Группа № ___________ (Класс _________)",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number="3",
+        class_name="5А",
+    )
+    assert filled_group == "Группа № 3 (Класс 5А)"
+    empty_group = _fill_organization_header_paragraph(
+        "Группа № ___________ (Класс _________)",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number="",
+        class_name="",
+    )
+    assert empty_group == "Группа № ___________ (Класс _________)"
+    assert "Нет" not in empty_group
+
 
 def test_organization_template_keeps_visual_header_and_times_new_roman() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
@@ -416,6 +454,7 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
 
     source = Document(str(template_path))
     document = Document(BytesIO(generated))
+    _assert_print_safe_margins(document, source)
     header_texts = [paragraph.text for paragraph in document.paragraphs[:4]]
     assert header_texts[0] == "Календарный план"
     assert "Туристы-проводники" in header_texts[1]

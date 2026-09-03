@@ -12,6 +12,7 @@ from calendar_pedagoga.program_parsing import (
     convert_legacy_doc,
     parse_program_docx,
     parse_program,
+    study_year_label,
 )
 from calendar_pedagoga.parsing import parse_utp
 
@@ -155,6 +156,20 @@ def test_tour_guides_year1_program_finds_content_items() -> None:
     assert any("палатк" in item.casefold() for item in program.skill_outcomes)
     assert any("ориентир" in item.casefold() for item in program.knowledge_outcomes)
     assert all("тест" not in item.casefold() for item in program.expected_results)
+
+
+def test_study_year_label_uses_same_hints_as_pipeline() -> None:
+    assert study_year_label(None) is None
+    assert study_year_label("второй") == "2 год обучения"
+    assert (
+        study_year_label(
+            None,
+            "УТП из файла «Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx»",
+            "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx",
+        )
+        == "1 год обучения"
+    )
+    assert study_year_label("специальный набор") == "специальный набор год обучения"
 
 
 def test_key_year2_program_parses_know_and_able_outcomes() -> None:
