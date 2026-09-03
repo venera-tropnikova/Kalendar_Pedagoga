@@ -11,11 +11,12 @@ from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
 
 APPROVED_TP_TOPICS = (
-    ("1.1", "Характеризует историю развития туризма в г. Салават."),
+    ("1.1", "Характеризует историю развития туризма в г. Салават, называет виды туризма."),
     ("1.3", "Укладывает рюкзаки, подгоняет снаряжение."),
     ("1.4", "Развертывает и свертывает лагерь (бивак)."),
-    ("1.6", "Составляет меню и список продуктов для похода."),
-    ("1.8", "Отрабатывает технику движения по дорогам, тропам, по пересеченной местности (лес, заросли кустарников, завалы, заболоченная местность)."),
+    ("1.5", "Составляет план подготовки похода и план-график движения."),
+    ("1.6", "Составляет меню и список продуктов для похода, готовит пищу на костре."),
+    ("1.8", "Отрабатывает технику движения по дорогам, тропам, по пересеченной местности."),
     ("2.4", "Ориентирует карту по компасу."),
     ("3.1", "Участвует в краеведческих викторинах."),
     ("3.2", "Совершает прогулки и экскурсии по ближайшим окрестностям, посещает музеи, экскурсионные объекты г. Салавата и Башкортостана."),
@@ -24,17 +25,21 @@ APPROVED_TP_TOPICS = (
 )
 
 APPROVED_TP_CONTROL_TYPE = {
-    "1.1": ("устный опрос", "теоретическое занятие"),
-    "1.3": ("демонстрация навыка", "практическое занятие"),
-    "1.4": ("демонстрация навыка", "практическое занятие"),
-    "1.6": ("практическое задание", "практическое занятие"),
-    "1.8": ("демонстрация навыка", "тренировочное занятие"),
-    "2.4": ("практическое задание", "практическое занятие"),
+    "1.1": ("устный опрос по видам туризма", "теоретическое занятие"),
+    "1.3": ("проверка укладки рюкзака", "практическое занятие"),
+    "1.4": ("наблюдение при развертывании лагеря", "практическое занятие"),
+    "1.5": ("проверка плана подготовки похода и план-график движения", "практическое занятие"),
+    "1.6": ("проверка меню и приготовления пищи на костре", "практическое занятие"),
+    "1.8": ("проверка техники движения", "тренировочное занятие"),
+    "2.4": ("проверка ориентирования карты", "практическое занятие"),
     "3.1": ("викторина", "практическое занятие"),
     "3.2": ("наблюдение", "экскурсия"),
-    "4.3": ("демонстрация навыка", "практическое занятие"),
-    "5.4": ("демонстрация навыка", "тренировочное занятие"),
+    "4.3": ("проверка оказания первой помощи", "практическое занятие"),
+    "5.4": ("проверка выполнения упражнений", "тренировочное занятие"),
 }
+
+GIGACHAT_REGRESSION_TOPICS = ("1.1", "1.3", "1.4", "1.5", "1.6")
+GENERIC_CONTROLS = {"практическое задание", "демонстрация навыка"}
 
 
 @lru_cache(maxsize=1)
@@ -106,9 +111,9 @@ def test_results_are_present_tense_not_verbal_nouns() -> None:
         start = derived.planned_result.casefold()
         assert not start.startswith(banned_starts)
         assert re.match(
-            r"(?i)(характеризует|укладывает|подгоняет|развертывает|составляет|"
+            r"(?i)(характеризует|называет|укладывает|подгоняет|развертывает|составляет|"
             r"отрабатывает|ориентирует|участвует|совершает|посещает|оказывает|"
-            r"выполняет)",
+            r"выполняет|готовит)",
             derived.planned_result,
         )
 
@@ -154,7 +159,7 @@ def test_exercise_word_uses_performs_exercises() -> None:
         practice_hours=1,
     )
     assert derived.planned_result == "Выполняет упражнения на постановку руки."
-    assert derived.assessment_method == "демонстрация навыка"
+    assert derived.assessment_method == "проверка выполнения упражнений"
     assert derived.lesson_type == "тренировочное занятие"
 
 
@@ -166,7 +171,7 @@ def test_synthetic_chemistry_compose_equation() -> None:
         practice_hours=2,
     )
     assert derived.planned_result == "Составляет уравнения реакций."
-    assert derived.assessment_method == "практическое задание"
+    assert derived.assessment_method == "проверка уравнения реакций"
     assert derived.lesson_type == "практическое занятие"
 
 
@@ -187,7 +192,7 @@ def test_synthetic_music_and_art_keep_source_objects() -> None:
         practice_hours=1,
     )
     assert art.planned_result == "Рисует натюрморт с натуры."
-    assert art.assessment_method == "практическое задание"
+    assert art.assessment_method == "проверка натюрморта с натуры"
 
 
 def test_synthetic_theory_characterizes_without_inventing_action() -> None:
@@ -198,7 +203,7 @@ def test_synthetic_theory_characterizes_without_inventing_action() -> None:
         practice_hours=0,
     )
     assert derived.planned_result == "Характеризует биографию писателя."
-    assert derived.assessment_method == "устный опрос"
+    assert derived.assessment_method == "устный опрос по биографии писателя"
     assert derived.lesson_type == "теоретическое занятие"
     assert "организует" not in derived.planned_result.casefold()
 
@@ -286,7 +291,7 @@ def test_effect_is_not_student_action() -> None:
     )
     assert "совершенствует функций" not in derived.planned_result.casefold()
     assert derived.lesson_type == "теоретическое занятие"
-    assert derived.assessment_method == "устный опрос"
+    assert derived.assessment_method.startswith("устный опрос")
 
 
 def test_observation_control_follows_leading_action() -> None:
@@ -371,3 +376,282 @@ def test_multiweek_rotates_source_clauses() -> None:
     assert "выносливости" in first.planned_result
     assert "быстроты" in second.planned_result
     assert first.planned_result != second.planned_result
+
+
+AUDIT_REGRESSION_TOPICS = {
+    "1.2": (
+        "Характеризует роль туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности.",
+        "устный опрос по роли туризма в подготовке к защите Родины",
+    ),
+    "1.5": (
+        "Составляет план подготовки похода и план-график движения.",
+        "проверка плана подготовки похода и план-график движения",
+    ),
+    "1.8": (
+        "Отрабатывает технику движения по дорогам, тропам, по пересеченной местности.",
+        "проверка техники движения",
+    ),
+    "1.9": (
+        "Отрабатывает технику преодоления естественных препятствий: склонов, подъёмов, организует переправу по бревну с самостраховкой.",
+        "проверка самостраховки",
+    ),
+    "2.2": (
+        "Выполняет упражнения на запоминание знаков.",
+        "топографический диктант",
+    ),
+    "2.3": (
+        "Выполняет упражнения на глазомерную оценку азимутов и упражнения на инструментальное измерение азимутов на карте (транспортиром).",
+        "проверка измерения азимутов",
+    ),
+    "2.6": (
+        "Выполняет упражнения по отбору основных контрольных ориентиров на карте по заданному маршруту.",
+        "проверка отбора ориентиров",
+    ),
+    "4.1": (
+        "Применяет средства личной гигиены в походах и во время тренировочного процесса.",
+        "проверка личной гигиены",
+    ),
+    "5.1": (
+        "Характеризует строение человеческого организма (органы и системы).",
+        "устный опрос по строению человеческого организма (органы и системы)",
+    ),
+}
+
+STABLE_TP_TOPICS = {
+    "1.1": (
+        "Характеризует историю развития туризма в г. Салават, называет виды туризма.",
+        "устный опрос по видам туризма",
+        "теоретическое занятие",
+    ),
+    "1.3": (
+        "Укладывает рюкзаки, подгоняет снаряжение.",
+        "проверка укладки рюкзака",
+        "практическое занятие",
+    ),
+    "1.4": (
+        "Развертывает и свертывает лагерь (бивак).",
+        "наблюдение при развертывании лагеря",
+        "практическое занятие",
+    ),
+    "1.6": (
+        "Составляет меню и список продуктов для похода, готовит пищу на костре.",
+        "проверка меню и приготовления пищи на костре",
+        "практическое занятие",
+    ),
+    "1.7": (
+        "Выполняет обязанности по должностям в период подготовки.",
+        "проверка исполнения обязанностей",
+        "практическое занятие",
+    ),
+    "1.10": (
+        "Выступает в туристских соревнованиях в качестве участника.",
+        "проверка участия в соревнованиях",
+        "практическое занятие",
+    ),
+    "1.11": (
+        "Составляет отчёт о походе.",
+        "защита результата",
+        "практическое занятие",
+    ),
+    "2.1": (
+        "Выполняет упражнения по определению масштаба.",
+        "проверка упражнения по определению масштаба",
+        "тренировочное занятие",
+    ),
+    "2.4": (
+        "Ориентирует карту по компасу.",
+        "проверка ориентирования карты",
+        "практическое занятие",
+    ),
+    "2.5": (
+        "Измеряет свой средний шаг (пару шагов), строит графики перевода пар шагов в метры для разных условий ходьбы.",
+        "проверка измерения шага",
+        "практическое занятие",
+    ),
+    "2.7": (
+        "Выполняет упражнения по определению сторон горизонта по местным предметам, по Солнцу.",
+        "проверка выполнения упражнений",
+        "тренировочное занятие",
+    ),
+    "3.1": (
+        "Участвует в краеведческих викторинах.",
+        "викторина",
+        "практическое занятие",
+    ),
+    "3.2": (
+        "Совершает прогулки и экскурсии по ближайшим окрестностям, посещает музеи, экскурсионные объекты г. Салавата и Башкортостана.",
+        "наблюдение",
+        "экскурсия",
+    ),
+    "3.3": (
+        "Подготавливает и заслушивает доклады по району предстоящего похода.",
+        "защита результата",
+        "практическое занятие",
+    ),
+    "3.4": (
+        "Проводит различные краеведческие наблюдения.",
+        "наблюдение",
+        "практическое занятие",
+    ),
+    "4.2": (
+        "Формирует походную медицинскую аптечку.",
+        "проверка состава аптечки",
+        "практическое занятие",
+    ),
+    "4.3": (
+        "Оказывает первую помощь условно пострадавшему (определяет травму или ставит диагноз, практически оказывает помощь).",
+        "проверка оказания первой помощи",
+        "практическое занятие",
+    ),
+    "4.4": (
+        "Изготавливает носилки, волокуши, разучивает различные способы транспортировки пострадавшего.",
+        "проверка транспортировки пострадавшего",
+        "практическое занятие",
+    ),
+    "5.2": (
+        "Ведёт дневник самоконтроля.",
+        "проверка дневника самоконтроля",
+        "практическое занятие",
+    ),
+    "5.3": (
+        "Выполняет упражнения для рук и плечевого пояса.",
+        "проверка выполнения упражнений",
+        "тренировочное занятие",
+    ),
+    "5.4": (
+        "Выполняет упражнения на развитие выносливости.",
+        "проверка выполнения упражнений",
+        "тренировочное занятие",
+    ),
+}
+
+
+def test_audit_regression_nine_topics() -> None:
+    dangling = re.compile(r"(?i)\b(ее|её|его|их)\s+(роль|значение|цель)\b")
+    repeated_verb = re.compile(
+        r"(?i)\b([а-яё]+(?:ет|ит|ёт|ут|ют))\b.+\b\1\b"
+    )
+    for number, (expected_result, expected_control) in AUDIT_REGRESSION_TOPICS.items():
+        derived = _fill_tp_topic(number)
+        assert derived.planned_result == expected_result, (
+            f"{number}: {derived.planned_result!r} != {expected_result!r}"
+        )
+        assert derived.assessment_method == expected_control, (
+            f"{number}: {derived.assessment_method!r} != {expected_control!r}"
+        )
+        assert not dangling.search(derived.planned_result)
+        assert not repeated_verb.search(derived.planned_result)
+        assert derived.planned_result.count("(") <= 1
+        assert "краткие сведения" not in derived.planned_result.casefold()
+        assert "гимнастик" not in derived.planned_result.casefold()
+
+
+def test_remaining_21_topics_do_not_regress() -> None:
+    assert len(STABLE_TP_TOPICS) == 21
+    for number, (result, control, lesson_type) in STABLE_TP_TOPICS.items():
+        derived = _fill_tp_topic(number)
+        assert derived.planned_result == result, (
+            f"{number}: {derived.planned_result!r} != {result!r}"
+        )
+        assert derived.assessment_method == control, (
+            f"{number}: {derived.assessment_method!r} != {control!r}"
+        )
+        assert derived.lesson_type == lesson_type, (
+            f"{number}: {derived.lesson_type!r} != {lesson_type!r}"
+        )
+
+
+def test_universal_result_cleanup_rules() -> None:
+    pronoun = fill_from_source(
+        topic_title="Воспитательная роль краеведения",
+        program_content="Ее роль в развитии самостоятельности и выборе профессии.",
+        theory_hours=1,
+        practice_hours=0,
+    )
+    assert "ее роль" not in pronoun.planned_result.casefold()
+    assert "роль краеведения" in pronoun.planned_result.casefold()
+
+    repeated = fill_from_source(
+        topic_title="Подготовка выступления",
+        program_content="Практические занятия. Составление плана выступления. Составление плана-графика репетиций.",
+        theory_hours=0,
+        practice_hours=1,
+    )
+    assert repeated.planned_result.casefold().count("составляет") == 1
+    assert " и " in repeated.planned_result
+    assert "план-график" in repeated.assessment_method or "плана" in repeated.assessment_method
+
+    long_list = fill_from_source(
+        topic_title="Движение группы",
+        program_content=(
+            "Практические занятия. Отработка техники движения по дорогам, "
+            "тропам, по пересеченной местности (лес, заросли кустарников, завалы, болото)."
+        ),
+        theory_hours=0,
+        practice_hours=1,
+    )
+    assert "(" not in long_list.planned_result
+    assert "заросли" not in long_list.planned_result.casefold()
+
+    raw_list = fill_from_source(
+        topic_title="Условные знаки карты",
+        program_content=(
+            "Практические занятия. Упражнения на запоминание знаков, "
+            "Топографические диктанты, игры, мини соревнования."
+        ),
+        theory_hours=0,
+        practice_hours=1,
+    )
+    assert raw_list.planned_result.startswith("Выполняет упражнения")
+    assert "диктант" not in raw_list.planned_result.casefold()
+    assert "игр" not in raw_list.planned_result.casefold()
+
+    wrapper = fill_from_source(
+        topic_title="Краткие сведения о кровообращении",
+        program_content="Краткие сведения о кровообращении и работе сердца.",
+        theory_hours=1,
+        practice_hours=0,
+    )
+    assert "краткие сведения" not in wrapper.planned_result.casefold()
+    assert "кровообращени" in wrapper.planned_result.casefold()
+
+    off_topic = fill_from_source(
+        topic_title="Личная гигиена спортсмена",
+        program_content=(
+            "Гигиена тела и закаливание. "
+            "Практические занятия. Разучивание комплекса упражнений гимнастики. "
+            "Применение средств личной гигиены на тренировке."
+        ),
+        theory_hours=1,
+        practice_hours=1,
+    )
+    assert "гимнастик" not in off_topic.planned_result.casefold()
+    assert "гигиен" in off_topic.planned_result.casefold()
+
+
+def test_gigachat_regression_five_topics() -> None:
+    expected = {number: result for number, result in APPROVED_TP_TOPICS}
+    for number in GIGACHAT_REGRESSION_TOPICS:
+        derived = _fill_tp_topic(number)
+        assert derived.planned_result == expected[number]
+        control, lesson_type = APPROVED_TP_CONTROL_TYPE[number]
+        assert derived.assessment_method == control
+        assert derived.lesson_type == lesson_type
+        assert derived.assessment_method not in GENERIC_CONTROLS
+        assert " " in derived.planned_result
+
+
+def test_all_tour_guides_topics_stay_specific() -> None:
+    items, hours = _tp_program_and_hours()
+    checked = 0
+    for number in hours:
+        if number not in items:
+            continue
+        derived = _fill_tp_topic(number)
+        checked += 1
+        assert derived.planned_result
+        assert derived.assessment_method
+        assert derived.assessment_method not in GENERIC_CONTROLS
+        assert "норматив" not in derived.planned_result.casefold()
+        assert not re.search(r"\d+\s*%", derived.planned_result)
+    assert checked >= 30

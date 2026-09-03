@@ -217,6 +217,11 @@ def _has_stem(text: str, stems: tuple[str, ...]) -> bool:
     return any(stem in low for stem in stems)
 
 
+def _has_all_stems(text: str, stems: tuple[str, ...]) -> bool:
+    low = text.casefold()
+    return all(stem in low for stem in stems)
+
+
 def _word_tokens(text: str) -> list[str]:
     return [token for token in re.split(r"(\s+)", text) if token]
 
@@ -252,10 +257,18 @@ def _noun_gen_to_acc(word: str) -> str:
 
     if not word or word.casefold() in {"меню", "кофе"}:
         return word
+    if word.casefold() == "пищи":
+        return "пищу"
+    if "-" in word:
+        if word.casefold().startswith("плана-график"):
+            return "план-график" + word[len("плана-графика") :]
+        return word
     if re.search(r"(?i)\d", word) or word.endswith("."):
         return word
 
     low = word.casefold()
+    if low.endswith("ств") and len(word) > 5:
+        return word + "а"
     if low.endswith(("ую", "юю", "ию")):
         return word
     if low.endswith("ений") and len(word) > 5:
@@ -812,8 +825,22 @@ def _transform_segment(
             return _normalize_spaces(phrase), head.casefold(), obj, cond
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
+        named = _name_kinds(text)
+        if named:
+            return named
         return _characterize(text)
     return text, "", "", ""
+
+
+def _name_kinds(text: str) -> tuple[str, str, str, str] | None:
+    match = re.match(r"(?i)^виды\s+([^:.,]+)", _normalize_spaces(text))
+    if match is None:
+        return None
+    obj = _normalize_spaces(match.group(1))
+    if not obj:
+        return None
+    phrase = f"называет виды {obj[:1].lower() + obj[1:]}"
+    return phrase, "называет", f"виды {obj}", ""
 
 
 def _characterize(text: str) -> tuple[str, str, str, str]:
@@ -970,15 +997,162 @@ def _agree_capacity_role(text: str) -> str:
     return "".join(out)
 
 
+_DANGLING_PRONOUN_RE = re.compile(r"(?i)^(ее|её|его|их)\s+(.+)$")
+_FINITE_VERB_RE = re.compile(
+    r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b"
+)
+_KNOWLEDGE_WRAPPER_RE = re.compile(
+    r"(?i)^(характеризует)\s+(?:краткие|общие|основные)\s+сведения\s+(?:о|об)\s+"
+)
+_GENERIC_TOPIC_STEMS = (
+    "техник",
+    "занят",
+    "проведен",
+    "поход",
+    "турист",
+    "основ",
+    "правил",
+    "занятий",
+    "физическ",
+    "специальн",
+    "сведен",
+    "влияни",
+)
+
+
+def _resolve_dangling_pronoun(clause: str, topic_title: str) -> str:
+    match = _DANGLING_PRONOUN_RE.match(clause.strip())
+    if match is None:
+        return clause
+    rest = match.group(2)
+    head = rest.split()[0] if rest.split() else ""
+    topic_words = re.findall(r"[А-Яа-яЁё]{4,}", topic_title)
+    replacement = ""
+    for word in reversed(topic_words):
+        if word.casefold() == head.casefold():
+            continue
+        if len(word) >= 5 and word.casefold()[:5] == head.casefold()[:5]:
+            continue
+        replacement = word
+        break
+    tail = rest[len(head) :].lstrip() if head else rest
+    if replacement:
+        return _normalize_spaces(f"{head} {replacement.casefold()} {tail}")
+    return _normalize_spaces(rest)
+
+
+def _is_finite_result_phrase(phrase: str) -> bool:
+    return bool(_FINITE_VERB_RE.match(phrase.strip()))
+
+
+def _merge_repeated_verbs(text: str) -> str:
+    parts = re.split(r",\s+", text)
+    if len(parts) < 2:
+        return text
+    verb_re = re.compile(r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют))\s+")
+    merged: list[str] = []
+    prev_verb = ""
+    for part in parts:
+        found = verb_re.match(part)
+        if found and prev_verb and found.group(1).casefold() == prev_verb:
+            rest = part[found.end() :]
+            if merged:
+                merged[-1] = f"{merged[-1].rstrip(',')} и {rest}"
+            continue
+        prev_verb = found.group(1).casefold() if found else ""
+        merged.append(part)
+    return ", ".join(merged)
+
+
+def _trim_long_parentheticals(text: str) -> str:
+    def drop(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if inner.count(",") >= 2 or inner.count(";") >= 1:
+            return ""
+        return match.group(0)
+
+    return _normalize_spaces(re.sub(r"\s*\(([^()]*)\)", drop, text))
+
+
+def _drop_raw_list_tails(text: str) -> str:
+    parts = re.split(r",\s+", text)
+    if len(parts) <= 1:
+        return text
+    kept = [parts[0]]
+    for part in parts[1:]:
+        first = part.split()[0] if part.split() else ""
+        if _FINITE_VERB_RE.match(part):
+            kept.append(part)
+            continue
+        if _looks_like_verbal_noun(first) or re.search(
+            r"(?i)(?:нию|тию|анию|ению)$", first
+        ):
+            continue
+        if first[:1].isupper() and not _FINITE_VERB_RE.match(part):
+            continue
+        if re.match(r"(?i)^(игры|игра|соревнования|диктанты|занятия|мини)\b", part):
+            continue
+        kept.append(part)
+    return ", ".join(kept)
+
+
+def _keep_strongest_phrase(phrases: list[str]) -> list[str]:
+    if len(phrases) < 2:
+        return phrases
+    finite = [item for item in phrases if _is_finite_result_phrase(item)]
+    pool = finite or phrases
+
+    def score(item: str) -> tuple[int, int]:
+        low = item.casefold()
+        strength = 0
+        if low.startswith("выполняет упражнения"):
+            strength = 3
+        elif _has_stem(low, _PRODUCE_STEMS + _PERFORM_STEMS):
+            strength = 2
+        elif _is_finite_result_phrase(item):
+            strength = 1
+        return (strength, -len(item))
+
+    best = max(pool, key=score)
+    if score(best)[0] >= 3 and sum(1 for item in pool if score(item)[0] >= 3) == 1:
+        return [best]
+    if len(phrases) < 3:
+        return phrases
+    return [best]
+
+
+def _prep_noun_to_nom(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ии") and len(core) > 3:
+        core = core[:-2] + "ие"
+    elif low.endswith("иях") and len(core) > 4:
+        core = core[:-3] + "ия"
+    return f"{prefix}{core}{suffix}"
+
+
+def _drop_knowledge_wrappers(text: str) -> str:
+    stripped = _KNOWLEDGE_WRAPPER_RE.sub(r"\1 ", text)
+    if stripped == text:
+        return text
+    words = stripped.split()
+    if len(words) >= 2:
+        words[1] = _prep_noun_to_nom(words[1])
+    return _normalize_spaces(" ".join(words))
+
+
 def transform_clause_to_result(
     clause: str,
     *,
     theory_only: bool,
     full_source: str,
+    topic_title: str = "",
 ) -> tuple[str, ActionFrame]:
     """Наблюдаемый RESULT: настоящее время, 3-е лицо, только факты источника."""
 
-    source_clause = _clean_source_phrase(clause)
+    source_clause = _resolve_dangling_pronoun(
+        _clean_source_phrase(clause), topic_title
+    )
     if not source_clause:
         return "", ActionFrame("", "", "", "")
 
@@ -1003,7 +1177,11 @@ def transform_clause_to_result(
             phrase, action, obj, cond = _transform_segment(
                 segment, theory_only=theory_only, full_source=full_source
             )
-            if phrase:
+            if phrase and (
+                _is_finite_result_phrase(phrase) or theory_only or not phrases
+            ):
+                if not _is_finite_result_phrase(phrase) and phrases:
+                    continue
                 phrases.append(phrase.rstrip(","))
             if action:
                 actions.append(action)
@@ -1011,11 +1189,16 @@ def transform_clause_to_result(
                 objects.append(obj)
             if cond:
                 conditions.append(cond)
+    phrases = _keep_strongest_phrase(phrases)
     result = ", ".join(phrases)
-    if action_parens:
+    if action_parens and len(phrases) < 2:
         result = _normalize_spaces(
             result + " " + " ".join(f"({part})" for part in action_parens)
         )
+    result = _merge_repeated_verbs(result)
+    result = _drop_raw_list_tails(result)
+    result = _trim_long_parentheticals(result)
+    result = _drop_knowledge_wrappers(result)
     result = _agree_capacity_role(result)
     result = _cap_sentence(_shorten_clause(result))
     frame = ActionFrame(
@@ -1027,9 +1210,47 @@ def transform_clause_to_result(
     return result, frame
 
 
+def _is_generic_topic_word(word: str) -> bool:
+    low = word.casefold()
+    return any(low.startswith(stem) for stem in _GENERIC_TOPIC_STEMS)
+
+
 def _topic_hits(clause: str, topic_title: str) -> int:
     topic_words = re.findall(r"[А-Яа-яЁё]{4,}", topic_title.casefold())
-    return sum(1 for word in topic_words if word in clause.casefold())
+    clause_low = clause.casefold()
+    clause_words = re.findall(r"[А-Яа-яЁё]{4,}", clause_low)
+    hits = 0
+    for word in topic_words:
+        if _is_generic_topic_word(word):
+            continue
+        matched = word in clause_low
+        if not matched:
+            stem_len = 8 if len(word) >= 8 else 5
+            stem = word[:stem_len]
+            matched = len(stem) >= 5 and any(
+                token.startswith(stem) or stem.startswith(token[:stem_len])
+                for token in clause_words
+            )
+        if matched:
+            hits += 2 if len(word) >= 8 else 1
+    return hits
+
+
+_SPECIFICITY_WEIGHTS = (
+    ("план-график", 3),
+    ("плана-график", 3),
+    ("меню", 2),
+    ("рюкзак", 2),
+    ("костр", 2),
+    ("бивак", 2),
+    ("аптечк", 2),
+    ("маршрут", 1),
+)
+
+
+def _specificity_signal(clause: str) -> int:
+    low = clause.casefold()
+    return sum(weight for stem, weight in _SPECIFICITY_WEIGHTS if stem in low)
 
 
 def _action_class(clause: str, *, theory_only: bool = False) -> int:
@@ -1044,6 +1265,8 @@ def _action_class(clause: str, *, theory_only: bool = False) -> int:
         r"(?i)^(разрядн|понятие|значение|характеристика|роль|виды|требования|способ)",
         first,
     ):
+        if theory_only and first.casefold() in {"виды", "понятие"}:
+            return 1
         return 0
     if theory_only and _looks_like_verbal_noun(first):
         return 1
@@ -1079,25 +1302,71 @@ def _has_field_marker(text: str) -> bool:
     return bool(re.search(r"(?i)на местности|на маршруте|в поле", text))
 
 
+def _is_kinds_clause(text: str) -> bool:
+    return bool(re.match(r"(?i)^виды\b", text.strip()))
+
+
 def _enrich_with_neighbors(selected: str, units: list[str]) -> str:
-    """Добавить соседние клаузы с географией или полевыми условиями той же темы."""
+    """Добавить соседние клаузы той же темы: география, поле, виды, второй объект."""
 
     if not selected or selected not in units:
         return selected
     index = units.index(selected)
     extras: list[tuple[int, str]] = []
+    used = {selected}
+
+    def add(nidx: int, neighbor: str) -> None:
+        if neighbor in used or _is_non_student_process(neighbor):
+            return
+        extras.append((nidx, neighbor))
+        used.add(neighbor)
+
     start = max(0, index - 1)
     end = min(len(units), index + 3)
     for nidx in range(start, end):
         if nidx == index:
             continue
         neighbor = units[nidx]
-        if _is_non_student_process(neighbor):
-            continue
         geo = _has_geography(neighbor) and not _has_geography(selected)
         field = _has_field_marker(neighbor) and not _has_field_marker(selected)
+        if field and "упражнен" in selected.casefold():
+            field = False
         if geo or field:
-            extras.append((nidx, neighbor))
+            add(nidx, neighbor)
+    if not any(_is_kinds_clause(item) for item in used):
+        for nidx, neighbor in enumerate(units):
+            if _is_kinds_clause(neighbor):
+                add(nidx, neighbor)
+                break
+    selected_low = selected.casefold()
+    wanted: tuple[str, ...] = ()
+    if "меню" in selected_low:
+        wanted = ("костр", "приготов")
+    elif "план подготовки" in selected_low or (
+        "план" in selected_low
+        and "составлен" in selected_low
+        and "снаряжен" not in selected_low
+    ) or (
+        "подготовк" in selected_low and "поход" in selected_low and "снаряжен" not in selected_low
+    ):
+        wanted = ("план-график", "плана-график")
+    elif "преодолен" in selected_low or "препятств" in selected_low:
+        wanted = ("самострахов", "альпеншток")
+    elif "лагер" in selected_low or "бивак" in selected_low:
+        for nidx, neighbor in enumerate(units):
+            if neighbor in used:
+                continue
+            if re.match(r"(?i)^выбор места", neighbor.strip()):
+                add(nidx, neighbor)
+                break
+        wanted = ()
+    if wanted:
+        for nidx, neighbor in enumerate(units):
+            if neighbor in used:
+                continue
+            if any(stem in neighbor.casefold() for stem in wanted):
+                add(nidx, neighbor)
+                break
     if not extras:
         return selected
     parts = [(index, selected), *extras]
@@ -1128,26 +1397,79 @@ def select_source_clause(
     if not source:
         return _normalize_spaces(topic_title), theory_only
     units = _clause_units(source)
-    if not units:
+    extra_units = _clause_units(program_content or "") if program_content else []
+    if not units and not extra_units:
         return _normalize_spaces(topic_title), theory_only
-    best_class = max(_action_class(unit, theory_only=theory_only) for unit in units)
-    pool = [
-        unit
-        for unit in units
-        if _action_class(unit, theory_only=theory_only) == best_class
-    ] or units
-    scored = sorted(
-        enumerate(pool),
-        key=lambda pair: (
-            -_topic_hits(pair[1], topic_title),
-            -_condition_signal(pair[1]),
-            pair[0],
-        ),
-    )
-    best = scored[0][1]
-    ordered = [best] + [unit for unit in pool if unit != best]
-    chosen = ordered[occurrence_index % len(ordered)]
-    return _enrich_with_neighbors(chosen, units), theory_only
+
+    def topic_score(clause: str) -> int:
+        return _topic_hits(clause, topic_title)
+
+    def theory_overlap(clause: str) -> int:
+        if not (theory_text or "").strip():
+            return 0
+        if topic_score(clause):
+            return 0
+        return _topic_hits(clause, theory_text)
+
+    def rank_key(clause: str, as_theory: bool, index: int) -> tuple:
+        return (
+            -_action_class(clause, theory_only=as_theory),
+            -topic_score(clause),
+            -theory_overlap(clause),
+            -_specificity_signal(clause),
+            -_condition_signal(clause),
+            index,
+        )
+
+    def pick(candidates: list[str], as_theory: bool) -> tuple[str, int] | None:
+        if not candidates:
+            return None
+        classed = [
+            (
+                idx,
+                unit,
+                _action_class(unit, theory_only=as_theory),
+                topic_score(unit),
+            )
+            for idx, unit in enumerate(candidates)
+        ]
+        best_class = max(item[2] for item in classed)
+        top = [item for item in classed if item[2] == best_class]
+        if top and max(item[3] for item in top) == 0:
+            aligned = [item for item in classed if item[2] >= 2 and item[3] > 0]
+            if aligned:
+                top = aligned
+        top.sort(key=lambda item: rank_key(item[1], as_theory, item[0]))
+        best = top[0][1]
+        return best, topic_score(best)
+
+    primary = pick(units, theory_only)
+    aligned = pick(extra_units, True)
+    chosen = primary[0] if primary else (aligned[0] if aligned else topic_title)
+    pool = units or extra_units
+    if (
+        primary
+        and aligned
+        and primary[1] == 0
+        and aligned[1] >= 2
+        and _action_class(primary[0], theory_only=False) <= 1
+    ):
+        chosen = aligned[0]
+        pool = extra_units
+        if _action_class(chosen, theory_only=False) <= 1:
+            theory_only = True
+    elif primary:
+        same = [
+            unit
+            for unit in units
+            if _action_class(unit, theory_only=theory_only)
+            == _action_class(chosen, theory_only=theory_only)
+        ]
+        if same:
+            ordered = [chosen] + [unit for unit in same if unit != chosen]
+            chosen = ordered[occurrence_index % len(ordered)]
+            pool = units
+    return _enrich_with_neighbors(chosen, pool), theory_only
 
 
 def _leading_clause(frame: ActionFrame) -> str:
@@ -1160,18 +1482,155 @@ def _leading_blob(frame: ActionFrame) -> str:
     return _normalize_spaces(f"{action} {_leading_clause(frame)}").casefold()
 
 
+_CONTROL_TEMPLATES = (
+    (("уклад", "рюкзак"), "проверка укладки рюкзака"),
+    (("меню", "костр"), "проверка меню и приготовления пищи на костре"),
+    (("меню",), "проверка меню"),
+    (("план-график",), "проверка плана-графика"),
+    (("плана-график",), "проверка плана-графика"),
+    (("готов", "костр"), "проверка приготовления пищи на костре"),
+    (("приготов", "костр"), "проверка приготовления пищи на костре"),
+    (("разверт", "лагер"), "наблюдение при развертывании лагеря"),
+    (("сверт", "лагер"), "наблюдение при развертывании лагеря"),
+    (("разверт", "бивак"), "наблюдение при развертывании лагеря"),
+    (("ориентирует", "карт"), "проверка ориентирования карты"),
+    (("ориентирован", "карт"), "проверка ориентирования карты"),
+    (("компас", "карт"), "проверка работы с компасом"),
+    (("аптечк",), "проверка состава аптечки"),
+    (("оказ", "помощ"), "проверка оказания первой помощи"),
+    (("дневник",), "проверка дневника самоконтроля"),
+    (("гигиен",), "проверка личной гигиены"),
+    (("соревнован",), "проверка участия в соревнованиях"),
+    (("диктант", "топограф"), "топографический диктант"),
+    (("диктант",), "диктант"),
+    (("отбор", "ориентир"), "проверка отбора ориентиров"),
+    (("азимут",), "проверка измерения азимутов"),
+    (("самострахов",), "проверка самостраховки"),
+    (("альпеншток",), "проверка работы с альпенштоком"),
+    (("упражнен",), "проверка выполнения упражнений"),
+    (("отрабатыв", "техник", "движен"), "проверка техники движения"),
+    (("отработ", "техник", "движен"), "проверка техники движения"),
+    (("измер", "шаг"), "проверка измерения шага"),
+    (("транспортир", "пострадав"), "проверка транспортировки пострадавшего"),
+    (("обязанност", "должност"), "проверка исполнения обязанностей"),
+)
+
+
+def _drop_leading_verb(text: str) -> str:
+    return _normalize_spaces(
+        re.sub(
+            r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет|ает)\s+",
+            "",
+            text.strip(),
+            count=1,
+        )
+    )
+
+
+def _control_focus(text: str) -> str:
+    focus = _drop_leading_verb(_normalize_spaces(text))
+    focus = focus.strip(" .;:")
+    if not focus:
+        return ""
+    if focus[:1].isupper() and (len(focus) < 2 or not focus[1].isupper()):
+        focus = focus[:1].lower() + focus[1:]
+    return _shorten_clause(focus, max_len=56)
+
+
+def _first_word_prepositional(text: str) -> str:
+    words = _normalize_spaces(text).split()
+    if not words:
+        return text
+    first = words[0]
+    low = first.casefold()
+    if low.endswith("ия") and len(first) > 3:
+        words[0] = first[:-2] + "ии"
+    elif low.endswith("ие") and len(first) > 3:
+        words[0] = first[:-1] + "ю"
+    elif low.endswith("а") and len(first) > 3:
+        words[0] = first[:-1] + "е"
+    elif low.endswith("ь") and len(first) > 3:
+        words[0] = first[:-1] + "и"
+    else:
+        words[0] = low
+    if words[0][:1].isupper():
+        words[0] = words[0][:1].lower() + words[0][1:]
+    return " ".join(words)
+
+
+def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
+    blob = _normalize_spaces(f"{planned_result} {frame.clause} {frame.object}").casefold()
+    kinds = re.search(r"виды\s+([а-яё]+)", blob)
+    if kinds:
+        return f"устный опрос по видам {kinds.group(1)}"
+    raw_clause = (frame.clause or "").split(".")[0]
+    raw_result = (planned_result or "").split(".")[0]
+    clause_core = re.sub(r"(?i)^(характеризует|называет)\s+", "", raw_clause).strip()
+    result_core = re.sub(r"(?i)^(характеризует|называет)\s+", "", raw_result).strip()
+    clause_first = clause_core.split()[0] if clause_core.split() else ""
+    if (
+        clause_first.casefold() in {"ее", "её", "его", "их", "эта", "это", "эти"}
+        or _is_adjective(clause_first)
+        or clause_first.casefold() in {"краткие", "общие", "основные", "сведения"}
+    ):
+        source = result_core
+    else:
+        source = clause_core or result_core
+    first = source.split()[0] if source.split() else ""
+    if first.casefold() in {"ее", "её", "его", "их", "эта", "это", "эти"}:
+        return "устный опрос"
+    if source and first and not _is_adjective(first):
+        return "устный опрос по " + _shorten_clause(
+            _first_word_prepositional(source), max_len=48
+        )
+    return "устный опрос"
+
+
+def _parallel_merged_objects(result: str) -> str:
+    if not result:
+        return ""
+    verbs = re.findall(r"(?i)\b[а-яё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b", result)
+    if len(verbs) != 1:
+        return ""
+    body = _drop_leading_verb(result).strip(" .")
+    if " и " not in body:
+        return ""
+    left, right = body.split(" и ", 1)
+    left_word = (left.split() or [""])[0]
+    right_word = (right.split() or [""])[0]
+    if len(left_word) < 4 or left_word.casefold()[:4] != right_word.casefold()[:4]:
+        return ""
+    return body
+
+
+def _check_focus(focus: str) -> str:
+    words = focus.split(None, 1)
+    if not words:
+        return focus
+    first = words[0]
+    if re.search(r"(?i)[бвгджзклмнпрстфхцчшщ]$", first) and len(first) >= 4:
+        first = first + "а"
+        return first if len(words) == 1 else f"{first} {words[1]}"
+    return focus
+
+
 def control_from_frame(
     frame: ActionFrame,
     *,
     lesson_type: str,
     theory_hours: int,
     practice_hours: int,
+    planned_result: str = "",
 ) -> str:
     lead = _leading_blob(frame)
     type_low = lesson_type.casefold()
-    if "викторин" in lead:
+    result_low = (planned_result or "").casefold()
+    blob = _normalize_spaces(
+        f"{planned_result} {frame.object} {lead}"
+    ).casefold()
+    if "викторин" in blob:
         return "викторина"
-    if _has_stem(lead, ("наблюден",)):
+    if _has_stem(lead, ("наблюден",)) and "дневник" not in blob:
         return "наблюдение"
     if any(marker in type_low for marker in ("экскурсия", "на местности")):
         return "наблюдение"
@@ -1179,16 +1638,33 @@ def control_from_frame(
         return "наблюдение"
     if _has_stem(lead, ("прогул", "экскурси", "посещен")):
         return "наблюдение"
-    if _has_stem(lead, ("отчёт", "отчет", "доклад", "заслушиван")):
+    if _has_stem(blob, ("отчёт", "отчет", "доклад", "заслушиван")):
         return "защита результата"
-    if _has_stem(lead, _PERFORM_STEMS) or "трениров" in type_low:
-        return "демонстрация навыка"
+    focus = _control_focus(planned_result) or _control_focus(frame.object)
+    parallel = _parallel_merged_objects(planned_result)
+    if (
+        parallel
+        and "теоретическ" not in type_low
+        and "беседа" not in type_low
+        and "упражнен" not in result_low
+    ):
+        return f"проверка {_check_focus(parallel)}"
+    for stems, label in _CONTROL_TEMPLATES:
+        if stems == ("упражнен",) and any(
+            key in result_low
+            for key in ("отбор", "азимут", "привяз", "масштаб")
+        ):
+            continue
+        if result_low and _has_all_stems(result_low, stems):
+            return label
+        if stems[0] in {"диктант", "отработ"} and _has_all_stems(blob, stems):
+            return label
     if "теоретическ" in type_low or "беседа" in type_low or (
         theory_hours and not practice_hours
     ):
-        return "устный опрос"
-    if _has_stem(lead, _PRODUCE_STEMS) or practice_hours:
-        return "практическое задание"
+        return _oral_quiz_control(frame, planned_result)
+    if focus:
+        return f"проверка {_check_focus(focus)}"
     return "устный опрос"
 
 
@@ -1262,12 +1738,14 @@ def derive_fields_v2(
         full_source=_normalize_spaces(
             f"{theory_text} {practice_text} {program_content} {clause}"
         ),
+        topic_title=topic_title,
     )
     if not planned_result:
         planned_result, frame = transform_clause_to_result(
             topic_title,
             theory_only=True,
             full_source=topic_title,
+            topic_title=topic_title,
         )
     lesson_type = type_from_frame(
         frame,
@@ -1282,6 +1760,7 @@ def derive_fields_v2(
         lesson_type=lesson_type,
         theory_hours=theory_hours,
         practice_hours=practice_hours,
+        planned_result=planned_result,
     )
     return ContentEngineV2Result(
         frame=frame,
