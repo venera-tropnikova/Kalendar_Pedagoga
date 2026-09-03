@@ -173,9 +173,125 @@ def _enable_cell_wrap(cell) -> None:
         tc_pr.remove(no_wrap)
 
 
+def _first_run_properties(paragraph):
+    for run in paragraph.runs:
+        properties = run._r.find(qn("w:rPr"))
+        if properties is not None:
+            return deepcopy(properties)
+    paragraph_properties = paragraph._p.find(qn("w:pPr"))
+    if paragraph_properties is not None:
+        properties = paragraph_properties.find(qn("w:rPr"))
+        if properties is not None:
+            return deepcopy(properties)
+    return None
+
+
+def _strip_header_sample_paragraph_layout(paragraph_properties) -> None:
+    """Убрать свойства пустой/заголовочной строки, которые растягивают данные.
+
+    Шапка таблицы не вызывается отсюда. Размер и шрифт остаются.
+    firstLine/tabs сужают колонку; jc=center — выравнивание шапки, не текста данных.
+    Без явного spacing действует docDefaults шаблона (after=200, line=276).
+    """
+
+    if paragraph_properties is None:
+        return
+    for tag in ("w:ind", "w:tabs", "w:jc"):
+        node = paragraph_properties.find(qn(tag))
+        if node is not None:
+            paragraph_properties.remove(node)
+    spacing = paragraph_properties.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        paragraph_properties.append(spacing)
+    spacing.set(qn("w:before"), "0")
+    spacing.set(qn("w:after"), "0")
+    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:lineRule"), "auto")
+    snap = paragraph_properties.find(qn("w:snapToGrid"))
+    if snap is None:
+        snap = OxmlElement("w:snapToGrid")
+        paragraph_properties.append(snap)
+    snap.set(qn("w:val"), "0")
+
+
+def _strip_cloned_sample_row_layout(table_row) -> None:
+    """Строка данных не наследует фиксированную высоту образца шапки/пустышки."""
+
+    row_properties = table_row.find(qn("w:trPr"))
+    if row_properties is not None:
+        height = row_properties.find(qn("w:trHeight"))
+        if height is not None:
+            row_properties.remove(height)
+        leaked_header = row_properties.find(qn("w:tblHeader"))
+        if leaked_header is not None:
+            row_properties.remove(leaked_header)
+    for cell in table_row.findall(qn("w:tc")):
+        for paragraph in cell.findall(qn("w:p")):
+            paragraph_properties = paragraph.find(qn("w:pPr"))
+            if paragraph_properties is None:
+                paragraph_properties = OxmlElement("w:pPr")
+                paragraph.insert(0, paragraph_properties)
+            _strip_header_sample_paragraph_layout(paragraph_properties)
+
+
+def _without_bold(properties):
+    """Свойства шрифта без начертания: данные календаря должны быть regular."""
+
+    if properties is None:
+        return None
+    cleaned = deepcopy(properties)
+    for tag in ("w:b", "w:bCs"):
+        node = cleaned.find(qn(tag))
+        if node is not None:
+            cleaned.remove(node)
+    bold = OxmlElement("w:b")
+    bold.set(qn("w:val"), "0")
+    bold_cs = OxmlElement("w:bCs")
+    bold_cs.set(qn("w:val"), "0")
+    cleaned.insert(0, bold_cs)
+    cleaned.insert(0, bold)
+    return cleaned
+
+
+def _set_paragraph_text_keep_format(paragraph, text: str, run_properties=None) -> None:
+    """Заменить текст абзаца, сохранив pPr и rPr шаблона."""
+
+    seed = run_properties if run_properties is not None else _first_run_properties(paragraph)
+    for child in list(paragraph._p):
+        if child.tag == qn("w:r"):
+            paragraph._p.remove(child)
+    run = paragraph.add_run(text)
+    if seed is not None:
+        run._r.insert(0, deepcopy(seed))
+
+
 def _set_cell_text(cell, value: str) -> None:
-    cell.text = value
+    """Подставить текст ячейки, сохранив шрифт и размер.
+
+    Переносы строк — мягкие w:br в одном абзаце, как при cell.text,
+    а не отдельные w:p: лишние абзацы наследуют межстрочный зазор шаблона
+    и растягивают строку таблицы.
+    """
+
     _enable_cell_wrap(cell)
+    paragraphs = list(cell.paragraphs)
+    if not paragraphs:
+        cell.add_paragraph()
+        paragraphs = list(cell.paragraphs)
+    seed_paragraph = paragraphs[0]
+    seed_rpr = _without_bold(_first_run_properties(seed_paragraph))
+    seed_ppr = seed_paragraph._p.get_or_add_pPr()
+    _strip_header_sample_paragraph_layout(seed_ppr)
+    mark = seed_ppr.find(qn("w:rPr"))
+    if mark is not None:
+        for tag in ("w:b", "w:bCs"):
+            node = mark.find(qn(tag))
+            if node is not None:
+                mark.remove(node)
+    for extra in list(cell.paragraphs)[1:]:
+        cell._tc.remove(extra._p)
+    _set_paragraph_text_keep_format(seed_paragraph, value, seed_rpr)
 
 
 def _center_cell_text(cell) -> None:
@@ -376,15 +492,13 @@ def _load_template(template: CalendarTemplateSelection) -> Document:
 def _ensure_data_rows(table, expected_rows: int) -> None:
     source_index = 2 if len(table.rows) > 2 else len(table.rows) - 1
     prototype = deepcopy(table.rows[source_index]._tr)
-    prototype_pr = prototype.find(qn("w:trPr"))
-    if prototype_pr is not None:
-        leaked_header = prototype_pr.find(qn("w:tblHeader"))
-        if leaked_header is not None:
-            prototype_pr.remove(leaked_header)
+    _strip_cloned_sample_row_layout(prototype)
     while len(table.rows) < 2 + expected_rows:
         table._tbl.append(deepcopy(prototype))
     while len(table.rows) > 2 + expected_rows:
         table._tbl.remove(table.rows[-1]._tr)
+    for row in table.rows[2:]:
+        _strip_cloned_sample_row_layout(row._tr)
 
 
 def _month_cell_at(row, column_index: int):
@@ -510,6 +624,112 @@ def _merge_month_cells_by_page_segments(
         _merge_month_cell_group(group_rows, columns, months[group_start])
 
 
+def _quoted_program_name(program_title: str | None, utp: UtpParseResult) -> str:
+    program = (program_title or utp.metadata.program_name or "").strip().strip("«»\"'")
+    return program
+
+
+def _study_year_number(utp: UtpParseResult, study_year_hints: tuple[str | None, ...]) -> int | None:
+    for raw in (utp.metadata.study_year, *study_year_hints):
+        number = infer_study_year_number(raw)
+        if number is not None:
+            return number
+    return None
+
+
+def _fill_hours_paren(paren: str, *, weekly: int | None, yearly: int | None) -> str:
+    weekly_slot = "недел" in paren.casefold()
+    hours = weekly if weekly_slot and weekly else (yearly or weekly)
+    if not hours:
+        return paren
+    if re.search(r"\d+", paren):
+        return re.sub(r"\d+", str(hours), paren, count=1)
+    if weekly_slot:
+        return f"({hours} {_hours_word(hours)} в неделю)"
+    return f"({hours})"
+
+
+def _fill_organization_header_paragraph(
+    text: str,
+    utp: UtpParseResult,
+    *,
+    program_title: str | None,
+    study_year_hints: tuple[str | None, ...],
+    group_number: str | None,
+    class_name: str | None,
+) -> str:
+    updated = text
+    program = _quoted_program_name(program_title, utp)
+    if program and "«" in updated and "»" in updated:
+        updated = re.sub(r"«[^»]*»", f"«{program}»", updated, count=1)
+    elif program and "название программы" in updated.casefold():
+        updated = re.sub(r"название программы", program, updated, count=1, flags=re.IGNORECASE)
+
+    year_number = _study_year_number(utp, study_year_hints)
+    if year_number is not None:
+        if re.search(r"(?:_{2,}|\d+)\s+год обучения", updated, flags=re.IGNORECASE):
+            updated = re.sub(
+                r"(?:_{2,}|\d+)\s+год обучения",
+                f"{year_number} год обучения",
+                updated,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        elif re.search(r"(?:_{2,}|\d+)\s*г\.об", updated, flags=re.IGNORECASE):
+            updated = re.sub(
+                r"(?:_{2,}|\d+)\s*г\.об\.?",
+                f"{year_number} г.об.",
+                updated,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+    if "(" in updated and ")" in updated and (
+        "час" in updated.casefold() or "чса" in updated.casefold() or "недел" in updated.casefold()
+    ):
+        updated = re.sub(
+            r"\([^()]*\)",
+            lambda match: _fill_hours_paren(
+                match.group(0),
+                weekly=utp.metadata.hours_per_week,
+                yearly=utp.metadata.hours_per_year,
+            ),
+            updated,
+            count=1,
+        )
+
+    if "группа" in updated.casefold() and (group_number or class_name):
+        return _group_class_line(group_number, class_name)
+    return updated
+
+
+def _fill_organization_header(
+    document,
+    utp: UtpParseResult,
+    *,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+    group_number: str | None = None,
+    class_name: str | None = None,
+) -> None:
+    """Подставить значения в шапку шаблона организации, не меняя её состав и стили."""
+
+    for paragraph in document.paragraphs:
+        original = paragraph.text
+        if not original.strip():
+            continue
+        updated = _fill_organization_header_paragraph(
+            original,
+            utp,
+            program_title=program_title,
+            study_year_hints=study_year_hints,
+            group_number=group_number,
+            class_name=class_name,
+        )
+        if updated != original:
+            _set_paragraph_text_keep_format(paragraph, updated)
+
+
 def _write_document_header(
     document,
     utp: UtpParseResult,
@@ -519,7 +739,19 @@ def _write_document_header(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    uses_organization_template: bool = False,
 ) -> None:
+    if uses_organization_template:
+        _fill_organization_header(
+            document,
+            utp,
+            program_title=program_title,
+            study_year_hints=study_year_hints,
+            group_number=group_number,
+            class_name=class_name,
+        )
+        return
+
     if document.paragraphs:
         document.paragraphs[0].text = "Календарный план"
     program_line = _program_header_line(
@@ -554,6 +786,7 @@ def _populate_calendar_table(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    uses_organization_template: bool = False,
 ) -> tuple:
     """Заполнить таблицу календаря строками данных (без объединения месяцев)."""
 
@@ -570,6 +803,7 @@ def _populate_calendar_table(
         study_year_hints=resolved_hints,
         group_number=group_number,
         class_name=class_name,
+        uses_organization_template=uses_organization_template,
     )
 
     table = document.tables[0]
@@ -616,6 +850,7 @@ def _merge_month_cells_for_pages(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    uses_organization_template: bool = False,
 ) -> bytes:
     """Собрать DOCX с объединением месяцев по сегментам страниц."""
 
@@ -628,6 +863,7 @@ def _merge_month_cells_for_pages(
         study_year_hints=study_year_hints,
         group_number=group_number,
         class_name=class_name,
+        uses_organization_template=uses_organization_template,
     )
     _apply_explicit_page_breaks(table, columns, rows_by_page)
     _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
@@ -660,6 +896,7 @@ def generate_calendar_docx(
         "study_year_hints": study_year_hints,
         "group_number": group_number,
         "class_name": class_name,
+        "uses_organization_template": template.uses_organization_template,
     }
 
     # Первый проход: без merge. Он нужен, чтобы получить фактическую пагинацию

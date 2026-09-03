@@ -5,6 +5,7 @@ from functools import lru_cache
 import pytest
 from calendar_pedagoga.docx_generation import (
     STANDARD_TEMPLATE_PATH,
+    _fill_organization_header_paragraph,
     _group_class_line,
     _program_header_line,
     _resolve_header_from_rows,
@@ -341,3 +342,143 @@ def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
 
     issues = verify_month_labels_by_page(generated, months=expected_months)
     assert not issues, "; ".join(issues)
+
+
+def _run_font(paragraph):
+    run = paragraph.runs[0]
+    size = run.font.size.pt if run.font.size else None
+    name = run.font.name
+    if name is None:
+        rpr = run._r.find(qn("w:rPr"))
+        rfonts = rpr.find(qn("w:rFonts")) if rpr is not None else None
+        if rfonts is not None:
+            name = rfonts.get(qn("w:ascii")) or rfonts.get(qn("w:hAnsi"))
+    return name, size
+
+
+def test_organization_header_replaces_values_without_academic_year_line() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    tourists = resolve_utp(
+        None,
+        validate_upload(
+            UploadPurpose.PROGRAM,
+            program_path.name,
+            program_path.read_bytes(),
+        ),
+    )
+    filled = _fill_organization_header_paragraph(
+        "« Туристы проводники »  1 год обучения  ( 72 чса )",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number=None,
+        class_name=None,
+    )
+    assert "Туристы-проводники" in filled
+    assert "1 год обучения" in filled
+    assert "72" in filled
+    assert "учебный год" not in filled
+
+    key = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    sample = _fill_organization_header_paragraph(
+        "« название программы »  ____  г.об. ( количество часов в неделю)",
+        key,
+        program_title="КЛЮЧ",
+        study_year_hints=("УТП КЛЮЧ 2 г. 2ч.docx",),
+        group_number=None,
+        class_name=None,
+    )
+    assert sample.startswith("«КЛЮЧ»")
+    assert "2 г.об." in sample
+    assert "2 часа в неделю" in sample
+
+
+def test_organization_template_keeps_visual_header_and_times_new_roman() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    template_path = REFERENCES / "Календарный план.docx"
+    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
+    validated_program = validate_upload(
+        UploadPurpose.PROGRAM,
+        program_path.name,
+        program_path.read_bytes(),
+    )
+    utp = resolve_utp(None, validated_program)
+    content = build_content_model(build_schedule(utp), utp, program_upload, program_path.name)
+    resolved = resolve_lesson_content(build_lesson_content(content))
+    generated = generate_calendar_docx(
+        utp,
+        resolved,
+        select_calendar_template(template_path.name, template_path.read_bytes()),
+        "2026–2027",
+        program_title=program_upload.title,
+        study_year_hints=(program_path.name,),
+    )
+
+    source = Document(str(template_path))
+    document = Document(BytesIO(generated))
+    header_texts = [paragraph.text for paragraph in document.paragraphs[:4]]
+    assert header_texts[0] == "Календарный план"
+    assert "Туристы-проводники" in header_texts[1]
+    assert "1 год обучения" in header_texts[1]
+    assert "72" in header_texts[1]
+    assert header_texts[2] == "Группа № ___________ (Класс _________)"
+    assert all("учебный год" not in text for text in header_texts)
+
+    for paragraph in document.paragraphs[:3]:
+        name, size = _run_font(paragraph)
+        assert name == "Times New Roman"
+        assert size == 12.0
+
+    source_headers = [
+        "".join(cell.xpath(".//w:t/text()")).strip()
+        for cell in source.tables[0].rows[1]._tr.tc_lst
+    ]
+    generated_headers = [
+        "".join(cell.xpath(".//w:t/text()")).strip()
+        for cell in document.tables[0].rows[1]._tr.tc_lst
+    ]
+    assert generated_headers == source_headers
+
+    source_grid = [
+        width.get(qn("w:w"))
+        for width in source.tables[0]._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+    generated_grid = [
+        width.get(qn("w:w"))
+        for width in document.tables[0]._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+    assert generated_grid == source_grid
+
+    data_run = document.tables[0].rows[2].cells[2].paragraphs[0].runs[0]
+    data_size = data_run.font.size.pt if data_run.font.size else None
+    assert data_size == 12.0
+
+    header_height = source.tables[0].rows[1]._tr.find(qn("w:trPr")).find(qn("w:trHeight"))
+    generated_header_height = document.tables[0].rows[1]._tr.find(qn("w:trPr")).find(
+        qn("w:trHeight")
+    )
+    assert header_height is not None
+    assert generated_header_height is not None
+    assert generated_header_height.get(qn("w:val")) == header_height.get(qn("w:val"))
+
+    for row in document.tables[0].rows[2:]:
+        row_properties = row._tr.find(qn("w:trPr"))
+        height = row_properties.find(qn("w:trHeight")) if row_properties is not None else None
+        assert height is None, "data rows must not inherit sample trHeight"
+        for paragraph in row.cells[2].paragraphs:
+            paragraph_properties = paragraph._p.find(qn("w:pPr"))
+            assert paragraph_properties is not None
+            indent = paragraph_properties.find(qn("w:ind"))
+            tabs = paragraph_properties.find(qn("w:tabs"))
+            spacing = paragraph_properties.find(qn("w:spacing"))
+            assert indent is None, "data cells must not inherit header firstLine indent"
+            assert tabs is None, "data cells must not inherit header tabs"
+            assert spacing is not None, "data cells must override docDefaults spacing"
+            assert spacing.get(qn("w:before")) == "0"
+            assert spacing.get(qn("w:after")) == "0"
+            assert spacing.get(qn("w:line")) == "240"
+            assert spacing.get(qn("w:lineRule")) == "auto"
+            assert paragraph_properties.find(qn("w:jc")) is None
+
+    theory_cell = document.tables[0].rows[2].cells[2]
+    assert len(theory_cell.paragraphs) == 1
