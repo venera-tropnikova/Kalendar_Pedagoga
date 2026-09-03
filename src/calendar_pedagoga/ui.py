@@ -8,6 +8,7 @@ import streamlit as st
 
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
+from calendar_pedagoga.normative_engine import NormativeReport, evaluate_normative_mvp
 from calendar_pedagoga.normative_registry import (
     CalendarRegistryReference,
     NormativeUpdateChoice,
@@ -401,6 +402,37 @@ def _inject_landing_styles() -> None:
         .kp-results-status {
             margin: 0.45rem 0 0.15rem 0;
         }
+        .kp-normative-check {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 0.75rem 1rem 0.85rem 1rem;
+            margin: 0.55rem 0 0.45rem 0;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .kp-normative-check-title {
+            font-size: 1.02rem;
+            font-weight: 600;
+            color: #111827;
+            margin: 0 0 0.45rem 0;
+        }
+        .kp-normative-check-label {
+            font-size: 0.92rem;
+            font-weight: 600;
+            margin: 0.4rem 0 0.15rem 0;
+        }
+        .kp-normative-check-label.ok { color: #166534; }
+        .kp-normative-check-label.warn { color: #92400e; }
+        .kp-normative-check-label.skip { color: #6b7280; }
+        .kp-normative-check ul {
+            margin: 0 0 0.15rem 1.1rem;
+            padding: 0;
+            color: #374151;
+        }
+        .kp-normative-check li {
+            margin: 0.12rem 0;
+            line-height: 1.4;
+        }
         .kp-results-note {
             color: #6b7280;
             font-size: 0.9rem;
@@ -642,6 +674,32 @@ def _collect_analysis_warnings(
     return tuple(dict.fromkeys(collected))
 
 
+def _render_normative_report(report: NormativeReport) -> None:
+    sections: list[str] = [
+        '<div class="kp-normative-check">',
+        '<p class="kp-normative-check-title">Нормативная проверка</p>',
+    ]
+    groups = (
+        (report.passed, "ok", "Что в порядке"),
+        (report.warnings, "warn", "На что обратить внимание"),
+        (report.unchecked, "skip", "Что не удалось проверить"),
+    )
+    for checks, css, title in groups:
+        if not checks:
+            continue
+        mark = {"ok": "✓", "warn": "⚠", "skip": "—"}[css]
+        sections.append(
+            f'<p class="kp-normative-check-label {css}">{mark} {html.escape(title)}</p>'
+        )
+        sections.append("<ul>")
+        sections.extend(
+            f"<li>{html.escape(item.teacher_text)}</li>" for item in checks
+        )
+        sections.append("</ul>")
+    sections.append("</div>")
+    st.markdown("".join(sections), unsafe_allow_html=True)
+
+
 def _render_teacher_analysis_screen(
     *,
     utp: UtpParseResult,
@@ -649,6 +707,7 @@ def _render_teacher_analysis_screen(
     schedule: ScheduleResult,
     matches: tuple[ContentMatch, ...],
     detail_warnings: tuple[str, ...],
+    academic_year: str,
     source_utp_name: str | None = None,
     program_filename: str | None = None,
 ) -> None:
@@ -688,6 +747,14 @@ def _render_teacher_analysis_screen(
     st.markdown(
         '<div class="kp-results-summary">' + "".join(summary_lines) + "</div>",
         unsafe_allow_html=True,
+    )
+    _render_normative_report(
+        evaluate_normative_mvp(
+            utp,
+            program,
+            academic_year=academic_year,
+            study_year_hints=(source_utp_name, program_filename),
+        )
     )
 
     if program and matches:
@@ -1016,6 +1083,7 @@ def run_app() -> None:
             schedule=schedule,
             matches=matches,
             detail_warnings=tuple(detail_warnings),
+            academic_year=academic_year,
             source_utp_name=validated_utp.filename,
             program_filename=(
                 validated_program.filename if validated_program is not None else None

@@ -38,6 +38,9 @@ class ProgramData:
     knowledge_outcomes: tuple[str, ...]
     skill_outcomes: tuple[str, ...]
     content_items: tuple[ProgramContentItem, ...]
+    duration_years: int | None = None
+    age_min: int | None = None
+    age_max: int | None = None
 
 
 def find_libreoffice() -> Path | None:
@@ -422,6 +425,20 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
     expected_knowledge, expected_skills = _structured_expected_outcomes(paragraphs)
     knowledge = tuple(dict.fromkeys([*year_knowledge, *expected_knowledge]))
     skills = tuple(dict.fromkeys([*year_skills, *expected_skills]))
+    duration_text = _first_match(
+        text,
+        (
+            r"срок реализации(?: программы)?\s*[:.-]\s*([^\n]+)",
+            r"программа рассчитана на\s*([^\n]+)",
+        ),
+    )
+    student_age = _first_match(
+        text,
+        (
+            r"возраст (?:обучающихся|учащихся|детей)\s*[:.-]\s*([^\n]+)",
+        ),
+    )
+    age_min, age_max = parse_age_range(student_age)
     return ProgramData(
         title=_first_match(
             text,
@@ -431,19 +448,8 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
                 r"(?m)^[«\"]([^»\"]+)[»\"]$",
             ),
         ),
-        duration=_first_match(
-            text,
-            (
-                r"срок реализации(?: программы)?\s*[:.-]\s*([^\n]+)",
-                r"программа рассчитана на\s*([^\n]+)",
-            ),
-        ),
-        student_age=_first_match(
-            text,
-            (
-                r"возраст (?:обучающихся|учащихся|детей)\s*[:.-]\s*([^\n]+)",
-            ),
-        ),
+        duration=duration_text,
+        student_age=student_age,
         goal=_first_match(
             text,
             (r"цель(?: программы)?\s*[:.-]\s*([^\n]+)",),
@@ -455,7 +461,50 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
         knowledge_outcomes=knowledge,
         skill_outcomes=skills,
         content_items=_content_items(document, study_year),
+        duration_years=parse_duration_years(duration_text),
+        age_min=age_min,
+        age_max=age_max,
     )
+
+
+def parse_duration_years(value: str | None) -> int | None:
+    """Число лет только из явного «N год/года/лет» в начале строки."""
+
+    if not value:
+        return None
+    found = re.match(
+        r"\s*(\d+)\s+(год(?:а|ов)?|лет)\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if found is None:
+        return None
+    years = int(found.group(1))
+    return years if years > 0 else None
+
+
+def parse_age_range(value: str | None) -> tuple[int | None, int | None]:
+    """Диапазон возраста только из явного «N–M лет» или «от N до M лет»."""
+
+    if not value:
+        return None, None
+    text = value.casefold()
+    found = re.search(
+        r"(\d+)\s*[-–—]\s*(\d+)\s*(?:лет|года|год)?\b",
+        text,
+    )
+    if found is None:
+        found = re.search(
+            r"от\s+(\d+)\s+до\s+(\d+)\s*(?:лет|года|год)?\b",
+            text,
+        )
+    if found is None:
+        return None, None
+    low = int(found.group(1))
+    high = int(found.group(2))
+    if low <= 0 or high <= 0 or low > high or high > 80:
+        return None, None
+    return low, high
 
 
 def infer_study_year_number(value: str | None) -> int | None:

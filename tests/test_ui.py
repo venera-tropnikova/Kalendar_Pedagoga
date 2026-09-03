@@ -193,6 +193,10 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Документы проверены" in text
     assert "Год обучения:</strong> 1 год обучения" in text
     assert "Возраст:</strong> Не найдено" in text
+    assert "Нормативная проверка" in text
+    assert "Что в порядке" in text
+    assert "PASS" not in text
+    assert "NOT CHECKED" not in text
 
 
 def test_generation_click_runs_pipeline_and_exposes_download() -> None:

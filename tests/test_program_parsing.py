@@ -10,6 +10,8 @@ from calendar_pedagoga.program_parsing import (
     LegacyDocUnsupportedError,
     ProgramContentItem,
     convert_legacy_doc,
+    parse_age_range,
+    parse_duration_years,
     parse_program_docx,
     parse_program,
     study_year_label,
@@ -63,7 +65,10 @@ def test_parse_program_docx_preserves_source_wording() -> None:
 
     assert result.title == "КЛЮЧ"
     assert result.duration == "2 года"
+    assert result.duration_years == 2
     assert result.student_age == "11-12 лет"
+    assert result.age_min == 11
+    assert result.age_max == 12
     assert result.goal == "развитие интереса к родному краю."
     assert result.tasks == (
         "изучить историю города;",
@@ -139,7 +144,12 @@ def test_real_key_program_matches_all_13_positions() -> None:
 
     assert program.title == "КЛЮЧ"
     assert program.duration == "3 года"
+    assert program.duration_years == 3
     assert program.student_age == "8 – 11 лет"
+    assert program.age_min == 8
+    assert program.age_max == 11
+    assert parse_duration_years("несколько лет") is None
+    assert parse_age_range("11 лет") == (None, None)
     assert len(program.tasks) == 3
     assert len(program.content_items) == 16
     assert len(matches) == 13
