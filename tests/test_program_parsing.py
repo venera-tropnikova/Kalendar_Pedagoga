@@ -73,6 +73,8 @@ def test_parse_program_docx_preserves_source_wording() -> None:
     assert result.expected_results == (
         "обучающийся знает историю города.",
     )
+    assert result.knowledge_outcomes == ()
+    assert result.skill_outcomes == ()
     assert result.content_items[0].title == "Введение"
     assert "Знакомство с программой" in result.content_items[0].content
 
@@ -143,10 +145,22 @@ def test_real_key_program_matches_all_13_positions() -> None:
     assert all(match.status is not MatchStatus.NOT_MATCHED for match in matches)
 def test_tour_guides_year1_program_finds_content_items() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
-    program = parse_program(program_path.read_bytes(), program_path.name)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
     assert program.title == "Туристы-проводники"
     assert len(program.content_items) >= 20
     titles = {item.title for item in program.content_items}
     assert "Основы туристской подготовки" in titles
     assert any("Туристские путешествия" in title for title in titles)
     assert any(item.content for item in program.content_items)
+    assert any("палатк" in item.casefold() for item in program.skill_outcomes)
+    assert any("ориентир" in item.casefold() for item in program.knowledge_outcomes)
+    assert all("тест" not in item.casefold() for item in program.expected_results)
+
+
+def test_key_year2_program_parses_know_and_able_outcomes() -> None:
+    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
+    assert any("истори" in item.casefold() for item in program.knowledge_outcomes)
+    assert any("палатк" in item.casefold() for item in program.skill_outcomes)
+    # Не смешивать исходы другого года.
+    assert not any("адрес школы" in item.casefold() for item in program.knowledge_outcomes)

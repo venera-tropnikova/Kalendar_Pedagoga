@@ -35,6 +35,8 @@ class ProgramData:
     lesson_forms: tuple[str, ...]
     teaching_methods: tuple[str, ...]
     expected_results: tuple[str, ...]
+    knowledge_outcomes: tuple[str, ...]
+    skill_outcomes: tuple[str, ...]
     content_items: tuple[ProgramContentItem, ...]
 
 
@@ -181,6 +183,163 @@ def _find_content_start(paragraphs, study_year: int | None) -> int | None:
     )
 
 
+def _year_number_from_text(text: str) -> int | None:
+    low = text.casefold()
+    for token, number in (
+        ("перв", 1),
+        ("втор", 2),
+        ("трет", 3),
+        ("четв", 4),
+    ):
+        if token in low:
+            return number
+    found = re.search(r"\b(\d+)\s*[-–—]?\s*го?\s*года", low)
+    if found:
+        return int(found.group(1))
+    found = re.search(r"\b(\d+)\s+года", low)
+    if found:
+        return int(found.group(1))
+    return None
+
+
+def _split_outcome_items(text: str) -> list[str]:
+    """Разбить абзац исхода на отдельные формулировки без выдумок."""
+
+    cleaned = _clean(re.sub(r"^[•\-–—]\s*", "", text)).strip(" ;.")
+    if not cleaned:
+        return []
+    if re.match(r"(?i)^(?:знать|уметь|знания|умения(?:\s+и\s+навыки)?)\s*:?\s*$", cleaned):
+        return []
+    parts = re.split(r"[;]\s*", cleaned)
+    items: list[str] = []
+    for part in parts:
+        item = _clean(part).strip(" ;.")
+        if not item:
+            continue
+        if re.match(r"(?i)^\d+[\).]\s*", item) and len(item) < 12:
+            continue
+        items.append(item)
+    return items
+
+
+def _year_end_outcomes(
+    paragraphs: list[str],
+    study_year: int | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Извлечь «должны знать / должны уметь» для выбранного года обучения."""
+
+    knowledge: list[str] = []
+    skills: list[str] = []
+    mode: str | None = None
+    locked_year: int | None = study_year
+
+    year_heading = re.compile(
+        r"(?i)по\s+окончани[юя].*года\s+обучен\w*.*должн",
+    )
+    know_inline = re.compile(r"(?i)должны?\s+знать\s*:?\s*(.*)$")
+    skill_inline = re.compile(r"(?i)должны?\s+уметь\s*:?\s*(.*)$")
+    know_label = re.compile(r"(?i)^(?:знать|знания)\s*:?\s*$")
+    skill_label = re.compile(r"(?i)^(?:уметь|умения(?:\s+и\s+навыки)?)\s*:?\s*$")
+
+    def year_allowed(year: int | None) -> bool:
+        if locked_year is None:
+            return True
+        return year is None or year == locked_year
+
+    for paragraph in paragraphs:
+        text = _clean(paragraph)
+        if not text:
+            continue
+
+        if year_heading.search(text):
+            heading_year = _year_number_from_text(text)
+            if locked_year is None and heading_year is not None:
+                locked_year = heading_year
+            if not year_allowed(heading_year):
+                mode = None
+                continue
+            know_match = know_inline.search(text)
+            skill_match = skill_inline.search(text)
+            if know_match:
+                mode = "knowledge"
+                knowledge.extend(_split_outcome_items(know_match.group(1)))
+            elif skill_match:
+                mode = "skills"
+                skills.extend(_split_outcome_items(skill_match.group(1)))
+            else:
+                mode = "await_label"
+            continue
+
+        if mode is None:
+            continue
+
+        if re.search(
+            r"(?i)^(?:учебно[- ]тематическ|содержание\s+программы|тесты\s+для|"
+            r"список\s+литератур|(?:ожидаемые|планируемые)\s+результаты)",
+            text,
+        ):
+            mode = None
+            continue
+
+        if know_label.match(text):
+            mode = "knowledge"
+            continue
+        if skill_label.match(text):
+            mode = "skills"
+            continue
+
+        if mode == "await_label":
+            continue
+        if mode == "knowledge":
+            knowledge.extend(_split_outcome_items(text))
+        elif mode == "skills":
+            skills.extend(_split_outcome_items(text))
+
+    return tuple(dict.fromkeys(knowledge)), tuple(dict.fromkeys(skills))
+
+
+def _structured_expected_outcomes(
+    paragraphs: list[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Подразделы знаний/умений внутри «Ожидаемые результаты…», без тестов."""
+
+    knowledge: list[str] = []
+    skills: list[str] = []
+    mode: str | None = None
+    active = False
+    for paragraph in paragraphs:
+        text = _clean(paragraph)
+        if not text:
+            continue
+        if re.search(r"(?i)^(?:ожидаемые|планируемые)\s+результаты", text):
+            active = True
+            mode = None
+            continue
+        if not active:
+            continue
+        if re.search(
+            r"(?i)^(?:тесты\s+для|учебно[- ]тематическ|содержание\s+программы|"
+            r"по окончани[юя]|список\s+литератур)",
+            text,
+        ):
+            break
+        if re.match(r"(?i)^(?:знания|знать)\s*:?\s*$", text):
+            mode = "knowledge"
+            continue
+        if re.match(r"(?i)^(?:умения(?:\s+и\s+навыки)?|уметь)\s*:?\s*$", text):
+            mode = "skills"
+            continue
+        if re.match(r"(?i)^\d+[\).]\s+", text):
+            # Тестовые варианты/вопросы.
+            mode = None
+            continue
+        if mode == "knowledge":
+            knowledge.extend(_split_outcome_items(text))
+        elif mode == "skills":
+            skills.extend(_split_outcome_items(text))
+    return tuple(dict.fromkeys(knowledge)), tuple(dict.fromkeys(skills))
+
+
 def _content_items(document, study_year: int | None = None) -> tuple[ProgramContentItem, ...]:
     paragraphs = document.paragraphs
     start = _find_content_start(paragraphs, study_year)
@@ -243,7 +402,26 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
     methods = tuple(_clean(match.group(1)) for paragraph in paragraphs if (match := re.match(r"методы?\s+обучения\s*[:.-]\s*(.+)", paragraph, re.I)))
     results = tuple(paragraph for paragraph in paragraphs if re.match(r"за период освоения.*ожидается", paragraph, re.I))
     if not results:
-        results = _collect_after(paragraphs, r"(?:ожидаемые|планируемые)\s+результаты", stop)
+        results_stop = (
+            r"цель|задач|формы?\s+организац|методы?\s+обучен|содержание|"
+            r"учебно[- ]тематическ|тесты\s+для|по окончани[юя]|список\s+литератур"
+        )
+        results = _collect_after(
+            paragraphs,
+            r"(?:ожидаемые|планируемые)\s+результаты(?:\s+освоения(?:\s+программы)?)?",
+            results_stop,
+        )
+        results = tuple(
+            item
+            for item in results
+            if item
+            and not re.match(r"(?i)^\d+[\).]\s+", item)
+            and "тест" not in item.casefold()
+        )
+    year_knowledge, year_skills = _year_end_outcomes(paragraphs, study_year)
+    expected_knowledge, expected_skills = _structured_expected_outcomes(paragraphs)
+    knowledge = tuple(dict.fromkeys([*year_knowledge, *expected_knowledge]))
+    skills = tuple(dict.fromkeys([*year_skills, *expected_skills]))
     return ProgramData(
         title=_first_match(
             text,
@@ -274,6 +452,8 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
         lesson_forms=forms,
         teaching_methods=methods,
         expected_results=results,
+        knowledge_outcomes=knowledge,
+        skill_outcomes=skills,
         content_items=_content_items(document, study_year),
     )
 

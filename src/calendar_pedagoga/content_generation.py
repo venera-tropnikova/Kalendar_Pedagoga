@@ -22,6 +22,8 @@ class WeekTopicPart:
     program_topic: str
     program_content_full: str
     warnings: tuple[str, ...] = ()
+    knowledge_outcomes: tuple[str, ...] = ()
+    skill_outcomes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class CalendarContentRow:
     source_utp_name: str
     week_parts: tuple[WeekTopicPart, ...] = ()
     warnings: tuple[str, ...] = ()
+    knowledge_outcomes: tuple[str, ...] = ()
+    skill_outcomes: tuple[str, ...] = ()
 
 
 def _preview(text: str, limit: int = 320) -> str:
@@ -63,6 +67,8 @@ def build_content_model(
         (match.utp_position.number, match.utp_position.title, match.utp_position.parent_section): match
         for match in matches
     }
+    knowledge_outcomes = program.knowledge_outcomes if program else ()
+    skill_outcomes = program.skill_outcomes if program else ()
     grouped: dict[tuple[int, str | None, str, str], dict[str, object]] = {}
     for element in schedule.elements:
         key = (element.week.number, element.topic_number, element.topic, element.section)
@@ -99,6 +105,8 @@ def build_content_model(
                     program_topic=program_item.title if program_item else "",
                     program_content_full=full_content,
                     warnings=warnings,
+                    knowledge_outcomes=knowledge_outcomes,
+                    skill_outcomes=skill_outcomes,
                 ),
                 element,
             )
@@ -145,6 +153,8 @@ def build_content_model(
                 source_utp_name=source_utp_name,
                 week_parts=parts,
                 warnings=combined_warnings,
+                knowledge_outcomes=knowledge_outcomes,
+                skill_outcomes=skill_outcomes,
             )
         )
     return tuple(rows)

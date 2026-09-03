@@ -19,6 +19,7 @@ from calendar_pedagoga.lesson_display import format_practice_cell, format_theory
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.content_generation import WeekTopicPart
+from calendar_pedagoga.program_parsing import infer_study_year_number
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +56,23 @@ def _prevent_row_split(row) -> None:
         tr_pr.append(OxmlElement("w:cantSplit"))
 
 
+def _repeat_table_header_rows(table, header_row_count: int = 2) -> None:
+    """Повторять шапку таблицы на каждой странице Word через w:tblHeader."""
+
+    header_tag = qn("w:tblHeader")
+    for index, row in enumerate(table.rows):
+        tr_pr = row._tr.get_or_add_trPr()
+        existing = tr_pr.find(header_tag)
+        if index < header_row_count:
+            if existing is None:
+                existing = OxmlElement("w:tblHeader")
+                tr_pr.append(existing)
+            for attr in list(existing.attrib):
+                del existing.attrib[attr]
+        elif existing is not None:
+            tr_pr.remove(existing)
+
+
 def _topic_display_numbers(utp: UtpParseResult) -> dict[tuple[str | None, str, str], str]:
     numbers: dict[tuple[str | None, str, str], str] = {}
     for section in utp.sections:
@@ -75,17 +93,77 @@ def _topic_display_numbers(utp: UtpParseResult) -> dict[tuple[str | None, str, s
     return numbers
 
 
-def _subtitle_line(utp: UtpParseResult) -> str:
-    metadata = utp.metadata
-    program = metadata.program_name or "название программы"
-    study_year = metadata.study_year or "____ г.об."
-    weekly = metadata.hours_per_week
+def _hours_word(hours: int) -> str:
+    if hours == 1:
+        return "час"
+    if hours in {2, 3, 4}:
+        return "часа"
+    return "часов"
+
+
+def _study_year_label(
+    utp: UtpParseResult,
+    study_year_hints: tuple[str | None, ...] = (),
+) -> str:
+    for raw in (utp.metadata.study_year, *study_year_hints):
+        number = infer_study_year_number(raw)
+        if number is not None:
+            return f"{number} год обучения"
+    raw = (utp.metadata.study_year or "").strip()
+    if raw:
+        return raw if "год" in raw.casefold() else f"{raw} год обучения"
+    return "____ год обучения"
+
+
+def _resolve_header_from_rows(
+    rows: tuple[ResolvedLessonRow, ...],
+    *,
+    program_title: str | None,
+    study_year_hints: tuple[str | None, ...],
+) -> tuple[str | None, tuple[str, ...]]:
+    """Название и год обучения брать из строк занятия, не только из метаданных УТП."""
+
+    names: list[str] = []
+    hints: list[str] = []
+    for raw in study_year_hints:
+        cleaned = (raw or "").strip()
+        if cleaned and cleaned not in hints:
+            hints.append(cleaned)
+    for row in rows:
+        content = row.source.source
+        name = (content.source_program_name or "").strip()
+        if name and name not in names:
+            names.append(name)
+        utp_name = (content.source_utp_name or "").strip()
+        if utp_name and utp_name not in hints:
+            hints.append(utp_name)
+    return program_title or (names[0] if names else None), tuple(hints)
+
+
+def _program_header_line(
+    utp: UtpParseResult,
+    *,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+) -> str:
+    program = (program_title or utp.metadata.program_name or "").strip()
+    program = program.strip("«»\"'") or "название программы"
+    weekly = utp.metadata.hours_per_week
     weekly_part = (
-        f"({weekly} {'час' if weekly == 1 else 'часа' if weekly in {2, 3, 4} else 'часов'} в неделю)"
+        f"({weekly} {_hours_word(weekly)} в неделю)"
         if weekly
         else "(количество часов в неделю)"
     )
-    return f"«{program}» {study_year} {weekly_part}"
+    return f"«{program}» — {_study_year_label(utp, study_year_hints)} {weekly_part}"
+
+
+def _group_class_line(
+    group_number: str | None = None,
+    class_name: str | None = None,
+) -> str:
+    group = (group_number or "").strip() or "___________"
+    klass = (class_name or "").strip() or "_________"
+    return f"Группа № {group} (Класс {klass})"
 
 
 def _enable_cell_wrap(cell) -> None:
@@ -296,7 +374,13 @@ def _load_template(template: CalendarTemplateSelection) -> Document:
 
 
 def _ensure_data_rows(table, expected_rows: int) -> None:
-    prototype = deepcopy(table.rows[-1]._tr)
+    source_index = 2 if len(table.rows) > 2 else len(table.rows) - 1
+    prototype = deepcopy(table.rows[source_index]._tr)
+    prototype_pr = prototype.find(qn("w:trPr"))
+    if prototype_pr is not None:
+        leaked_header = prototype_pr.find(qn("w:tblHeader"))
+        if leaked_header is not None:
+            prototype_pr.remove(leaked_header)
     while len(table.rows) < 2 + expected_rows:
         table._tbl.append(deepcopy(prototype))
     while len(table.rows) > 2 + expected_rows:
@@ -426,24 +510,73 @@ def _merge_month_cells_by_page_segments(
         _merge_month_cell_group(group_rows, columns, months[group_start])
 
 
+def _write_document_header(
+    document,
+    utp: UtpParseResult,
+    *,
+    academic_year: str,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+    group_number: str | None = None,
+    class_name: str | None = None,
+) -> None:
+    if document.paragraphs:
+        document.paragraphs[0].text = "Календарный план"
+    program_line = _program_header_line(
+        utp,
+        program_title=program_title,
+        study_year_hints=study_year_hints,
+    )
+    year_line = f"{academic_year} учебный год"
+    group_line = _group_class_line(group_number, class_name)
+    if len(document.paragraphs) > 3:
+        document.paragraphs[1].text = program_line
+        document.paragraphs[2].text = year_line
+        document.paragraphs[3].text = group_line
+    elif len(document.paragraphs) > 2:
+        document.paragraphs[1].text = f"{program_line}\n{year_line}"
+        document.paragraphs[2].text = group_line
+    elif len(document.paragraphs) > 1:
+        document.paragraphs[1].text = f"{program_line}\n{year_line}\n{group_line}"
+    for paragraph in document.paragraphs:
+        blob = paragraph.text.casefold()
+        if "название программы" in blob or "г.об" in blob:
+            paragraph.text = program_line
+
+
 def _populate_calendar_table(
     document,
     utp: UtpParseResult,
     rows: tuple[ResolvedLessonRow, ...],
+    *,
+    academic_year: str,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+    group_number: str | None = None,
+    class_name: str | None = None,
 ) -> tuple:
     """Заполнить таблицу календаря строками данных (без объединения месяцев)."""
 
-    if document.paragraphs:
-        document.paragraphs[0].text = "Календарный план"
-    if len(document.paragraphs) > 1:
-        document.paragraphs[1].text = _subtitle_line(utp)
-    if len(document.paragraphs) > 2:
-        document.paragraphs[2].text = "Группа № ___________ (Класс _________)"
+    resolved_title, resolved_hints = _resolve_header_from_rows(
+        rows,
+        program_title=program_title,
+        study_year_hints=study_year_hints,
+    )
+    _write_document_header(
+        document,
+        utp,
+        academic_year=academic_year,
+        program_title=resolved_title,
+        study_year_hints=resolved_hints,
+        group_number=group_number,
+        class_name=class_name,
+    )
 
     table = document.tables[0]
     columns = _columns_for_table(table)
     display_numbers = _topic_display_numbers(utp)
     _ensure_data_rows(table, len(rows))
+    _repeat_table_header_rows(table)
 
     for index, lesson in enumerate(rows):
         theory_cell, practice_cell = _topic_cells_for_lesson(lesson, display_numbers)
@@ -477,10 +610,25 @@ def _merge_month_cells_for_pages(
     utp: UtpParseResult,
     rows: tuple[ResolvedLessonRow, ...],
     rows_by_page: tuple[tuple[int, ...], ...],
+    *,
+    academic_year: str,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+    group_number: str | None = None,
+    class_name: str | None = None,
 ) -> bytes:
     """Собрать DOCX с объединением месяцев по сегментам страниц."""
 
-    table, columns, months = _populate_calendar_table(document, utp, rows)
+    table, columns, months = _populate_calendar_table(
+        document,
+        utp,
+        rows,
+        academic_year=academic_year,
+        program_title=program_title,
+        study_year_hints=study_year_hints,
+        group_number=group_number,
+        class_name=class_name,
+    )
     _apply_explicit_page_breaks(table, columns, rows_by_page)
     _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
     return _save_document(document)
@@ -498,13 +646,26 @@ def generate_calendar_docx(
     rows: tuple[ResolvedLessonRow, ...],
     template: CalendarTemplateSelection,
     academic_year: str,
+    *,
+    program_title: str | None = None,
+    study_year_hints: tuple[str | None, ...] = (),
+    group_number: str | None = None,
+    class_name: str | None = None,
 ) -> bytes:
     """Сформировать DOCX: месяц совпадает с датой и merge не пересекает страницы."""
+
+    header = {
+        "academic_year": academic_year,
+        "program_title": program_title,
+        "study_year_hints": study_year_hints,
+        "group_number": group_number,
+        "class_name": class_name,
+    }
 
     # Первый проход: без merge. Он нужен, чтобы получить фактическую пагинацию
     # Microsoft Word для текущего шаблона и объёма текста.
     preview_document = _load_template(template)
-    _populate_calendar_table(preview_document, utp, rows)
+    _populate_calendar_table(preview_document, utp, rows, **header)
     preview = _save_document(preview_document)
 
     from calendar_pedagoga.docx_qa import detect_data_row_indices_by_page
@@ -519,11 +680,13 @@ def generate_calendar_docx(
     # страницы Word фиксируем pageBreakBefore и пересобираем до стабилизации.
     for _ in range(6):
         document = _load_template(template)
-        merged = _merge_month_cells_for_pages(document, utp, rows, rows_by_page)
+        merged = _merge_month_cells_for_pages(
+            document, utp, rows, rows_by_page, **header
+        )
         detected = detect_data_row_indices_by_page(merged, total_rows=len(rows))
         if not detected or detected == rows_by_page:
             return merged
         rows_by_page = detected
 
     document = _load_template(template)
-    return _merge_month_cells_for_pages(document, utp, rows, rows_by_page)
+    return _merge_month_cells_for_pages(document, utp, rows, rows_by_page, **header)

@@ -190,6 +190,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         warnings=(),
         ai_usage=None,
     )
+    assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
     generate = next(
         button for button in app.button if button.label == "Сформировать календарный план"
     )
@@ -197,6 +198,10 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         generate.click().run()
 
     pipeline.assert_called_once()
+    assert pipeline.call_args.kwargs["group_number"] == ""
+    assert pipeline.call_args.kwargs["class_name"] == ""
+    assert pipeline.call_args.kwargs["academic_year"] == "2026–2027"
+    assert "1 г" in (pipeline.call_args.kwargs["program_filename"] or "")
     assert app.session_state["calendar_generation_pending"] is False
     assert app.session_state["calendar_generation_succeeded"] is True
     assert app.session_state["calendar_download"].content == b"generated-docx"

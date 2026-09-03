@@ -7,7 +7,12 @@ import os
 
 import streamlit as st
 
-from calendar_pedagoga.ai_provider import AIProviderError
+from calendar_pedagoga.ai_provider import (
+    AIProviderError,
+    GigaChatProvider,
+    OpenAIProvider,
+    _read_secret,
+)
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.normative_registry import (
@@ -707,7 +712,9 @@ def _show_generation_controls(
     academic_year: str,
 ) -> None:
     st.subheader("Формирование календарного плана")
-    ai_available = bool(os.getenv("OPENAI_API_KEY"))
+    gigachat_ready = bool(_read_secret("GIGACHAT_CREDENTIALS"))
+    openai_ready = bool(os.getenv("OPENAI_API_KEY"))
+    ai_available = gigachat_ready or openai_ready
     use_ai = False
     if validated_program is None:
         st.info(
@@ -715,7 +722,10 @@ def _show_generation_controls(
             "содержанием занятий; автоматическое дополнение недоступно."
         )
     elif ai_available:
-        use_ai = st.checkbox("Дополнить содержание с помощью ИИ")
+        use_ai = st.checkbox(
+            "Дополнить содержание с помощью ИИ",
+            value=gigachat_ready,
+        )
         st.caption(
             "ИИ поможет сформулировать тип занятия, планируемый результат "
             "и вид контроля. Даты, часы и темы он не изменяет."
@@ -724,6 +734,20 @@ def _show_generation_controls(
         st.info(
             "Автоматическое дополнение содержания сейчас недоступно. "
             "Можно сформировать план на основе данных документов."
+        )
+
+    group_col, class_col = st.columns(2)
+    with group_col:
+        group_number = st.text_input(
+            "Группа №",
+            value="",
+            help="Необязательно. Если не заполнить, в документе останется линия.",
+        )
+    with class_col:
+        class_name = st.text_input(
+            "Класс",
+            value="",
+            help="Необязательно. Если не заполнить, в документе останется линия.",
         )
 
     generation_pending = bool(st.session_state.get("calendar_generation_pending"))
@@ -753,6 +777,11 @@ def _show_generation_controls(
         try:
             with st.spinner("Формируем календарный план…"):
                 with TransientDocumentSession() as operation:
+                    ai_provider = None
+                    if use_ai:
+                        ai_provider = (
+                            GigaChatProvider() if gigachat_ready else OpenAIProvider()
+                        )
                     result = run_calendar_pipeline(
                         utp,
                         program,
@@ -760,6 +789,14 @@ def _show_generation_controls(
                         template=template_selection,
                         source_utp_name=validated_utp.filename,
                         use_ai=use_ai,
+                        ai_provider=ai_provider,
+                        program_filename=(
+                            validated_program.filename
+                            if validated_program is not None
+                            else None
+                        ),
+                        group_number=group_number,
+                        class_name=class_name,
                     )
                     operation.publish_result(result.filename, result.content)
                     st.session_state["calendar_download"] = operation.take_result_for_download()
@@ -787,10 +824,13 @@ def _show_generation_controls(
             st.warning(warning)
         usage = st.session_state.get("calendar_ai_usage")
         if usage:
-            st.caption(
-                f"AI: {usage['tokens']} токенов, "
-                f"≈ ${usage['cost']:.4f}."
-            )
+            if usage.get("cost") is None:
+                st.caption(f"AI: {usage['tokens']} токенов.")
+            else:
+                st.caption(
+                    f"AI: {usage['tokens']} токенов, "
+                    f"≈ ${usage['cost']:.4f}."
+                )
 
     download = st.session_state.get("calendar_download")
     if download is not None:

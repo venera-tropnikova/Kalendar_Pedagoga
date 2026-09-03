@@ -5,6 +5,10 @@ from functools import lru_cache
 import pytest
 from calendar_pedagoga.docx_generation import (
     STANDARD_TEMPLATE_PATH,
+    _group_class_line,
+    _program_header_line,
+    _resolve_header_from_rows,
+    _write_document_header,
     build_output_filename,
     generate_calendar_docx,
 )
@@ -52,11 +56,27 @@ def test_standard_template_exists() -> None:
     assert STANDARD_TEMPLATE_PATH.is_file()
 
 
+def test_generated_table_marks_header_rows_for_word_repeat() -> None:
+    document = Document(BytesIO(_key_docx()))
+    table = document.tables[0]
+    header_tag = qn("w:tblHeader")
+    for index, row in enumerate(table.rows):
+        tr_pr = row._tr.find(qn("w:trPr"))
+        marker = tr_pr.find(header_tag) if tr_pr is not None else None
+        if index < 2:
+            assert marker is not None, f"header row {index} without tblHeader"
+            assert not marker.attrib, f"header row {index} must be <w:tblHeader/>"
+        else:
+            assert marker is None, f"data row {index} must not repeat as header"
+
+
 def test_key_generation_produces_36_data_rows() -> None:
     content = _key_docx()
     document = Document(BytesIO(content))
     assert document.paragraphs[0].text == "Календарный план"
-    assert "КЛЮЧ" in document.paragraphs[1].text
+    assert document.paragraphs[1].text == "«КЛЮЧ» — 2 год обучения (2 часа в неделю)"
+    assert document.paragraphs[2].text == "2026–2027 учебный год"
+    assert document.paragraphs[3].text == "Группа № ___________ (Класс _________)"
     table = document.tables[0]
     assert len(table.rows) == 38
     assert len(table.columns) >= 8
@@ -65,6 +85,66 @@ def test_key_generation_produces_36_data_rows() -> None:
 def test_key_generation_passes_structural_qa() -> None:
     issues = validate_calendar_docx(_key_docx(), expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
+
+
+def test_header_line_uses_program_title_and_filename_year() -> None:
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    assert _program_header_line(utp) == "«КЛЮЧ» — 2 год обучения (2 часа в неделю)"
+    assert _group_class_line() == "Группа № ___________ (Класс _________)"
+    assert _group_class_line("12", "5Б") == "Группа № 12 (Класс 5Б)"
+
+
+def test_tour_guides_header_uses_program_and_filename_year() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    validated_program = validate_upload(
+        UploadPurpose.PROGRAM,
+        program_path.name,
+        program_path.read_bytes(),
+    )
+    utp = resolve_utp(None, validated_program)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
+    line = _program_header_line(
+        utp,
+        program_title=program.title,
+        study_year_hints=(f"УТП из файла «{program_path.name}»", program_path.name),
+    )
+    assert line == "«Туристы-проводники» — 1 год обучения (2 часа в неделю)"
+    title, hints = _resolve_header_from_rows(
+        resolve_lesson_content(
+            build_lesson_content(
+                build_content_model(
+                    build_schedule(utp),
+                    utp,
+                    program,
+                    f"УТП из файла «{program_path.name}»",
+                )
+            )
+        ),
+        program_title=None,
+        study_year_hints=(),
+    )
+    assert _program_header_line(
+        utp,
+        program_title=title,
+        study_year_hints=hints,
+    ) == "«Туристы-проводники» — 1 год обучения (2 часа в неделю)"
+
+
+def test_document_header_writes_year_and_optional_group() -> None:
+    document = Document(str(STANDARD_TEMPLATE_PATH))
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    _write_document_header(
+        document,
+        utp,
+        academic_year="2026–2027",
+        program_title="КЛЮЧ",
+        group_number="5",
+        class_name="7А",
+    )
+    assert document.paragraphs[0].text == "Календарный план"
+    assert document.paragraphs[1].text == "«КЛЮЧ» — 2 год обучения (2 часа в неделю)"
+    assert document.paragraphs[2].text == "2026–2027 учебный год"
+    assert document.paragraphs[3].text == "Группа № 5 (Класс 7А)"
 
 
 def test_output_filename_uses_program_and_year() -> None:
@@ -161,7 +241,7 @@ def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
         assert cells[5], f"lesson type empty week {index}"
         assert cells[6], f"planned result empty week {index}"
         assert cells[7], f"assessment empty week {index}"
-        assert cells[6].startswith("Учащийся сможет")
+        assert not cells[6].casefold().startswith("учащийся сможет изучить тему")
         assert cells[3] == ""
 
 
