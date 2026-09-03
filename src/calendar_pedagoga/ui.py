@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import json
+from pathlib import Path
 
 import streamlit as st
 
@@ -50,7 +53,66 @@ ACADEMIC_YEARS: tuple[str, ...] = ("2026–2027",)
 SUPPORTED_ACADEMIC_YEAR = ACADEMIC_YEARS[0]
 
 
+def _generator_revision() -> str:
+    """Read the working-tree generator identity, not a cached Git revision."""
+    root = Path(__file__).resolve().parents[2]
+    paths = [root / "app.py", *sorted((root / "src" / "calendar_pedagoga").glob("*.py"))]
+    paths.append(root / "references" / "Календарный план Образец.docx")
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+_LOADED_GENERATOR_REVISION = _generator_revision()
+
+
+def _inputs_fingerprint(*values: object) -> str:
+    parts = []
+    for value in values:
+        if value is not None and hasattr(value, "getvalue"):
+            parts.append([value.name, hashlib.sha256(value.getvalue()).hexdigest()])
+        else:
+            parts.append(value)
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
+    """Invalidate only; never generate on a rerun or accept an unversioned result."""
+    previous = st.session_state.get("calendar_generation_fingerprint")
+    if previous == fingerprint:
+        return False
+    keys = (
+        "calendar_download", "calendar_warnings", "calendar_ai_usage",
+        "calendar_generation_pending", "calendar_generation_error",
+        "calendar_generation_succeeded",
+    )
+    if any(st.session_state.get(key) for key in keys):
+        st.session_state["calendar_generation_invalidated"] = True
+    for key in keys:
+        st.session_state.pop(key, None)
+    st.session_state["calendar_generation_fingerprint"] = fingerprint
+    return True
+
+
+def _refresh_generation_inputs(
+    utp_file, program_file, template_file, academic_year, group_number, class_name,
+) -> None:
+    revision = _generator_revision()
+    analysis = _inputs_fingerprint(utp_file, program_file, template_file, academic_year)
+    inputs = _inputs_fingerprint(analysis, group_number, class_name)
+    _sync_generation_fingerprint((inputs, revision))
+    analysis_fingerprint = (analysis, revision)
+    if st.session_state.get("calendar_analysis_fingerprint") != analysis_fingerprint:
+        _reset_analysis_state()
+    st.session_state["calendar_analysis_fingerprint"] = analysis_fingerprint
+    st.session_state["calendar_generation_inputs"] = inputs
+
+
 def _reset_analysis_state() -> None:
+    if st.session_state.get("calendar_download") or st.session_state.get("calendar_generation_succeeded"):
+        st.session_state["calendar_generation_invalidated"] = True
     st.session_state["analysis_ready"] = False
     for key in (
         "analysis_warnings",
@@ -822,6 +884,11 @@ def _show_generation_controls(
 ) -> None:
     st.subheader("Формирование календарного плана")
 
+    if _generator_revision() != _LOADED_GENERATOR_REVISION:
+        st.warning("Код приложения обновлён. Перезапустите приложение на localhost:8501 и сформируйте план заново.")
+        _show_generation_result()
+        return
+
     generation_pending = bool(st.session_state.get("calendar_generation_pending"))
     generation_requested = st.button(
         "Сформировать календарный план",
@@ -830,6 +897,7 @@ def _show_generation_controls(
         disabled=generation_pending,
     )
     if generation_requested:
+        st.session_state.pop("calendar_generation_invalidated", None)
         st.session_state["calendar_generation_pending"] = True
         st.session_state.pop("calendar_generation_error", None)
         st.session_state.pop("calendar_generation_succeeded", None)
@@ -875,6 +943,16 @@ def _show_generation_controls(
             st.session_state["calendar_generation_pending"] = False
         st.rerun()
 
+    _show_generation_result()
+
+
+@st.fragment(run_every="2s")
+def _show_generation_result() -> None:
+    inputs = st.session_state.get("calendar_generation_inputs", "")
+    if _sync_generation_fingerprint((inputs, _generator_revision())):
+        _reset_analysis_state()
+    if st.session_state.get("calendar_generation_invalidated"):
+        st.info("Данные или версия приложения изменились. Сформируйте календарный план заново.")
     generation_error = st.session_state.get("calendar_generation_error")
     if generation_error:
         st.error(f"Не удалось сформировать календарный план: {generation_error}")
@@ -907,6 +985,13 @@ def run_app() -> None:
         group_number,
         class_name,
     ) = _render_upload_screen()
+
+    _refresh_generation_inputs(
+        utp_file, program_file, organization_template_file,
+        academic_year, group_number, class_name,
+    )
+    if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
+        st.info("План устарел. Нажмите «Проверить документы» и сформируйте календарный план заново.")
 
     if st.button("Проверить документы", type="primary", use_container_width=True):
         if program_file is None:
