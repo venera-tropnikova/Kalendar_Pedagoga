@@ -194,10 +194,29 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Год обучения:</strong> 1 год обучения" in text
     assert "Возраст:</strong> Не найдено" not in text
     assert "Нормативная и методическая проверка" in text
-    assert "Федеральные документы" in text
-    assert "Локальная сетка" in text
-    assert "Методическая сверка" in text
-    assert "Это не вывод о соответствии НПА." in text
+    assert "Документы закона" in text
+    assert "Календарь учреждения" in text
+    assert "Сверка ваших часов" in text
+    assert "Эта проверка не изменяет Word автоматически." in text
+    assert "Часы программы, УТП и плана совпадают." in text
+    assert (
+        "1–6 сентября и 28–30 декабря — короткие недели, часы на них остаются. "
+        "Даты приложение не сдвигает."
+    ) in text
+    assert "в темах УТП она не найдена" in text
+    assert "Срок программы не указан, сравнить год со сроком нельзя." in text
+    assert "Федеральные документы" not in text
+    assert "Локальная сетка" not in text
+    assert "Методическая сверка" not in text
+    assert "Это не вывод о соответствии НПА." not in text
+    assert "Реестр НПА" not in text
+    assert "Федеральные документы, локальная сетка" not in text
+    assert "01–06.09" not in text
+    assert "28–30.12" not in text
+    assert "в календарном плане и УТП" not in text
+    assert "нет обоих чисел" not in text
+    assert "Год обучения определён." not in text
+    assert "Занятия не стоят в каникулярном разрыве" not in text
     assert "Что в порядке" not in text
     assert "PASS" not in text
     assert "NOT CHECKED" not in text
@@ -208,10 +227,10 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Недостающие сведения не мешают сформировать календарный план." in text
     assert "На что обратить внимание" in text
     assert "Что не удалось проверить" in text
-    assert "Федеральные документы, локальная сетка" in text
     captions = " ".join(item.value or "" for item in getattr(app, "caption", []))
     assert "Справочник документов из реестра" in f"{text} {captions}"
     assert not any(button.label == "Заменить документы" for button in app.button)
+    assert any(button.label == "Сформировать календарный план" for button in app.button)
     assert "Чтобы заменить документы" in text
     assert not any(
         "Данные успешно прочитаны" in (item.value or "") for item in app.success

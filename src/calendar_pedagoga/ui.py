@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import streamlit as st
@@ -13,6 +14,7 @@ from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.normative_engine import (
+    NormativeCheck,
     NormativeLayer,
     NormativeLessonView,
     NormativeReport,
@@ -504,6 +506,12 @@ def _inject_landing_styles() -> None:
             margin: 0 0 0.2rem 0;
             line-height: 1.35;
         }
+        .kp-normative-note {
+            font-size: 0.9rem;
+            color: #4b5563;
+            margin: 0.2rem 0 0.35rem 0;
+            line-height: 1.4;
+        }
         .kp-normative-check-label {
             font-size: 0.92rem;
             font-weight: 600;
@@ -778,22 +786,19 @@ def _collect_analysis_warnings(
 
 
 _LAYER_TITLES = (
-    (
-        NormativeLayer.FEDERAL,
-        "Федеральные документы",
-        "Реестр НПА. Это не проверка часов и содержания плана.",
-    ),
-    (
-        NormativeLayer.LOCAL,
-        "Локальная сетка",
-        "Утверждённый календарь 2026–2027 / 36 недель. Переносы не выполняются.",
-    ),
-    (
-        NormativeLayer.METHODICAL,
-        "Методическая сверка",
-        "Сверка программы, УТП и плана. Это не вывод о соответствии НПА.",
-    ),
+    (NormativeLayer.FEDERAL, "Документы закона"),
+    (NormativeLayer.LOCAL, "Календарь учреждения"),
+    (NormativeLayer.METHODICAL, "Сверка ваших часов"),
 )
+_SHORT_WEEK_NOTE = (
+    "1–6 сентября и 28–30 декабря — короткие недели, часы на них остаются. "
+    "Даты приложение не сдвигает."
+)
+_METHODICAL_PASS_LINE = "Часы программы, УТП и плана совпадают."
+_ATTESTATION_MISSING_UI = (
+    "В программе указана аттестация, но в темах УТП она не найдена."
+)
+_YEAR_NO_DURATION_UI = "Срок программы не указан, сравнить год со сроком нельзя."
 
 
 def _lesson_views_for_normative(
@@ -812,44 +817,105 @@ def _lesson_views_for_normative(
     )
 
 
+def _year_is_found(report: NormativeReport) -> bool:
+    return any(
+        item.check_id == "study_year_found" and item.verdict is NormativeVerdict.PASS
+        for item in report.checks
+    )
+
+
+def _normative_teacher_text(item: NormativeCheck, report: NormativeReport) -> str:
+    if item.check_id == "attestation" and "календарном плане и УТП" in item.teacher_text:
+        return _ATTESTATION_MISSING_UI
+    if (
+        item.check_id == "year_within_duration"
+        and item.verdict is NormativeVerdict.NOT_CHECKED
+        and _year_is_found(report)
+    ):
+        return _YEAR_NO_DURATION_UI
+    return item.teacher_text
+
+
+def _is_short_week_warning(item: NormativeCheck) -> bool:
+    return (
+        item.check_id == "short_week_full_load"
+        and item.verdict is NormativeVerdict.WARNING
+    )
+
+
+def _is_hidden_duration_warning(item: NormativeCheck, report: NormativeReport) -> bool:
+    return (
+        item.check_id == "duration_found"
+        and item.verdict is NormativeVerdict.WARNING
+        and _year_is_found(report)
+        and any(
+            other.check_id == "year_within_duration"
+            and other.verdict is NormativeVerdict.NOT_CHECKED
+            for other in report.checks
+        )
+    )
+
+
+def _collapsed_pass_line(
+    layer: NormativeLayer,
+    passed: tuple[NormativeCheck, ...],
+) -> str:
+    if layer is NormativeLayer.METHODICAL:
+        return _METHODICAL_PASS_LINE
+    return passed[0].teacher_text
+
+
 def _render_normative_report(report: NormativeReport) -> None:
     sections: list[str] = [
         '<div class="kp-normative-check">',
         '<p class="kp-normative-check-title">Нормативная и методическая проверка</p>',
         '<p class="kp-normative-check-lead">'
-        "Федеральные документы, локальная сетка и методическая сверка. "
-        "На календарный план не влияет.</p>",
+        "Эта проверка не изменяет Word автоматически.</p>",
     ]
-    for layer, title, lead in _LAYER_TITLES:
+    for layer, title in _LAYER_TITLES:
         layer_checks = report.for_layer(layer)
         if not layer_checks:
             continue
         sections.append(f'<p class="kp-normative-layer">{html.escape(title)}</p>')
-        sections.append(
-            f'<p class="kp-normative-layer-lead">{html.escape(lead)}</p>'
-        )
         passed = tuple(
-            item for item in layer_checks if item.verdict is NormativeVerdict.PASS
+            item
+            for item in layer_checks
+            if item.verdict is NormativeVerdict.PASS
+            and item.check_id != "short_week_full_load"
         )
         warnings = tuple(
-            item for item in layer_checks if item.verdict is NormativeVerdict.WARNING
+            item
+            for item in layer_checks
+            if item.verdict is NormativeVerdict.WARNING
+            and not _is_short_week_warning(item)
+            and not _is_hidden_duration_warning(item, report)
         )
         unchecked = tuple(
-            item for item in layer_checks if item.verdict is NormativeVerdict.NOT_CHECKED
+            item
+            for item in layer_checks
+            if item.verdict is NormativeVerdict.NOT_CHECKED
+        )
+        short_week_notes = tuple(
+            item for item in layer_checks if _is_short_week_warning(item)
         )
         if passed:
             sections.append("<ul>")
-            sections.extend(
-                f"<li>✓ {html.escape(item.teacher_text)}</li>" for item in passed
+            sections.append(
+                f"<li>✓ {html.escape(_collapsed_pass_line(layer, passed))}</li>"
             )
             sections.append("</ul>")
+        if short_week_notes:
+            sections.append(
+                f'<p class="kp-normative-note">{html.escape(_SHORT_WEEK_NOTE)}</p>'
+            )
         if warnings:
             sections.append(
                 '<p class="kp-normative-check-label warn">⚠ На что обратить внимание</p>'
             )
             sections.append("<ul>")
             sections.extend(
-                f"<li>{html.escape(item.teacher_text)}</li>" for item in warnings
+                f"<li>{html.escape(_normative_teacher_text(item, report))}</li>"
+                for item in warnings
             )
             sections.append("</ul>")
         if unchecked:
@@ -858,7 +924,8 @@ def _render_normative_report(report: NormativeReport) -> None:
             )
             sections.append("<ul>")
             sections.extend(
-                f"<li>{html.escape(item.teacher_text)}</li>" for item in unchecked
+                f"<li>{html.escape(_normative_teacher_text(item, report))}</li>"
+                for item in unchecked
             )
             sections.append("</ul>")
     sections.append("</div>")
@@ -875,6 +942,7 @@ def _render_teacher_analysis_screen(
     source_utp_name: str | None = None,
     program_filename: str | None = None,
     content_rows: tuple[CalendarContentRow, ...] = (),
+    after_summary: Callable[[], None] | None = None,
 ) -> None:
     metadata = utp.metadata
     totals = utp.table_totals
@@ -932,6 +1000,8 @@ def _render_teacher_analysis_screen(
         '<div class="kp-results-summary">' + "".join(summary_lines) + "</div>",
         unsafe_allow_html=True,
     )
+    if after_summary is not None:
+        after_summary()
     _render_normative_report(
         evaluate_normative_mvp(
             utp,
@@ -981,8 +1051,6 @@ def _show_generation_controls(
     group_number: str,
     class_name: str,
 ) -> None:
-    st.subheader("Формирование календарного плана")
-
     if _generator_revision() != _LOADED_GENERATOR_REVISION:
         st.warning("Код приложения обновлён. Перезапустите приложение на localhost:8501 и сформируйте план заново.")
         _show_generation_result()
@@ -1271,12 +1339,12 @@ def run_app() -> None:
                 validated_program.filename if validated_program is not None else None
             ),
             content_rows=content_rows,
-        )
-        _show_generation_controls(
-            validated_utp=validated_utp,
-            validated_program=validated_program,
-            template_selection=template_selection,
-            academic_year=academic_year,
-            group_number=group_number,
-            class_name=class_name,
+            after_summary=lambda: _show_generation_controls(
+                validated_utp=validated_utp,
+                validated_program=validated_program,
+                template_selection=template_selection,
+                academic_year=academic_year,
+                group_number=group_number,
+                class_name=class_name,
+            ),
         )
