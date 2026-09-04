@@ -103,9 +103,11 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "составление": "составляет",
     "укладка": "укладывает",
     "упаковка": "упаковывает",
+    "уход": "ухаживает",
     "фасовка": "фасует",
     "чтение": "читает",
     "закупка": "закупает",
+    "ремонт": "ремонтирует",
 }
 
 _KNOWLEDGE_NOUNS = {
@@ -268,6 +270,12 @@ def _noun_gen_to_acc(word: str) -> str:
         return "пищу"
     if word.casefold() == "сторон":
         return "стороны"
+    if word.casefold() == "мест":
+        return "места"
+    if word.casefold() == "костра":
+        return "костёр"
+    if word.casefold() == "обуви":
+        return "обувь"
     if "-" in word:
         if word.casefold().startswith("плана-график"):
             return "план-график" + word[len("плана-графика") :]
@@ -503,7 +511,8 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
             has_post_head = False
     if pending:
         apply_pending(False, "m")
-    return "".join(out)
+    text = "".join(out)
+    return text.replace("места, пригодных", "места, пригодные")
 
 
 def _split_object_and_conditions(remainder: str) -> tuple[str, str]:
@@ -717,6 +726,23 @@ def _leading_modifiers(tokens: list[str]) -> tuple[list[str], list[str]]:
     return mods, rest
 
 
+def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
+    """«уход за X и ремонт» — два действия, без перечня видов ремонта."""
+
+    match = re.match(
+        r"(?i)^уход\s+за\s+(.+?)\s+и\s+ремонт\s*$",
+        _normalize_spaces(segment),
+    )
+    if match is None:
+        return None
+    obj = match.group(1).strip()
+    return (
+        _normalize_spaces(f"ухаживает за {obj} и ремонтирует его"),
+        "уход и ремонт",
+        obj,
+    )
+
+
 def _shared_object_after_paired_verbs(segment: str) -> tuple[str, str, str] | None:
     match = re.match(
         r"(?i)^((?:[А-Яа-яЁё]+ние|[А-Яа-яЁё]+ка))\s+и\s+"
@@ -755,6 +781,11 @@ def _transform_segment(
         return "", "", "", ""
     if _is_non_student_process(text):
         return _characterize(text)
+
+    care = _care_and_repair_result(text)
+    if care:
+        phrase, action, obj = care
+        return phrase, action, obj, ""
 
     paired = _shared_object_after_paired_verbs(text)
     if paired:
@@ -1084,9 +1115,34 @@ def _trim_long_parentheticals(text: str) -> str:
     return _normalize_spaces(re.sub(r"\s*\(([^()]*)\)", drop, text))
 
 
+_OBSERVABLE_OP_HEAD = re.compile(
+    r"(?i)^(определению|определение|измерению|измерение|отбору|отбор|"
+    r"оценке|глазомерную|инструментальное)\b"
+)
+
+
+def _is_observable_operation_part(part: str) -> bool:
+    return bool(_OBSERVABLE_OP_HEAD.match((part or "").strip()))
+
+
+def _is_parallel_observable_series(parts: list[str]) -> bool:
+    """Равноправные операции одной клаузы: «по определению X, измерению Y»."""
+
+    if len(parts) < 2:
+        return False
+    if not re.search(
+        r"(?i)\b(?:по|на)\s+(?:определен|измерен|отбор|оценк|глазомерн|инструментальн)",
+        parts[0],
+    ):
+        return False
+    return all(_is_observable_operation_part(part) for part in parts[1:])
+
+
 def _drop_raw_list_tails(text: str) -> str:
     parts = re.split(r",\s+", text)
     if len(parts) <= 1:
+        return text
+    if _is_parallel_observable_series(parts):
         return text
     kept = [parts[0]]
     for part in parts[1:]:
@@ -1129,11 +1185,13 @@ def _keep_strongest_phrase(phrases: list[str]) -> list[str]:
         for item in pool
         if item != best and _is_finite_result_phrase(item)
     ]
+    kept = {best, *siblings}
+    ordered = [item for item in phrases if item in kept]
     if score(best)[0] >= 3 and sum(1 for item in pool if score(item)[0] >= 3) == 1:
-        return [best, *siblings] if siblings else [best]
+        return ordered or [best]
     if len(phrases) < 3:
         return phrases
-    return [best, *siblings] if siblings else [best]
+    return ordered or [best]
 
 
 def _prep_noun_to_nom(word: str) -> str:
@@ -1321,6 +1379,91 @@ def _is_kinds_clause(text: str) -> bool:
     return bool(re.match(r"(?i)^виды\b", text.strip()))
 
 
+_AUX_UNIT_HEAD_RE = re.compile(
+    r"(?i)^(упражнен|тренировочн|построен|заняти|изучен|знакомств|"
+    r"диктант|викторин|игр|соревнова)"
+)
+_LOGISTICS_STEMS = ("закупк", "фасовк", "упаковк", "сдач")
+_METHOD_CATALOG_STEMS = (
+    "измерен",
+    "оценк",
+    "глазомер",
+    "азимут",
+    "засечк",
+    "ориентир",
+    "курвиметр",
+    "масштаб",
+    "легенд",
+    "абрис",
+)
+_COMPLEMENT_STEMS = (
+    "уход",
+    "ремонт",
+    "костр",
+    "привал",
+    "ночлег",
+    "снаряжен",
+    "одежд",
+    "обув",
+)
+
+
+def _is_auxiliary_practice_unit(clause: str) -> bool:
+    """Упражнение, форма, изучение или логистика — не обязательное действие темы."""
+
+    if _practice_unit_kind(clause) in {"exercise", "game", "element"}:
+        return True
+    first = clause.split()[0] if clause.split() else ""
+    if _AUX_UNIT_HEAD_RE.match(first):
+        return True
+    low = clause.casefold()
+    return any(stem in low for stem in _LOGISTICS_STEMS)
+
+
+def _is_method_catalog_neighbor(selected: str, neighbor: str) -> bool:
+    selected_hits = {stem for stem in _METHOD_CATALOG_STEMS if stem in selected.casefold()}
+    neighbor_hits = {stem for stem in _METHOD_CATALOG_STEMS if stem in neighbor.casefold()}
+    return bool(selected_hits and neighbor_hits)
+
+
+def _focus_complement_parts(neighbor: str) -> list[str]:
+    """Для ухода/ремонта брать действие, не общую «работу со снаряжением»."""
+
+    low = neighbor.casefold()
+    if not re.match(r"(?i)^работа\s+со?\s", neighbor.strip()):
+        return [neighbor]
+    focused = [
+        part.strip()
+        for part in re.split(r",\s+", neighbor)
+        if "уход" in part.casefold() or "ремонт" in part.casefold()
+    ]
+    return focused or [neighbor]
+
+
+def _is_obligatory_neighbor(selected: str, neighbor: str) -> bool:
+    """Отдельное обязательное действие темы, не упражнение и не каталог способов."""
+
+    if not neighbor or neighbor == selected:
+        return False
+    if _is_kinds_clause(neighbor):
+        return False
+    if _is_auxiliary_practice_unit(neighbor) or _is_method_catalog_neighbor(
+        selected, neighbor
+    ):
+        return False
+    low = neighbor.casefold()
+    selected_low = selected.casefold()
+    if re.match(r"(?i)^(определение|выбор)\s+мест", neighbor.strip()):
+        return any(stem in selected_low for stem in ("лагер", "бивак", "привал", "ночлег"))
+    if not any(stem in low for stem in _COMPLEMENT_STEMS):
+        return False
+    if "снаряжен" in low:
+        if any(stem in selected_low for stem in ("уклад", "рюкзак", "подгонк", "снаряжен")):
+            return any(stem in low for stem in ("уход", "ремонт"))
+        return "план" in selected_low or "составлен" in selected_low
+    return True
+
+
 def _enrich_with_neighbors(
     selected: str, units: list[str]
 ) -> tuple[str, list[str]]:
@@ -1390,6 +1533,13 @@ def _enrich_with_neighbors(
                 for part in focused or [neighbor]:
                     add(nidx, part, practice=True)
                 break
+    for nidx, neighbor in enumerate(units):
+        if neighbor in used:
+            continue
+        if not _is_obligatory_neighbor(selected, neighbor):
+            continue
+        for part in _focus_complement_parts(neighbor):
+            add(nidx, part, practice=True)
     extra_texts = complementary
     if not extras:
         return selected, []
@@ -1543,6 +1693,10 @@ _FINITE_TO_NOUN = {
     "строит": "построения",
     "подготавливает": "подготовки",
     "заслушивает": "заслушивания",
+    "ухаживает": "ухода",
+    "ремонтирует": "ремонта",
+    "разжигает": "разжигания",
+    "подбирает": "подбора",
 }
 _EXERCISE_SKILL_VERBS = {"определяет", "оценивает", "измеряет"}
 _FINITE_VERB_RE = re.compile(
@@ -1747,6 +1901,21 @@ def _phrase_to_genitive(phrase: str) -> str:
         return _normalize_spaces(phrase)
     if len(head) >= 2 and all(_is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая")) for word in head[:-1]):
         head = [_adj_to_genitive(word) for word in head[:-1]] + [_head_noun_to_genitive(head[-1])]
+    elif (
+        len(head) >= 3
+        and _is_adjective(head[0])
+        and any(word.casefold() == "и" for word in head[:-1])
+    ):
+        noun = _head_noun_to_genitive(head[-1])
+        mids = []
+        for word in head[:-1]:
+            if word.casefold() == "и":
+                mids.append(word.casefold())
+            elif _is_adjective(word):
+                mids.append(_adj_to_genitive(word))
+            else:
+                mids.append(word)
+        head = [*mids, noun]
     else:
         head = [_head_noun_to_genitive(head[0]), *head[1:]]
     return _normalize_spaces(" ".join((*head, *tail)))
@@ -1946,6 +2115,7 @@ def _result_actions(result: str) -> list[tuple[str, str]]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         obj = text[match.end() : end].strip(" ,.;")
         obj = re.sub(r"^(и|а|но)\s+", "", obj, flags=re.IGNORECASE)
+        obj = re.sub(r"\s+(и|а|но)$", "", obj, flags=re.IGNORECASE)
         actions.append((match.group(0).casefold(), obj))
     return actions
 
@@ -1966,15 +2136,29 @@ def _product_control(result: str) -> str:
         return product
     if "план-график" in low or "плана-график" in low:
         parts = [
-            _phrase_to_genitive(match.group(0))
+            _phrase_to_genitive(match.group(0).strip(" ,;"))
             for match in re.finditer(
                 r"(?i)план-график(?:\s+(?!и\b)\S+)?|план\s+(?!график)[а-яё]+(?:\s+(?!и\b)[а-яё]+)?",
                 text,
             )
         ]
         if parts:
-            return "проверка " + " и ".join(parts)
-        return "проверка плана-графика"
+            check = "проверка " + " и ".join(parts)
+        else:
+            check = "проверка плана-графика"
+        gear = next(
+            (
+                obj
+                for verb, obj in _result_actions(result)
+                if verb == "подготавливает" and "снаряжен" in obj.casefold()
+            ),
+            "",
+        )
+        if gear:
+            check += "; педагогическое наблюдение за подготовкой " + _phrase_to_genitive(
+                gear
+            )
+        return check
     if "дневник" in low:
         focus = re.search(r"(?i)дневник(?:\s+\S+)?", text)
         raw = focus.group(0) if focus else "дневник"
@@ -2042,7 +2226,15 @@ def _process_control(result: str, lesson_type: str) -> str:
             return "педагогическое наблюдение за техникой " + " ".join(words[:2])
         return "педагогическое наблюдение за техникой"
     if "развертывает" in low and any(stem in low for stem in ("лагер", "бивак")):
-        return "педагогическое наблюдение при развертывании и свертывании лагеря"
+        cycle = []
+        if "определяет" in low and "мест" in low:
+            cycle.append("выбором места для привалов и ночлегов")
+        cycle.append("развертыванием и свертыванием лагеря")
+        if "разжигает" in low:
+            cycle.append("разжиганием костра")
+        if len(cycle) == 1:
+            return "педагогическое наблюдение при развертывании и свертывании лагеря"
+        return "педагогическое наблюдение за " + _join_and(cycle)
     if "экскурси" in type_low or low.startswith("совершает прогул") or low.startswith("совершает экскурси"):
         return "педагогическое наблюдение на экскурсии"
     return ""
@@ -2054,12 +2246,45 @@ def _skill_control(result: str) -> str:
         return ""
     # Observable performance is not a submitted product. Keep the selected
     # result's objects/conditions; never borrow a method from a neighbouring clause.
-    if all(verb in {"укладывает", "подгоняет"} for verb, _ in actions):
-        body = " и ".join(
-            {"укладывает": "укладкой", "подгоняет": "подгонкой"}[verb]
-            + " " + _phrase_to_genitive(obj) for verb, obj in actions
-        )
-        return "педагогическое наблюдение за " + body
+    _equip_observe = {
+        "укладывает": "укладкой",
+        "подгоняет": "подгонкой",
+        "ухаживает": "уходом",
+        "ремонтирует": "ремонтом",
+    }
+    if actions and all(verb in _equip_observe for verb, _ in actions):
+        parts = []
+        for verb, obj in actions:
+            if verb == "ухаживает" and obj.casefold().startswith("за "):
+                parts.append(_equip_observe[verb] + " " + obj)
+            elif verb == "ремонтирует" and obj.casefold() in {"его", "её", "ее", "их"}:
+                parts.append(_equip_observe[verb])
+            else:
+                parts.append(_equip_observe[verb] + " " + _phrase_to_genitive(obj))
+        return "педагогическое наблюдение за " + _join_and(parts)
+    _hygiene_observe = {
+        "применяет": "применением",
+        "подбирает": "подбором",
+        "ухаживает": "уходом",
+    }
+    if (
+        actions
+        and all(verb in _hygiene_observe for verb, _ in actions)
+        and any(verb == "применяет" for verb, _ in actions)
+    ):
+        parts = []
+        for verb, obj in actions:
+            if verb == "ухаживает" and obj.casefold().startswith("за "):
+                parts.append(_hygiene_observe[verb] + " " + obj)
+            elif verb == "подбирает" and "одежд" in obj.casefold() and "обув" in obj.casefold():
+                parts.append("подбором одежды и обуви")
+            else:
+                parts.append(
+                    _hygiene_observe[verb]
+                    + " "
+                    + _phrase_to_genitive(_short_object(obj) if verb != "ухаживает" else obj)
+                )
+        return "педагогическое наблюдение за " + _join_and(parts)
     if len(actions) == 1:
         verb, obj = actions[0]
         low = obj.casefold()
@@ -2087,8 +2312,19 @@ def _skill_control(result: str) -> str:
         object_text = objects[0] if objects else ""
         if len(nouns) == 1:
             body = _normalize_spaces(f"{nouns[0]} {object_text}")
-        else:
+        elif objects and len(set(objects)) == 1:
             body = _normalize_spaces(f"{' и '.join(nouns)} {object_text}")
+        else:
+            full_objects = [
+                _phrase_to_genitive(obj.split(",")[0].strip())
+                for _verb, obj in actions
+            ]
+            body = _normalize_spaces(
+                " и ".join(
+                    f"{noun} {obj}".strip()
+                    for noun, obj in zip(nouns, full_objects)
+                )
+            )
         return f"практическое задание по {body}".rstrip()
     if any(verb == "изготавливает" for verb, _obj in actions) and any(
         verb == "разучивает" and "транспортир" in obj.casefold() for verb, obj in actions
@@ -2298,6 +2534,8 @@ _TASK_VERBS = {
     "разучивает": "разучить", "ведёт": "вести",
     "рисует": "нарисовать", "сравнивает": "сравнить",
     "решает": "решить", "исследует": "исследовать",
+    "ухаживает": "ухаживать", "ремонтирует": "ремонтировать",
+    "разжигает": "разжечь", "подбирает": "подобрать",
 }
 
 
@@ -2313,15 +2551,48 @@ def _result_as_task(result: str) -> str:
     )
 
 
+_EXERCISE_OP_RE = re.compile(
+    r"(?i)(?:по|на) (определению|определение|отбору|отбор|измерению|"
+    r"измерение|запоминание|глазомерную оценку|инструментальное измерение) (.+)"
+)
+_EXERCISE_OP_SPLIT_RE = re.compile(
+    r",\s+(?=(?:определению|определение|измерению|измерение|отбору|отбор|"
+    r"оценке|глазомерную|инструментальное)\b)"
+)
+
+
+def _exercise_operation_parts(body: str) -> list[str]:
+    """Не резать хвост, если в одной клаузе несколько равноправных операций."""
+
+    chunks = [item.strip() for item in _EXERCISE_OP_SPLIT_RE.split(body) if item.strip()]
+    if len(chunks) < 2:
+        return [body]
+    lead = "по "
+    if chunks[0].casefold().startswith("на "):
+        lead = "на "
+    elif chunks[0].casefold().startswith("по "):
+        lead = "по "
+    parts = [chunks[0]]
+    for chunk in chunks[1:]:
+        if chunk.casefold().startswith(("по ", "на ")):
+            parts.append(chunk)
+        else:
+            parts.append(lead + chunk)
+    if all(_EXERCISE_OP_RE.fullmatch(part) for part in parts):
+        return parts
+    return [body]
+
+
 def _observable_result(result: str) -> str:
     """Remove exercise wrappers only for explicitly named observable operations."""
     if result.startswith("Выполняет упражнения"):
-        parts = re.split(r" и упражнения ", result.removeprefix("Выполняет упражнения ").rstrip("."))
+        body = result.removeprefix("Выполняет упражнения ").rstrip(".")
+        parts = []
+        for block in re.split(r" и упражнения ", body):
+            parts.extend(_exercise_operation_parts(block))
         converted = []
         for part in parts:
-            match = re.fullmatch(
-                r"(?:по|на) (определению|определение|отбору|отбор|измерению|измерение|запоминание|глазомерную оценку|инструментальное измерение) (.+)", part,
-            )
+            match = _EXERCISE_OP_RE.fullmatch(part)
             if match is None:
                 return result
             operation, rest = match.groups()
