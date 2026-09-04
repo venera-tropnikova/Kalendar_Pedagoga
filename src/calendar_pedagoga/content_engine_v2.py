@@ -1821,14 +1821,76 @@ def _knowledge_result_from_title(topic_title: str) -> str:
 
 def _named_form_control(result: str, frame: ActionFrame, lesson_type: str) -> str:
     selected = _normalize_spaces(f"{result} {frame.clause} {lesson_type}").casefold()
+    result_low = result.casefold()
     if "диктант" in frame.clause.casefold():
-        if "топограф" in frame.clause.casefold() or "знак" in result.casefold():
+        if "топограф" in frame.clause.casefold() or "знак" in result_low:
             return "топографический диктант"
         return "диктант"
     if "викторин" in selected:
         if "краевед" in selected:
             return "краеведческая викторина"
         return "викторина"
+    # Event-as-check uses the selected RESULT only, so neighbouring mentions
+    # of соревнования cannot replace a different control already in the clause.
+    if "соревнован" in result_low and any(
+        stem in result_low for stem in ("выступа", "участник", "участв")
+    ):
+        if "туристск" in result_low:
+            return "выступление в туристских соревнованиях"
+        return "выступление в соревнованиях"
+    return ""
+
+
+def _selected_activity(result: str, clause: str) -> str:
+    return _normalize_spaces(f"{result} {clause}").casefold()
+
+
+def _activity_event_type(result: str, clause: str) -> str:
+    """Lesson events from selected activity. Control methods never become TYPE."""
+    result_low = result.casefold()
+    clause_low = clause.casefold()
+    participates = any(
+        stem in result_low for stem in ("выступа", "участник", "участв")
+    ) or "выступлен" in clause_low
+    if not participates:
+        return ""
+    event_src = result_low if any(
+        stem in result_low for stem in ("соревнован", "конкурс", "слёт", "слет")
+    ) else clause_low
+    if "соревнован" in event_src:
+        if "туристск" in event_src:
+            return "туристские соревнования"
+        return "соревнования"
+    if "конкурс" in event_src:
+        return "конкурс"
+    if "слёт" in event_src or "слет" in event_src:
+        return "туристский слёт" if "туристск" in event_src else "слёт"
+    return ""
+
+
+def _practice_activity_type(result: str, clause: str) -> str:
+    """Leading practical activity, not a copied CONTROL label."""
+    result_low = result.casefold()
+    selected = _selected_activity(result, clause)
+    if "развертывает" in result_low and any(stem in selected for stem in ("лагер", "бивак")):
+        return "практикум по организации бивака"
+    if "обязанност" in result_low and "должност" in selected:
+        return "практикум по исполнению должностей"
+    if re.search(r"(?i)\bзнак[аиуов]?\b", result_low):
+        if "топограф" in selected:
+            return "практикум по работе с топографическими знаками"
+        return "практикум по работе со знаками"
+    if "азимут" in result_low:
+        return "измерительный практикум"
+    if "масштаб" in result_low:
+        return "практикум по работе с картой"
+    if (
+        result_low.startswith("ориентирует")
+        or "стороны горизонта" in result_low
+        or ("ориентир" in result_low and any(token in result_low for token in ("карт", "маршрут")))
+        or ("компас" in result_low and re.search(r"карт", result_low))
+    ):
+        return "практикум по ориентированию"
     return ""
 
 
@@ -2136,6 +2198,7 @@ def type_from_frame(
     if practice_hours and practice_text.strip() and planned_result:
         result = planned_result.casefold()
         clause = frame.clause.casefold()
+        selected = _selected_activity(planned_result, frame.clause)
         if "викторин" in result or re.search(
             r"(?i)(?:проведен|провод).{0,40}викторин", clause
         ):
@@ -2144,8 +2207,11 @@ def type_from_frame(
             return "экскурсия"
         if result.startswith("исследует") and any(x in clause for x in ("гипотез", "сравнен", "измерен", "наблюден")):
             return "исследовательское занятие"
-        if "имитац" in clause and "ситуаци" in clause and "действ" in clause:
+        if "имитац" in selected and "ситуаци" in selected:
             return "ситуационный тренинг"
+        event_type = _activity_event_type(planned_result, frame.clause)
+        if event_type:
+            return event_type
         if "составляет" in result and "план" in result and "план-график" in result:
             return "проектно-практическое занятие"
         if result.startswith(("проводит наблюдения", "проводит краеведческие наблюдения", "наблюдает")):
@@ -2163,20 +2229,9 @@ def type_from_frame(
                 return "практикум по подготовке отчёта"
             if "гигиен" in result:
                 return "практикум по личной гигиене"
-            if "азимут" in result or (
-                re.search(r"\bкарт(?:у|е|ы|ой)\b", result)
-                and any(x in result for x in ("компас", "ориентир", "маршрут"))
-            ):
-                return "топографический практикум"
-            # Specialise only by the selected activity, not the whole programme
-            # or a topic identifier. This describes content, not new methodology.
-            if (
-                "масштаб" in result and "карт" in clause
-                or "знаки" in result and "топограф" in clause
-            ):
-                return "топографический практикум"
-            if "стороны горизонта" in result and "сторон горизонта" in clause:
-                return "практикум по ориентированию"
+            activity_type = _practice_activity_type(planned_result, frame.clause)
+            if activity_type:
+                return activity_type
             if "измеряет" in result and "шаг" in result and "измерен" in clause:
                 return "измерительный практикум"
             if "доклад" in result and "район" in result and "поход" in clause:
@@ -2189,12 +2244,6 @@ def type_from_frame(
                 return "практикум по транспортировке пострадавшего"
             if "дневник самоконтроля" in result and "дневника самоконтроля" in clause:
                 return "практикум по самоконтролю"
-            if (
-                "лагерь" in result and "бивак" in clause
-                or "обязанности" in result and "поход" in clause
-                or "туристских соревнован" in result and "участник" in clause
-            ):
-                return "туристский практикум"
             return "практикум"
     lead = _leading_clause(frame)
     scores = _line_form_scores(lead)
