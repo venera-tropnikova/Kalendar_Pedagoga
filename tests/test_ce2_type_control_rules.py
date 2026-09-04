@@ -18,11 +18,11 @@ def _digest(value):
 def test_audit_snapshot_preserves_results_and_untouched_rows():
     # RESULT digest captured before this task. TYPE/CONTROL freeze excludes
     # the agreed change weeks so neighbouring rows cannot drift silently.
-    changed = {3, 6, 9, 11, 12, 13, 14, 16, 17}
-    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == "710d813ff5ddad138ec1a2808176ed73de886f52039074909223996a462debce"
+    changed = {3, 6, 9, 11, 12, 13, 14, 16, 17, 29, 30, 31, 36}
+    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == "724057931e2b328498c8a73fa8aaf3250cb0f73ab5603f39ea7948b13018ca1a"
     assert _digest([list(row[1:]) for week, row in enumerate(
         CE2_TP1_WEEK_SNAPSHOT, 1
-    ) if week not in changed]) == "de2eb3c655a678b5bfd1ac94bfc089037dc432b70c108f8190c85acbf8919619"
+    ) if week not in changed]) == "789cdf3514a3eb578dab30a2ee88faf3f3b986ed9968963514a77ee46d748e87"
 
 
 @pytest.mark.parametrize(("result", "clause", "expected"), [

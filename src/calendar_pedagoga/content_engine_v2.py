@@ -22,6 +22,13 @@ from calendar_pedagoga.lesson_content import (
     _week_result_source,
     derive_lesson_type,
 )
+from calendar_pedagoga.practice_slots import (
+    SLOT_CONTINUE_WARNING,
+    SLOT_PACK_WARNING,
+    assign_practice_slots,
+    practice_units_from_text,
+    slot_is_continuation,
+)
 
 
 @dataclass(frozen=True)
@@ -2342,6 +2349,330 @@ def _observable_result(result: str) -> str:
     return result.replace("Проводит различные наблюдения", "Проводит наблюдения").replace("Проводит различные краеведческие наблюдения", "Проводит краеведческие наблюдения")
 
 
+def _lower_lead(text: str) -> str:
+    stripped = _normalize_spaces(text)
+    if not stripped:
+        return stripped
+    if stripped[0].isupper() and not stripped[:2].isupper():
+        return stripped[0].lower() + stripped[1:]
+    return stripped
+
+
+def _practice_unit_kind(clause: str) -> str:
+    text = _normalize_spaces(clause)
+    low = text.casefold()
+    if re.search(r"(?i)\bосвоен", text):
+        return "master"
+    tokens = text.split()
+    _mods, rest = _leading_modifiers(tokens)
+    head = re.sub(r"[^\wёЁ]", "", rest[0] if rest else "")
+    if _is_exercise_word(head):
+        return "exercise"
+    if re.match(r"(?i)^элемент", head):
+        return "element"
+    if re.search(r"(?i)\bэстафет", low) or re.search(
+        r"(?i)\bигр(?:а|ы|е|ами|ах)?\b", low
+    ):
+        return "game"
+    if re.search(r"(?i)\bспорт\b", low) or re.search(r"(?i)атлетик", low):
+        return "sport"
+    return "other"
+
+
+def _slot_group_kind(kind: str) -> str:
+    if kind in {"exercise", "element"}:
+        return "perform"
+    if kind in {"game", "sport"}:
+        return "participate"
+    return kind
+
+
+def _adj_to_locative(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ые"):
+        core = core[:-2] + "ых"
+    elif low.endswith("ие") and not low.endswith(("ние", "тие")):
+        core = core[:-2] + "их"
+    elif low.endswith("ая"):
+        core = core[:-2] + "ой"
+    return f"{prefix}{core}{suffix}"
+
+
+def _noun_to_locative(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith(("ах", "ях")):
+        changed = core
+    elif low.endswith("ы"):
+        changed = core[:-1] + "ах"
+    elif low.endswith("и") and len(core) > 3 and not low.endswith(("ии", "ени")):
+        changed = core[:-1] + "ах"
+    elif low.endswith("а"):
+        changed = core[:-1] + "е"
+    elif low.endswith("я"):
+        changed = core[:-1] + "е"
+    elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
+        changed = core + "е"
+    else:
+        changed = core
+    return f"{prefix}{changed}{suffix}"
+
+
+def _phrase_to_locative(phrase: str) -> str:
+    words = _normalize_spaces(phrase).split()
+    if not words:
+        return phrase
+    if len(words) >= 2 and all(_is_adjective(word) for word in words[:-1]):
+        return _normalize_spaces(
+            " ".join([*(_adj_to_locative(word) for word in words[:-1]), _noun_to_locative(words[-1])])
+        )
+    return _noun_to_locative(words[0]) if len(words) == 1 else _normalize_spaces(
+        " ".join([_noun_to_locative(words[0]), *words[1:]])
+    )
+
+
+def _adj_to_instrumental(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ый"):
+        core = core[:-2] + "ым"
+    elif low.endswith("ий"):
+        core = core[:-2] + "им"
+    elif low.endswith("ая"):
+        core = core[:-2] + "ой"
+    elif low.endswith("ое"):
+        core = core[:-2] + "ым"
+    return f"{prefix}{core}{suffix}"
+
+
+def _noun_to_instrumental(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("а"):
+        changed = core[:-1] + "ой"
+    elif low.endswith("я"):
+        changed = core[:-1] + "ей"
+    elif low.endswith(("о", "е")):
+        changed = core + "м"
+    elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
+        changed = core + "ом"
+    else:
+        changed = core
+    return f"{prefix}{changed}{suffix}"
+
+
+def _phrase_to_instrumental(phrase: str) -> str:
+    words = _normalize_spaces(phrase).split()
+    if not words:
+        return phrase
+    if len(words) >= 2 and all(_is_adjective(word) for word in words[:-1]):
+        return _normalize_spaces(
+            " ".join(
+                [
+                    *(_adj_to_instrumental(word) for word in words[:-1]),
+                    _noun_to_instrumental(words[-1]),
+                ]
+            )
+        )
+    return _noun_to_instrumental(words[0]) if len(words) == 1 else _normalize_spaces(
+        " ".join([_noun_to_instrumental(words[0]), *words[1:]])
+    )
+
+
+def _exercise_remainder(clause: str) -> str:
+    tokens = _normalize_spaces(clause).split()
+    mods, rest = _leading_modifiers(tokens)
+    if rest and _is_exercise_word(re.sub(r"[^\wёЁ]", "", rest[0])):
+        remainder = " ".join(rest[1:]).strip()
+        if mods:
+            lead = _lower_lead(" ".join(mods))
+            return _normalize_spaces(f"{lead} упражнения {remainder}").strip()
+        return remainder
+    return _lower_lead(clause)
+
+
+def _flatten_prep_parts(item: str, prep: str) -> list[str]:
+    parts = re.split(rf"(?i),\s*{re.escape(prep)}\s+", _normalize_spaces(item))
+    cleaned: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if text.casefold().startswith(prep + " "):
+            text = text[len(prep) + 1 :]
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _compress_exercise_remainders(remainders: list[str]) -> str:
+    dlya: list[str] = []
+    other: list[str] = []
+    for item in remainders:
+        if item.casefold().startswith("для "):
+            dlya.extend(_flatten_prep_parts(item, "для"))
+        else:
+            other.append(item)
+    chunks: list[str] = []
+    if dlya:
+        chunks.append("для " + _join_and(dlya))
+    for item in other:
+        text = item
+        if re.search(r"(?i)^(со?)\s+", text) and "," in text and not re.search(
+            r"(?i),\s*(для|со?|на)\s+", text
+        ):
+            match = re.match(r"(?i)^(со?)\s+(.+)$", text)
+            if match:
+                nouns = [part.strip() for part in match.group(2).split(",") if part.strip()]
+                text = match.group(1) + " " + _join_and(nouns)
+        chunks.append(text)
+    if len(chunks) >= 2 and any(
+        not item.casefold().startswith("для ") for item in other
+    ) and dlya:
+        *head, last = chunks
+        return ", ".join(head) + ", а также упражнения " + last
+    return ", ".join(chunks)
+
+
+def _game_participate_object(clause: str, *, more_follow: bool) -> str:
+    text = _normalize_spaces(clause)
+    head, colon, tail = text.partition(":")
+    pieces = [part.strip() for part in re.split(r"\s+и\s+", head) if part.strip()]
+    locatives = [_phrase_to_locative(_lower_lead(part)) for part in pieces]
+    if more_follow and len(locatives) > 1:
+        body = ", ".join(locatives)
+    else:
+        body = _join_and(locatives)
+    if colon:
+        return f"{body}:{tail}" if tail.startswith(" ") else f"{body}: {tail.strip()}"
+    return body
+
+
+def _sport_participate_object(clause: str) -> str:
+    return "занятиях " + _phrase_to_instrumental(_lower_lead(clause))
+
+
+def _master_result(clause: str) -> str:
+    match = re.match(
+        r"(?i)^(.+?)\s*\(\s*освоение\s+(.+)\s*\)\s*$",
+        _normalize_spaces(clause),
+    )
+    if not match:
+        return _lower_lead(clause)
+    domain = _lower_lead(match.group(1).strip())
+    obj = match.group(2).strip()
+    obj_acc = re.sub(r"(?i)^одного\b", "один", obj)
+    return _normalize_spaces(
+        f"осваивает {obj_acc} {_head_noun_to_genitive(domain)}"
+    )
+
+
+def _perform_result(units: list[tuple[str, str]]) -> str:
+    remainders: list[str] = []
+    for kind, clause in units:
+        if kind == "exercise":
+            remainder = _exercise_remainder(clause)
+            if remainder.casefold().startswith("гимнастическ"):
+                remainders.append(_lower_lead(clause))
+            else:
+                remainders.append(remainder)
+        else:
+            remainders.append(_lower_lead(clause))
+    body = _compress_exercise_remainders(remainders)
+    if any(
+        kind == "exercise" and not _exercise_remainder(clause).casefold().startswith("гимнастическ")
+        for kind, clause in units
+    ):
+        return _normalize_spaces(f"выполняет упражнения {body}".strip())
+    return _normalize_spaces(f"выполняет {body}".strip())
+
+
+def _participate_result(units: list[tuple[str, str]]) -> str:
+    objects: list[str] = []
+    for index, (kind, clause) in enumerate(units):
+        more = index < len(units) - 1
+        if kind == "game":
+            objects.append(_game_participate_object(clause, more_follow=more or any(
+                item[0] == "sport" for item in units[index + 1 :]
+            )))
+        else:
+            objects.append(_sport_participate_object(clause))
+    return "участвует в " + _join_and(objects)
+
+
+def _aggregate_slot_result(slot: tuple[str, ...]) -> str:
+    if not slot:
+        return ""
+    groups: list[tuple[str, list[tuple[str, str]]]] = []
+    for clause in slot:
+        kind = _practice_unit_kind(clause)
+        group = _slot_group_kind(kind)
+        if groups and groups[-1][0] == group and group in {"perform", "participate"}:
+            groups[-1][1].append((kind, clause))
+        else:
+            groups.append((group, [(kind, clause)]))
+    predicates: list[str] = []
+    for group, units in groups:
+        if group == "perform":
+            predicates.append(_perform_result(units))
+        elif group == "participate":
+            predicates.append(_participate_result(units))
+        elif group == "master":
+            predicates.append(_master_result(units[0][1]))
+        else:
+            phrase, _frame = transform_clause_to_result(
+                units[0][1],
+                theory_only=False,
+                full_source=units[0][1],
+                topic_title="",
+            )
+            predicates.append(_observable_result(phrase) if phrase else _lower_lead(units[0][1]))
+    return _cap_sentence(", ".join(predicates))
+
+
+def _slot_control_from_result(result: str) -> str:
+    text = _normalize_spaces(result).rstrip(".")
+    matches = list(
+        re.finditer(
+            r"(?i)\b(выполняет|осваивает|участвует\s+в)\b",
+            text,
+        )
+    )
+    if not matches:
+        return ""
+    parts: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        verb = re.sub(r"\s+", " ", match.group(1).casefold())
+        body = text[match.end() : end].strip(" ,")
+        if verb == "выполняет":
+            if body.casefold().startswith("упражнения"):
+                remainder = body[len("упражнения") :].strip()
+                if "а также упражнения" in remainder:
+                    left, right = remainder.split("а также упражнения", 1)
+                    obj = (
+                        "упражнений "
+                        + left.strip(" ,")
+                        + ", а также упражнений "
+                        + right.strip()
+                    )
+                else:
+                    obj = "упражнений " + remainder if remainder else "упражнений"
+                    obj = obj.replace(", элементы ", ", элементов ").replace(
+                        ", элементы", ", элементов"
+                    )
+                    if obj.endswith(" элементы акробатики"):
+                        obj = obj[: -len(" элементы акробатики")] + " элементов акробатики"
+                parts.append("выполнением " + _normalize_spaces(obj))
+            else:
+                parts.append("выполнением " + _phrase_to_genitive(body))
+        elif verb.startswith("участвует"):
+            parts.append("участием в " + body)
+        else:
+            obj = re.sub(r"(?i)^один\b", "одного", body)
+            parts.append("освоением " + obj)
+    return "педагогическое наблюдение за " + _join_and(parts)
+
+
 def derive_fields_v2(
     *,
     topic_title: str,
@@ -2351,10 +2682,64 @@ def derive_fields_v2(
     theory_hours: int = 0,
     practice_hours: int = 0,
     occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
     """Цепочка: source → action/object/conditions → RESULT → CONTROL → TYPE."""
 
     warnings: list[str] = []
+    units = practice_units_from_text(practice_text)
+    if (
+        practice_hours
+        and practice_appearance_count > 1
+        and units
+    ):
+        slots = assign_practice_slots(units, practice_appearance_count)
+        index = min(occurrence_index, len(slots) - 1)
+        slot = slots[index]
+        continuation = slot_is_continuation(slots, index)
+        if len(units) > practice_appearance_count:
+            warnings.append(SLOT_PACK_WARNING)
+        if continuation:
+            warnings.append(SLOT_CONTINUE_WARNING)
+        planned_result = _aggregate_slot_result(slot)
+        frame = ActionFrame(
+            clause=". ".join(slot),
+            action="",
+            object="",
+            conditions="",
+        )
+        kinds = {_practice_unit_kind(item) for item in slot}
+        if kinds & {"exercise", "element", "sport", "master"}:
+            lesson_type = "учебно-тренировочное занятие"
+        else:
+            lesson_type = type_from_frame(
+                frame,
+                theory_hours=theory_hours,
+                practice_hours=practice_hours,
+                theory_text=theory_text,
+                practice_text=" ".join(slot),
+                program_content=program_content,
+                planned_result=planned_result,
+            )
+        assessment = _slot_control_from_result(planned_result)
+        if not assessment:
+            assessment = control_from_frame(
+                frame,
+                lesson_type=lesson_type,
+                theory_hours=theory_hours,
+                practice_hours=practice_hours,
+                planned_result=planned_result,
+            )
+        assessment = _align_control_to_result(assessment, planned_result)
+        return ContentEngineV2Result(
+            frame=frame,
+            lesson_type=lesson_type,
+            planned_result=planned_result,
+            assessment_method=assessment,
+            theory_text=theory_text,
+            practice_text=practice_text,
+            warnings=tuple(warnings),
+        )
     clause, theory_only, source_pool = select_source_clause(
         topic_title=topic_title,
         theory_text=theory_text,
@@ -2458,6 +2843,7 @@ def fill_from_source(
     theory_hours: int,
     practice_hours: int,
     occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
     """Разделить содержание темы и заполнить поля 2.0."""
 
@@ -2485,6 +2871,7 @@ def fill_from_source(
         theory_hours=theory_hours,
         practice_hours=practice_hours,
         occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
     )
 
 
@@ -2649,6 +3036,7 @@ def _derive_week_part(
     part: WeekTopicPart,
     topic_totals: dict[tuple[str | None, str, str], tuple[int, int]],
     occurrence_index: int,
+    practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
     theory_text, practice_text = _part_texts(part, topic_totals)
     return derive_fields_v2(
@@ -2659,7 +3047,21 @@ def _derive_week_part(
         theory_hours=part.theory_hours,
         practice_hours=part.practice_hours,
         occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
     )
+
+
+def _practice_appearance_counts(
+    rows: tuple[CalendarContentRow, ...],
+) -> dict[tuple[str | None, str, str], int]:
+    counts: dict[tuple[str | None, str, str], int] = {}
+    for row in rows:
+        for part in _row_week_parts(row):
+            if part.practice_hours <= 0:
+                continue
+            key = (part.topic_number, part.topic_title, part.section)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def build_lesson_content_v2(
@@ -2671,7 +3073,8 @@ def build_lesson_content_v2(
     """
 
     result: list[LessonContentV2Row] = []
-    topic_occurrences: dict[tuple[str | None, str, str], int] = {}
+    practice_counts = _practice_appearance_counts(rows)
+    practice_occurrences: dict[tuple[str | None, str, str], int] = {}
     for row in rows:
         parts = _row_week_parts(row)
         theory_text, practice_text, warnings = _split_row_texts(row)
@@ -2679,10 +3082,18 @@ def build_lesson_content_v2(
             derived_parts: list[ContentEngineV2Result] = []
             for part in parts:
                 key = (part.topic_number, part.topic_title, part.section)
-                occurrence_index = topic_occurrences.get(key, 0)
-                topic_occurrences[key] = occurrence_index + 1
+                occurrence_index = 0
+                count = practice_counts.get(key, 0)
+                if part.practice_hours:
+                    occurrence_index = practice_occurrences.get(key, 0)
+                    practice_occurrences[key] = occurrence_index + 1
                 derived_parts.append(
-                    _derive_week_part(part, _topic_hour_totals(parts), occurrence_index)
+                    _derive_week_part(
+                        part,
+                        _topic_hour_totals(parts),
+                        occurrence_index,
+                        count if part.practice_hours else 0,
+                    )
                 )
             lesson_type, planned_result, assessment = _merge_week_part_fields(derived_parts)
             derived = derived_parts[0]
@@ -2691,8 +3102,11 @@ def build_lesson_content_v2(
             )
         else:
             key = (row.topic_number, row.topic_title, row.section)
-            occurrence_index = topic_occurrences.get(key, 0)
-            topic_occurrences[key] = occurrence_index + 1
+            occurrence_index = 0
+            count = practice_counts.get(key, 0)
+            if row.practice_hours:
+                occurrence_index = practice_occurrences.get(key, 0)
+                practice_occurrences[key] = occurrence_index + 1
             derived = derive_fields_v2(
                 topic_title=row.topic_title,
                 theory_text=theory_text,
@@ -2701,6 +3115,7 @@ def build_lesson_content_v2(
                 theory_hours=row.theory_hours,
                 practice_hours=row.practice_hours,
                 occurrence_index=occurrence_index,
+                practice_appearance_count=count if row.practice_hours else 0,
             )
             lesson_type = derived.lesson_type
             planned_result = derived.planned_result

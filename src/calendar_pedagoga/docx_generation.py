@@ -459,12 +459,14 @@ def _topic_part_key(part: WeekTopicPart) -> tuple[str | None, str, str]:
     return (part.topic_number, part.topic_title, part.section)
 
 
-def _topic_appearance_counts(
+def _practice_appearance_counts(
     rows: tuple[ResolvedLessonRow, ...],
 ) -> dict[tuple[str | None, str, str], int]:
     counts: dict[tuple[str | None, str, str], int] = {}
     for lesson in rows:
         for part in _week_topic_parts(lesson.source.source):
+            if part.practice_hours <= 0:
+                continue
             key = _topic_part_key(part)
             counts[key] = counts.get(key, 0) + 1
     return counts
@@ -482,8 +484,10 @@ def _topic_cells_for_lesson(
     practice_lines: list[str] = []
     for part in _week_topic_parts(source_row):
         key = _topic_part_key(part)
-        occurrence_index = topic_occurrences.get(key, 0)
-        topic_occurrences[key] = occurrence_index + 1
+        occurrence_index = 0
+        if part.practice_hours:
+            occurrence_index = topic_occurrences.get(key, 0)
+            topic_occurrences[key] = occurrence_index + 1
         display_number = display_numbers.get(key, part.topic_number or "?")
         theory_cell = format_theory_cell(
             display_number,
@@ -492,7 +496,8 @@ def _topic_cells_for_lesson(
             part.theory_hours,
         )
         selected_clause = ""
-        if topic_counts.get(key, 0) > 1 and part.practice_hours:
+        appearance_count = topic_counts.get(key, 0)
+        if appearance_count > 1 and part.practice_hours:
             selected_clause = practice_clause_for_repeated_topic(
                 topic_title=part.topic_title,
                 content=part.program_content_full,
@@ -500,6 +505,7 @@ def _topic_cells_for_lesson(
                 practice_hours=part.practice_hours,
                 occurrence_index=occurrence_index,
                 planned_result=lesson.planned_result,
+                appearance_count=appearance_count,
             )
         practice_cell = format_practice_cell(
             display_number,
@@ -859,7 +865,7 @@ def _populate_calendar_table(
     display_numbers = _topic_display_numbers(utp)
     _ensure_data_rows(table, len(rows))
     _repeat_table_header_rows(table)
-    topic_counts = _topic_appearance_counts(rows)
+    topic_counts = _practice_appearance_counts(rows)
     topic_occurrences: dict[tuple[str | None, str, str], int] = {}
 
     for index, lesson in enumerate(rows):

@@ -147,11 +147,30 @@ def selected_practice_clause(
     theory_hours: int,
     practice_hours: int,
     occurrence_index: int,
+    appearance_count: int = 0,
 ) -> str:
     """Return the CE2 practice clause for this week, or empty if theory-led."""
 
     if practice_hours <= 0:
         return ""
+
+    from calendar_pedagoga.practice_slots import (
+        assign_practice_slots,
+        format_slot_practice_text,
+        practice_units_from_content,
+        slot_is_continuation,
+    )
+
+    units = practice_units_from_content(
+        content, theory_hours=theory_hours, practice_hours=practice_hours
+    )
+    if appearance_count > 1 and units:
+        slots = assign_practice_slots(units, appearance_count)
+        index = min(occurrence_index, len(slots) - 1)
+        return format_slot_practice_text(
+            slots[index],
+            continuation=slot_is_continuation(slots, index),
+        )
 
     from calendar_pedagoga.content_engine_v2 import select_source_clause
     from calendar_pedagoga.lesson_content import _split_explicit_practice
@@ -191,8 +210,19 @@ def practice_clause_for_repeated_topic(
     practice_hours: int,
     occurrence_index: int,
     planned_result: str,
+    appearance_count: int = 0,
 ) -> str:
-    """Selected CE2 clause only when it is the RESULT of this repeated week."""
+    """Assigned slot text for a repeated topic; empty if theory-led."""
+
+    if appearance_count > 1:
+        return selected_practice_clause(
+            topic_title=topic_title,
+            content=content,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+            occurrence_index=occurrence_index,
+            appearance_count=appearance_count,
+        )
 
     selected = selected_practice_clause(
         topic_title=topic_title,

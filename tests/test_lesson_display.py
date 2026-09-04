@@ -84,6 +84,7 @@ def test_repeated_topic_shows_selected_ce2_clause() -> None:
             theory_hours=0,
             practice_hours=2,
             occurrence_index=index,
+            appearance_count=5,
         )
         assert selected.casefold().startswith(clause.casefold()[:20])
         cell = format_practice_cell("5.4", title, content, 2, selected)
@@ -93,15 +94,18 @@ def test_repeated_topic_shows_selected_ce2_clause() -> None:
             if other != clause:
                 assert other.rstrip(".") not in cell
 
-    # Weeks > clauses keep CE2 modulo (REPEAT). Do not invent a fifth unit.
+    # Weeks > clauses continue the last assigned slot, not modulo to the first.
     wrapped = selected_practice_clause(
         topic_title=title,
         content=content,
         theory_hours=0,
         practice_hours=2,
         occurrence_index=4,
+        appearance_count=5,
     )
-    assert wrapped.casefold().startswith("упражнение на развитие выносливости")
+    assert wrapped.startswith("Продолжение.")
+    assert "гибкости" in wrapped.casefold()
+    assert "выносливости" not in wrapped.casefold()
 
 
 def test_no_ellipsis_in_display_cells() -> None:
@@ -122,7 +126,7 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
     from calendar_pedagoga.content_generation import build_content_model
     from calendar_pedagoga.docx_generation import (
-        _topic_appearance_counts,
+        _practice_appearance_counts,
         _topic_cells_for_lesson,
         _topic_display_numbers,
     )
@@ -141,19 +145,20 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     rows = build_content_model(build_schedule(utp, "2026–2027"), utp, program, source.name)
     generated = build_lesson_content_v2(rows)
     resolved = resolve_lesson_content(_lesson_rows_from_v2(generated))
-    counts = _topic_appearance_counts(resolved)
+    counts = _practice_appearance_counts(resolved)
     occurrences: dict = {}
     display_numbers = _topic_display_numbers(utp)
     tokens = {
-        29: "рук и плечевого пояса",
-        30: "мышц шеи",
-        31: "туловища, для ног",
+        29: "мышц шеи",
+        30: "скакалкой",
+        31: "баскетбол",
         32: "выносливости",
         33: "быстроты",
         34: "силы",
         35: "гибкости",
-        36: "выносливости",
+        36: "гибкости",
     }
+    seen_ofp: list[str] = []
     for lesson in resolved:
         week = lesson.source.source.week_number
         _theory, practice = _topic_cells_for_lesson(
@@ -175,7 +180,29 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
         assert "основная задача общей физической" not in low
         assert "роль и значение специальной" not in low
         assert "индивидуальный подход" not in low
+        if week in {29, 30, 31}:
+            seen_ofp.append(practice)
+        if week == 36:
+            assert practice.startswith("Продолжение.")
+            assert "выносливости" not in low
+            assert "выносливости" not in lesson.planned_result.casefold()
     fifth_sfp = [
         count for key, count in occurrences.items() if key[0] == "5.4"
     ]
     assert fifth_sfp == [5]
+    joined_ofp = " ".join(seen_ofp).casefold()
+    for fragment in (
+        "рук и плечевого пояса",
+        "мышц шеи",
+        "туловища",
+        "сопротивлением",
+        "скакалкой",
+        "акробатики",
+        "эстафет",
+        "легкая атлетика",
+        "лыжный спорт",
+        "гимнастические",
+        "баскетбол",
+        "плавание",
+    ):
+        assert fragment in joined_ofp
