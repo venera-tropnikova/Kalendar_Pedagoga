@@ -1000,9 +1000,10 @@ def _agree_capacity_role(text: str) -> str:
 
 
 _DANGLING_PRONOUN_RE = re.compile(r"(?i)^(ее|её|его|их)\s+(.+)$")
-_FINITE_VERB_RE = re.compile(
+_RESULT_FINITE_RE = re.compile(
     r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b"
 )
+_FINITE_VERB_RE = _RESULT_FINITE_RE
 _KNOWLEDGE_WRAPPER_RE = re.compile(
     r"(?i)^(характеризует)\s+(?:краткие|общие|основные)\s+сведения\s+(?:о|об)\s+"
 )
@@ -1044,7 +1045,7 @@ def _resolve_dangling_pronoun(clause: str, topic_title: str) -> str:
 
 
 def _is_finite_result_phrase(phrase: str) -> bool:
-    return bool(_FINITE_VERB_RE.match(phrase.strip()))
+    return bool(_RESULT_FINITE_RE.match(phrase.strip()))
 
 
 def _merge_repeated_verbs(text: str) -> str:
@@ -1090,7 +1091,7 @@ def _drop_raw_list_tails(text: str) -> str:
             r"(?i)(?:нию|тию|анию|ению)$", first
         ):
             continue
-        if first[:1].isupper() and not _FINITE_VERB_RE.match(part):
+        if first[:1].isupper() and not _RESULT_FINITE_RE.match(part):
             continue
         if re.match(r"(?i)^(игры|игра|соревнования|диктанты|занятия|мини)\b", part):
             continue
@@ -1116,11 +1117,16 @@ def _keep_strongest_phrase(phrases: list[str]) -> list[str]:
         return (strength, -len(item))
 
     best = max(pool, key=score)
+    siblings = [
+        item
+        for item in pool
+        if item != best and _is_finite_result_phrase(item)
+    ]
     if score(best)[0] >= 3 and sum(1 for item in pool if score(item)[0] >= 3) == 1:
-        return [best]
+        return [best, *siblings] if siblings else [best]
     if len(phrases) < 3:
         return phrases
-    return [best]
+    return [best, *siblings] if siblings else [best]
 
 
 def _prep_noun_to_nom(word: str) -> str:
@@ -1308,20 +1314,25 @@ def _is_kinds_clause(text: str) -> bool:
     return bool(re.match(r"(?i)^виды\b", text.strip()))
 
 
-def _enrich_with_neighbors(selected: str, units: list[str]) -> str:
-    """Добавить соседние клаузы той же темы: география, поле, виды, второй объект."""
+def _enrich_with_neighbors(
+    selected: str, units: list[str]
+) -> tuple[str, list[str]]:
+    """Добавить соседние клаузы той же темы: география, поле, второй объект практики."""
 
     if not selected or selected not in units:
-        return selected
+        return selected, []
     index = units.index(selected)
     extras: list[tuple[int, str]] = []
+    complementary: list[str] = []
     used = {selected}
 
-    def add(nidx: int, neighbor: str) -> None:
+    def add(nidx: int, neighbor: str, *, practice: bool = False) -> None:
         if neighbor in used or _is_non_student_process(neighbor):
             return
         extras.append((nidx, neighbor))
         used.add(neighbor)
+        if practice:
+            complementary.append(neighbor)
 
     start = max(0, index - 1)
     end = min(len(units), index + 3)
@@ -1335,11 +1346,6 @@ def _enrich_with_neighbors(selected: str, units: list[str]) -> str:
             field = False
         if geo or field:
             add(nidx, neighbor)
-    if not any(_is_kinds_clause(item) for item in used):
-        for nidx, neighbor in enumerate(units):
-            if _is_kinds_clause(neighbor):
-                add(nidx, neighbor)
-                break
     selected_low = selected.casefold()
     wanted: tuple[str, ...] = ()
     if "меню" in selected_low:
@@ -1354,6 +1360,8 @@ def _enrich_with_neighbors(selected: str, units: list[str]) -> str:
         wanted = ("план-график", "плана-график")
     elif "преодолен" in selected_low or "препятств" in selected_low:
         wanted = ("самострахов", "альпеншток")
+    elif "горизонт" in selected_low:
+        wanted = ("потер", "местонахожд")
     elif "лагер" in selected_low or "бивак" in selected_low:
         for nidx, neighbor in enumerate(units):
             if neighbor in used:
@@ -1367,13 +1375,20 @@ def _enrich_with_neighbors(selected: str, units: list[str]) -> str:
             if neighbor in used:
                 continue
             if any(stem in neighbor.casefold() for stem in wanted):
-                add(nidx, neighbor)
+                focused = [
+                    part.strip()
+                    for part in re.split(r",\s+", neighbor)
+                    if any(stem in part.casefold() for stem in wanted)
+                ]
+                for part in focused or [neighbor]:
+                    add(nidx, part, practice=True)
                 break
+    extra_texts = complementary
     if not extras:
-        return selected
+        return selected, []
     parts = [(index, selected), *extras]
     parts.sort()
-    return ". ".join(item for _, item in parts)
+    return ". ".join(item for _, item in parts), extra_texts
 
 
 def select_source_clause(
@@ -1385,7 +1400,7 @@ def select_source_clause(
     theory_hours: int,
     practice_hours: int,
     occurrence_index: int = 0,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, list[str]]:
     source = _week_result_source(
         theory_hours=theory_hours,
         practice_hours=practice_hours,
@@ -1397,11 +1412,13 @@ def select_source_clause(
     if practice_hours and not (practice_text or "").strip():
         theory_only = True
     if not source:
-        return _normalize_spaces(topic_title), theory_only
+        title = _normalize_spaces(topic_title)
+        return title, theory_only, [title] if title else []
     units = _clause_units(source)
     extra_units = _clause_units(program_content or "") if program_content else []
     if not units and not extra_units:
-        return _normalize_spaces(topic_title), theory_only
+        title = _normalize_spaces(topic_title)
+        return title, theory_only, [title] if title else []
 
     def topic_score(clause: str) -> int:
         return _topic_hits(clause, topic_title)
@@ -1471,7 +1488,7 @@ def select_source_clause(
             ordered = [chosen] + [unit for unit in same if unit != chosen]
             chosen = ordered[occurrence_index % len(ordered)]
             pool = units
-    return _enrich_with_neighbors(chosen, pool), theory_only
+    return chosen, theory_only, pool
 
 
 def _leading_clause(frame: ActionFrame) -> str:
@@ -1545,6 +1562,8 @@ def _first_word_prepositional(text: str) -> str:
     low = first.casefold()
     if low.endswith("ия") and len(first) > 3:
         words[0] = first[:-2] + "ии"
+    elif low.endswith("ию") and len(first) > 3:
+        words[0] = first[:-2] + "ии"
     elif low.endswith("ие") and len(first) > 3:
         words[0] = first[:-1] + "ю"
     elif low.endswith("а") and len(first) > 3:
@@ -1584,6 +1603,35 @@ def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
             _first_word_prepositional(source), max_len=48
         )
     return "устный опрос"
+
+
+def _align_control_to_result(control: str, result: str) -> str:
+    """Контроль проверяет те же объекты, что уже попали в результат."""
+
+    control_text = _normalize_spaces(control)
+    result_text = _normalize_spaces(result)
+    if not control_text or not result_text:
+        return control_text
+    result_low = result_text.casefold()
+    control_low = control_text.casefold()
+    if control_low.startswith("устный опрос"):
+        core = re.sub(
+            r"(?i)^(характеризует|называет)\s+",
+            "",
+            result_text.rstrip("."),
+        ).strip()
+        if core:
+            return "устный опрос по " + _shorten_clause(
+                _first_word_prepositional(core), max_len=80
+            )
+    if "самострахов" in result_low and "самострахов" not in control_low:
+        if "препятств" in control_low:
+            return control_text.rstrip(".") + " и самостраховкой"
+    if re.search(r"(?i)потер[еия].{0,24}ориентир|восстановлен\w*\s+местонахожд", result_low):
+        if "восстановлен" not in control_low and "потер" not in control_low:
+            if control_low.startswith("практическое задание по "):
+                return control_text.rstrip(".") + " и восстановлению ориентировки"
+    return control_text
 
 
 def _result_restates_named_form(result: str) -> bool:
@@ -2192,7 +2240,7 @@ def derive_fields_v2(
     """Цепочка: source → action/object/conditions → RESULT → CONTROL → TYPE."""
 
     warnings: list[str] = []
-    clause, theory_only = select_source_clause(
+    clause, theory_only, source_pool = select_source_clause(
         topic_title=topic_title,
         theory_text=theory_text,
         practice_text=practice_text,
@@ -2205,8 +2253,12 @@ def derive_fields_v2(
         warnings.append("Недостаточно данных источника; использован безопасный fallback.")
         clause = clause or topic_title
         theory_only = bool(theory_hours and not practice_hours)
+        source_pool = source_pool or [clause]
+    result_clause, neighbor_extras = _enrich_with_neighbors(
+        clause, source_pool or [clause]
+    )
     planned_result, frame = transform_clause_to_result(
-        clause,
+        result_clause,
         theory_only=theory_only,
         full_source=_normalize_spaces(
             f"{theory_text} {practice_text} {program_content} {clause}"
@@ -2229,8 +2281,35 @@ def derive_fields_v2(
         knowledge = _knowledge_result_from_title(topic_title)
         if knowledge and not _result_restates_named_form(knowledge):
             planned_result = knowledge
+    follow_results: list[str] = []
+    for unit in neighbor_extras:
+        extra, _extra_frame = transform_clause_to_result(
+            unit,
+            theory_only=theory_only,
+            full_source=_normalize_spaces(
+                f"{theory_text} {practice_text} {program_content} {unit}"
+            ),
+            topic_title=topic_title,
+        )
+        extra = _observable_result(extra)
+        extra_core = _drop_leading_verb(extra).rstrip(" .")
+        if not extra:
+            continue
+        if extra.casefold().rstrip(".") in planned_result.casefold():
+            continue
+        if extra_core and extra_core.casefold() in planned_result.casefold():
+            continue
+        follow_results.append(extra)
+    if follow_results:
+        planned_result = _merge_part_results([planned_result, *follow_results])
+    type_frame = ActionFrame(
+        clause,
+        frame.action,
+        frame.object,
+        frame.conditions,
+    )
     lesson_type = type_from_frame(
-        frame,
+        type_frame,
         theory_hours=theory_hours,
         practice_hours=practice_hours,
         theory_text=theory_text,
@@ -2245,6 +2324,7 @@ def derive_fields_v2(
         practice_hours=practice_hours,
         planned_result=planned_result,
     )
+    assessment = _align_control_to_result(assessment, planned_result)
     return ContentEngineV2Result(
         frame=frame,
         lesson_type=lesson_type,
