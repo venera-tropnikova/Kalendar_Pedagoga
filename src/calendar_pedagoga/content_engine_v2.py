@@ -1888,9 +1888,13 @@ def _product_control(result: str) -> str:
     if report:
         return f"проверка отчёта {report.group(1)}"
     if "меню" in low:
-        if any(stem in low for stem in ("костр", "готов", "приготов")):
-            return "проверка меню и приготовления пищи на костре"
-        return "проверка меню"
+        product = "проверка меню"
+        if "список продуктов" in low:
+            product += " и списка продуктов"
+        cooking = next((obj for verb, obj in _result_actions(result) if verb == "готовит"), "")
+        if cooking:
+            product += "; педагогическое наблюдение за приготовлением " + _phrase_to_genitive(cooking)
+        return product
     if "план-график" in low or "плана-график" in low:
         parts = [
             _phrase_to_genitive(match.group(0))
@@ -1919,7 +1923,7 @@ def _product_control(result: str) -> str:
         rest = re.sub(r"(?i)^проводит\s+", "", text)
         focus = re.search(r"(?i)((?:[а-яё]+ )?наблюден\w*(?:\s+за\s+[^.,;]+)?)", rest)
         phrase = focus.group(1) if focus else "наблюдений"
-        return "проверка " + _phrase_to_genitive(phrase)
+        return "педагогическое наблюдение за проведением " + _phrase_to_genitive(phrase)
     if not any(head in low for head in _PRODUCT_HEADS):
         return ""
     return ""
@@ -1979,6 +1983,26 @@ def _skill_control(result: str) -> str:
     actions = _result_actions(result)
     if not actions:
         return ""
+    # Observable performance is not a submitted product. Keep the selected
+    # result's objects/conditions; never borrow a method from a neighbouring clause.
+    if all(verb in {"укладывает", "подгоняет"} for verb, _ in actions):
+        body = " и ".join(
+            {"укладывает": "укладкой", "подгоняет": "подгонкой"}[verb]
+            + " " + _phrase_to_genitive(obj) for verb, obj in actions
+        )
+        return "педагогическое наблюдение за " + body
+    if len(actions) == 1:
+        verb, obj = actions[0]
+        low = obj.casefold()
+        if verb == "выполняет" and "обязанност" in low:
+            return "педагогическое наблюдение за выполнением " + _phrase_to_genitive(obj)
+        if verb == "выступает" and "соревнован" in low:
+            return "педагогическое наблюдение за участием " + re.sub(r"\s+в качестве\b.*", "", obj)
+        if verb == "применяет":
+            return "педагогическое наблюдение за применением " + _phrase_to_genitive(_short_object(obj))
+        if verb in {"ориентирует", "отбирает"}:
+            noun = {"ориентирует": "ориентированию", "отбирает": "отбору"}[verb]
+            return "практическое задание по " + noun + " " + _phrase_to_genitive(obj)
     verbs = [verb for verb, _obj in actions]
     if (
         all(verb in _EXERCISE_SKILL_VERBS for verb in verbs)
@@ -1998,9 +2022,10 @@ def _skill_control(result: str) -> str:
             body = _normalize_spaces(f"{' и '.join(nouns)} {object_text}")
         return f"практическое задание по {body}".rstrip()
     if any(verb == "изготавливает" for verb, _obj in actions) and any(
-        "транспортир" in obj.casefold() or verb == "разучивает" for verb, obj in actions
+        verb == "разучивает" and "транспортир" in obj.casefold() for verb, obj in actions
     ):
         made = []
+        observed = []
         for verb, obj in actions:
             if verb == "изготавливает":
                 made.extend(
@@ -2008,16 +2033,25 @@ def _skill_control(result: str) -> str:
                     for part in obj.split(",")
                     if part.strip()
                 )
-            elif "транспортир" in obj.casefold():
+            elif verb == "разучивает" and "транспортир" in obj.casefold():
                 transport = re.search(r"(?i)способ\w*\s+транспортиров\w*", obj)
                 if transport:
-                    made.append(_phrase_to_genitive(transport.group(0)))
+                    observed.append("педагогическое наблюдение при разучивании " + _phrase_to_genitive(transport.group(0)))
         if made:
             if len(made) == 1:
                 joined = made[0]
             else:
                 joined = ", ".join(made[:-1]) + " и " + made[-1]
-            return "проверка изготовления " + joined
+            return "; ".join(["проверка изготовленных " + joined, *observed])
+    if any(verb == "строит" and "график" in obj for verb, obj in actions):
+        checks = []
+        for verb, obj in actions:
+            if verb == "измеряет":
+                checks.append("практическое задание по измерению " + _phrase_to_genitive(_short_object(obj)))
+            elif verb == "строит":
+                checks.append("проверка " + _phrase_to_genitive(obj))
+        if len(checks) == len(actions):
+            return "; ".join(checks)
     pieces: list[str] = []
     for verb, obj in actions:
         noun = _FINITE_TO_NOUN[verb]
@@ -2134,6 +2168,33 @@ def type_from_frame(
                 and any(x in result for x in ("компас", "ориентир", "маршрут"))
             ):
                 return "топографический практикум"
+            # Specialise only by the selected activity, not the whole programme
+            # or a topic identifier. This describes content, not new methodology.
+            if (
+                "масштаб" in result and "карт" in clause
+                or "знаки" in result and "топограф" in clause
+            ):
+                return "топографический практикум"
+            if "стороны горизонта" in result and "сторон горизонта" in clause:
+                return "практикум по ориентированию"
+            if "измеряет" in result and "шаг" in result and "измерен" in clause:
+                return "измерительный практикум"
+            if "доклад" in result and "район" in result and "поход" in clause:
+                return "краеведческий практикум"
+            if "аптечк" in result and "формирован" in clause:
+                return "практикум по комплектованию аптечки"
+            if "оказывает первую помощь" in result and "оказание первой помощи" in clause:
+                return "практикум по оказанию первой помощи"
+            if "транспортировки пострадавшего" in result and "транспортировки пострадавшего" in clause:
+                return "практикум по транспортировке пострадавшего"
+            if "дневник самоконтроля" in result and "дневника самоконтроля" in clause:
+                return "практикум по самоконтролю"
+            if (
+                "лагерь" in result and "бивак" in clause
+                or "обязанности" in result and "поход" in clause
+                or "туристских соревнован" in result and "участник" in clause
+            ):
+                return "туристский практикум"
             return "практикум"
     lead = _leading_clause(frame)
     scores = _line_form_scores(lead)
