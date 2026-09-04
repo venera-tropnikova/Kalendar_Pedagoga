@@ -10,6 +10,7 @@ from calendar_pedagoga.program_parsing import (
     LegacyDocUnsupportedError,
     ProgramContentItem,
     convert_legacy_doc,
+    extract_attestation_statements,
     parse_age_range,
     parse_duration_years,
     parse_program_docx,
@@ -83,6 +84,20 @@ def test_parse_program_docx_preserves_source_wording() -> None:
     assert result.skill_outcomes == ()
     assert result.content_items[0].title == "Введение"
     assert "Знакомство с программой" in result.content_items[0].content
+    assert result.attestation_statements == ()
+
+
+def test_attestation_extracted_only_from_explicit_phrase() -> None:
+    assert extract_attestation_statements(
+        "Ожидаемые результаты:\nобучающийся знает правила."
+    ) == ()
+    assert extract_attestation_statements(
+        "Формы контроля: текущий опрос и практическое задание."
+    ) == ()
+    found = extract_attestation_statements(
+        "Итоговая аттестация проводится в конце года обучения."
+    )
+    assert found == ("Итоговая аттестация проводится в конце года обучения.",)
 
 
 def test_legacy_doc_without_libreoffice_is_reported(monkeypatch) -> None:

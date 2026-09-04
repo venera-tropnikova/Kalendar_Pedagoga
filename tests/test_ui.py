@@ -193,8 +193,11 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Документы проверены" in text
     assert "Год обучения:</strong> 1 год обучения" in text
     assert "Возраст:</strong> Не найдено" not in text
-    assert "Нормативная проверка" in text
-    assert "Основные данные программы и УТП проверены." in text
+    assert "Нормативная и методическая проверка" in text
+    assert "Федеральные документы" in text
+    assert "Локальная сетка" in text
+    assert "Методическая сверка" in text
+    assert "Это не вывод о соответствии НПА." in text
     assert "Что в порядке" not in text
     assert "PASS" not in text
     assert "NOT CHECKED" not in text
@@ -205,7 +208,7 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Недостающие сведения не мешают сформировать календарный план." in text
     assert "На что обратить внимание" in text
     assert "Что не удалось проверить" in text
-    assert "Проверка вашей программы и УТП" in text
+    assert "Федеральные документы, локальная сетка" in text
     captions = " ".join(item.value or "" for item in getattr(app, "caption", []))
     assert "Справочник документов из реестра" in f"{text} {captions}"
     assert not any(button.label == "Заменить документы" for button in app.button)

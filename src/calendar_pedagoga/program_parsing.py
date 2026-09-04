@@ -41,6 +41,7 @@ class ProgramData:
     duration_years: int | None = None
     age_min: int | None = None
     age_max: int | None = None
+    attestation_statements: tuple[str, ...] = ()
 
 
 def find_libreoffice() -> Path | None:
@@ -464,7 +465,26 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
         duration_years=parse_duration_years(duration_text),
         age_min=age_min,
         age_max=age_max,
+        attestation_statements=extract_attestation_statements(text),
     )
+
+
+_ATTESTATION_PHRASE = re.compile(
+    r"(?i)(?:обязательн\w{0,12}\s+)?(?:промежуточн\w+|итогова\w+)\s+аттестац\w+"
+)
+
+
+def extract_attestation_statements(text: str) -> tuple[str, ...]:
+    """Вернуть только явные упоминания промежуточной или итоговой аттестации."""
+
+    if not text:
+        return ()
+    found: list[str] = []
+    for paragraph in text.splitlines():
+        cleaned = _clean(paragraph)
+        if cleaned and _ATTESTATION_PHRASE.search(cleaned):
+            found.append(cleaned)
+    return tuple(dict.fromkeys(found))
 
 
 def parse_duration_years(value: str | None) -> int | None:

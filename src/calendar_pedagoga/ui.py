@@ -9,9 +9,16 @@ from pathlib import Path
 
 import streamlit as st
 
+from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
-from calendar_pedagoga.normative_engine import NormativeReport, evaluate_normative_mvp
+from calendar_pedagoga.normative_engine import (
+    NormativeLayer,
+    NormativeLessonView,
+    NormativeReport,
+    NormativeVerdict,
+    evaluate_normative_mvp,
+)
 from calendar_pedagoga.normative_registry import (
     CalendarRegistryReference,
     NormativeUpdateChoice,
@@ -485,6 +492,18 @@ def _inject_landing_styles() -> None:
             margin: 0 0 0.45rem 0;
             line-height: 1.4;
         }
+        .kp-normative-layer {
+            font-size: 0.94rem;
+            font-weight: 600;
+            color: #111827;
+            margin: 0.55rem 0 0.1rem 0;
+        }
+        .kp-normative-layer-lead {
+            font-size: 0.82rem;
+            color: #6b7280;
+            margin: 0 0 0.2rem 0;
+            line-height: 1.35;
+        }
         .kp-normative-check-label {
             font-size: 0.92rem;
             font-weight: 600;
@@ -758,35 +777,90 @@ def _collect_analysis_warnings(
     return tuple(dict.fromkeys(collected))
 
 
+_LAYER_TITLES = (
+    (
+        NormativeLayer.FEDERAL,
+        "Федеральные документы",
+        "Реестр НПА. Это не проверка часов и содержания плана.",
+    ),
+    (
+        NormativeLayer.LOCAL,
+        "Локальная сетка",
+        "Утверждённый календарь 2026–2027 / 36 недель. Переносы не выполняются.",
+    ),
+    (
+        NormativeLayer.METHODICAL,
+        "Методическая сверка",
+        "Сверка программы, УТП и плана. Это не вывод о соответствии НПА.",
+    ),
+)
+
+
+def _lesson_views_for_normative(
+    content_rows: tuple[CalendarContentRow, ...],
+) -> tuple[NormativeLessonView, ...]:
+    rows = build_lesson_content_v2(content_rows)
+    return tuple(
+        NormativeLessonView(
+            theory_hours=row.source.theory_hours,
+            practice_hours=row.source.practice_hours,
+            lesson_type=row.lesson_type,
+            assessment_method=row.assessment_method,
+            topic_title=row.source.topic_title,
+        )
+        for row in rows
+    )
+
+
 def _render_normative_report(report: NormativeReport) -> None:
     sections: list[str] = [
         '<div class="kp-normative-check">',
-        '<p class="kp-normative-check-title">Нормативная проверка</p>',
+        '<p class="kp-normative-check-title">Нормативная и методическая проверка</p>',
         '<p class="kp-normative-check-lead">'
-        "Проверка вашей программы и УТП по требованиям ДОП. "
+        "Федеральные документы, локальная сетка и методическая сверка. "
         "На календарный план не влияет.</p>",
     ]
-    if report.passed:
-        sections.append(
-            '<p class="kp-normative-check-label ok">'
-            "✓ Основные данные программы и УТП проверены.</p>"
-        )
-    groups = (
-        (report.warnings, "warn", "На что обратить внимание"),
-        (report.unchecked, "skip", "Что не удалось проверить"),
-    )
-    for checks, css, title in groups:
-        if not checks:
+    for layer, title, lead in _LAYER_TITLES:
+        layer_checks = report.for_layer(layer)
+        if not layer_checks:
             continue
-        mark = {"warn": "⚠", "skip": "—"}[css]
+        sections.append(f'<p class="kp-normative-layer">{html.escape(title)}</p>')
         sections.append(
-            f'<p class="kp-normative-check-label {css}">{mark} {html.escape(title)}</p>'
+            f'<p class="kp-normative-layer-lead">{html.escape(lead)}</p>'
         )
-        sections.append("<ul>")
-        sections.extend(
-            f"<li>{html.escape(item.teacher_text)}</li>" for item in checks
+        passed = tuple(
+            item for item in layer_checks if item.verdict is NormativeVerdict.PASS
         )
-        sections.append("</ul>")
+        warnings = tuple(
+            item for item in layer_checks if item.verdict is NormativeVerdict.WARNING
+        )
+        unchecked = tuple(
+            item for item in layer_checks if item.verdict is NormativeVerdict.NOT_CHECKED
+        )
+        if passed:
+            sections.append("<ul>")
+            sections.extend(
+                f"<li>✓ {html.escape(item.teacher_text)}</li>" for item in passed
+            )
+            sections.append("</ul>")
+        if warnings:
+            sections.append(
+                '<p class="kp-normative-check-label warn">⚠ На что обратить внимание</p>'
+            )
+            sections.append("<ul>")
+            sections.extend(
+                f"<li>{html.escape(item.teacher_text)}</li>" for item in warnings
+            )
+            sections.append("</ul>")
+        if unchecked:
+            sections.append(
+                '<p class="kp-normative-check-label skip">— Что не удалось проверить</p>'
+            )
+            sections.append("<ul>")
+            sections.extend(
+                f"<li>{html.escape(item.teacher_text)}</li>" for item in unchecked
+            )
+            sections.append("</ul>")
     sections.append("</div>")
     st.markdown("".join(sections), unsafe_allow_html=True)
 
@@ -800,6 +874,7 @@ def _render_teacher_analysis_screen(
     academic_year: str,
     source_utp_name: str | None = None,
     program_filename: str | None = None,
+    content_rows: tuple[CalendarContentRow, ...] = (),
 ) -> None:
     metadata = utp.metadata
     totals = utp.table_totals
@@ -863,6 +938,8 @@ def _render_teacher_analysis_screen(
             program,
             academic_year=academic_year,
             study_year_hints=(source_utp_name, program_filename),
+            schedule=schedule,
+            lessons=_lesson_views_for_normative(content_rows),
         )
     )
 
@@ -1193,6 +1270,7 @@ def run_app() -> None:
             program_filename=(
                 validated_program.filename if validated_program is not None else None
             ),
+            content_rows=content_rows,
         )
         _show_generation_controls(
             validated_utp=validated_utp,
