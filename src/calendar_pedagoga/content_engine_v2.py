@@ -259,6 +259,8 @@ def _noun_gen_to_acc(word: str) -> str:
         return word
     if word.casefold() == "пищи":
         return "пищу"
+    if word.casefold() == "сторон":
+        return "стороны"
     if "-" in word:
         if word.casefold().startswith("плана-график"):
             return "план-график" + word[len("плана-графика") :]
@@ -1482,37 +1484,45 @@ def _leading_blob(frame: ActionFrame) -> str:
     return _normalize_spaces(f"{action} {_leading_clause(frame)}").casefold()
 
 
-_CONTROL_TEMPLATES = (
-    (("уклад", "рюкзак"), "проверка укладки рюкзака"),
-    (("меню", "костр"), "проверка меню и приготовления пищи на костре"),
-    (("меню",), "проверка меню"),
-    (("план-график",), "проверка плана-графика"),
-    (("плана-график",), "проверка плана-графика"),
-    (("готов", "костр"), "проверка приготовления пищи на костре"),
-    (("приготов", "костр"), "проверка приготовления пищи на костре"),
-    (("разверт", "лагер"), "наблюдение при развертывании лагеря"),
-    (("сверт", "лагер"), "наблюдение при развертывании лагеря"),
-    (("разверт", "бивак"), "наблюдение при развертывании лагеря"),
-    (("ориентирует", "карт"), "проверка ориентирования карты"),
-    (("ориентирован", "карт"), "проверка ориентирования карты"),
-    (("компас", "карт"), "проверка работы с компасом"),
-    (("аптечк",), "проверка состава аптечки"),
-    (("оказ", "помощ"), "проверка оказания первой помощи"),
-    (("дневник",), "проверка дневника самоконтроля"),
-    (("гигиен",), "проверка личной гигиены"),
-    (("соревнован",), "проверка участия в соревнованиях"),
-    (("диктант", "топограф"), "топографический диктант"),
-    (("диктант",), "диктант"),
-    (("отбор", "ориентир"), "проверка отбора ориентиров"),
-    (("азимут",), "проверка измерения азимутов"),
-    (("самострахов",), "проверка самостраховки"),
-    (("альпеншток",), "проверка работы с альпенштоком"),
-    (("упражнен",), "проверка выполнения упражнений"),
-    (("отрабатыв", "техник", "движен"), "проверка техники движения"),
-    (("отработ", "техник", "движен"), "проверка техники движения"),
-    (("измер", "шаг"), "проверка измерения шага"),
-    (("транспортир", "пострадав"), "проверка транспортировки пострадавшего"),
-    (("обязанност", "должност"), "проверка исполнения обязанностей"),
+_NAMED_FORMS = ("викторин", "диктант")
+_PLACE_TITLE_STEMS = ("край", "город", "район", "област", "республик", "стран")
+_PRODUCT_HEADS = (
+    "отчёт",
+    "отчет",
+    "меню",
+    "план-график",
+    "плана-график",
+    "дневник",
+    "аптечк",
+    "доклад",
+)
+_FINITE_TO_NOUN = {
+    "укладывает": "укладки",
+    "подгоняет": "подгонки",
+    "составляет": "составления",
+    "готовит": "приготовления",
+    "ориентирует": "ориентирования",
+    "определяет": "определения",
+    "оценивает": "оценки",
+    "измеряет": "измерения",
+    "отбирает": "отбора",
+    "применяет": "применения",
+    "изготавливает": "изготовления",
+    "разучивает": "разучивания",
+    "формирует": "формирования",
+    "оказывает": "оказания",
+    "выполняет": "выполнения",
+    "выступает": "участия",
+    "ведёт": "ведения",
+    "ведет": "ведения",
+    "рисует": "рисования",
+    "строит": "построения",
+    "подготавливает": "подготовки",
+    "заслушивает": "заслушивания",
+}
+_EXERCISE_SKILL_VERBS = {"определяет", "оценивает", "измеряет"}
+_FINITE_VERB_RE = re.compile(
+    r"(?i)\b(" + "|".join(sorted(_FINITE_TO_NOUN, key=len, reverse=True)) + r")\b"
 )
 
 
@@ -1525,16 +1535,6 @@ def _drop_leading_verb(text: str) -> str:
             count=1,
         )
     )
-
-
-def _control_focus(text: str) -> str:
-    focus = _drop_leading_verb(_normalize_spaces(text))
-    focus = focus.strip(" .;:")
-    if not focus:
-        return ""
-    if focus[:1].isupper() and (len(focus) < 2 or not focus[1].isupper()):
-        focus = focus[:1].lower() + focus[1:]
-    return _shorten_clause(focus, max_len=56)
 
 
 def _first_word_prepositional(text: str) -> str:
@@ -1586,32 +1586,421 @@ def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
     return "устный опрос"
 
 
-def _parallel_merged_objects(result: str) -> str:
-    if not result:
-        return ""
-    verbs = re.findall(r"(?i)\b[а-яё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b", result)
-    if len(verbs) != 1:
-        return ""
-    body = _drop_leading_verb(result).strip(" .")
-    if " и " not in body:
-        return ""
-    left, right = body.split(" и ", 1)
-    left_word = (left.split() or [""])[0]
-    right_word = (right.split() or [""])[0]
-    if len(left_word) < 4 or left_word.casefold()[:4] != right_word.casefold()[:4]:
-        return ""
-    return body
+def _result_restates_named_form(result: str) -> bool:
+    return bool(re.match(r"(?i)участвует в .*(викторин|диктант)", result or ""))
 
 
-def _check_focus(focus: str) -> str:
-    words = focus.split(None, 1)
+def _title_has_knowledge_beyond_form(title: str) -> bool:
+    stripped = re.sub(r"(?i)викторин\w*|диктант\w*|игр\w*", " ", title or "")
+    return len(re.findall(r"[А-Яа-яЁё]{4,}", stripped)) >= 2
+
+
+def _is_place_title_part(part: str) -> bool:
+    words = [word for word in re.findall(r"[А-Яа-яЁё]+", part) if word]
+    if not words or len(words) > 3:
+        return False
+    return any(
+        any(word.casefold().startswith(stem) for stem in _PLACE_TITLE_STEMS)
+        for word in words
+    )
+
+
+def _drop_geo_tail(part: str) -> str:
+    text = re.sub(r"\s+г\.\s+\S+\.?$", "", part.strip().rstrip("."))
+    words = text.split()
+    if len(words) >= 2 and words[-1][:1].isupper() and not _is_adjective(words[-1]):
+        words = words[:-1]
+    return _normalize_spaces(" ".join(words))
+
+
+def _adj_to_genitive(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ую"):
+        core = core[:-2] + "ой"
+    elif low.endswith("юю"):
+        core = core[:-2] + "ей"
+    elif low.endswith("ые"):
+        core = core[:-2] + "ых"
+    elif low.endswith("ие") and not low.endswith(("ние", "тие")):
+        core = core[:-2] + "их"
+    elif low.endswith("ая"):
+        core = core[:-2] + "ой"
+    elif low.endswith(("ый", "ой")) and len(core) > 3:
+        core = core[:-2] + "ого"
+    elif low.endswith("ое"):
+        core = core[:-2] + "ого"
+    return f"{prefix}{core}{suffix}"
+
+
+def _head_noun_to_genitive(word: str) -> str:
+    if "-" in word:
+        left, right = word.split("-", 1)
+        return f"{_head_noun_to_genitive(left)}-{_head_noun_to_genitive(right)}"
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low in {"меню", "кофе"}:
+        changed = core
+    elif low.endswith("ения") or low.endswith("ания") or low.endswith("яния"):
+        changed = core[:-1] + "й"
+    elif low.endswith("ение") or low.endswith("ание") or low.endswith("яние"):
+        changed = core[:-1] + "я"
+    elif low.endswith("ства"):
+        changed = core[:-1]
+    elif low.endswith("лки"):
+        changed = core[:-2] + "ок"
+    elif low.endswith("ши"):
+        changed = core[:-1]
+    elif low.endswith("ки") and len(core) > 3:
+        changed = core[:-1] + "а"
+    elif low.endswith("ку"):
+        changed = core[:-1] + "и"
+    elif low.endswith("ту"):
+        changed = core[:-1] + "ы"
+    elif low.endswith("у") and len(core) > 3:
+        changed = core[:-1] + ("и" if core[-2].casefold() in "кгхжчшщ" else "ы")
+    elif low.endswith("ны"):
+        changed = core[:-1]
+    elif low.endswith("ы") and len(core) > 3:
+        changed = core[:-1] + "ов"
+    elif low.endswith("ости"):
+        changed = core[:-1] + "ей"
+    elif low.endswith("ь"):
+        changed = core[:-1] + "и"
+    elif low.endswith("й") and len(core) > 2 and core[-2].casefold() in "аеёиоуыэюя":
+        changed = core[:-1] + "я"
+    elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
+        changed = core + "а"
+    else:
+        changed = core
+    return f"{prefix}{changed}{suffix}"
+
+
+def _split_prep_tail(words: list[str]) -> tuple[list[str], list[str]]:
+    for index, word in enumerate(words):
+        if _is_preposition(word):
+            return words[:index], words[index:]
+    return words, []
+
+
+def _phrase_to_genitive(phrase: str) -> str:
+    words = _normalize_spaces(phrase).split()
     if not words:
-        return focus
-    first = words[0]
-    if re.search(r"(?i)[бвгджзклмнпрстфхцчшщ]$", first) and len(first) >= 4:
-        first = first + "а"
-        return first if len(words) == 1 else f"{first} {words[1]}"
-    return focus
+        return phrase
+    head, tail = _split_prep_tail(words)
+    if not head:
+        return _normalize_spaces(phrase)
+    if len(head) >= 2 and all(_is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая")) for word in head[:-1]):
+        head = [_adj_to_genitive(word) for word in head[:-1]] + [_head_noun_to_genitive(head[-1])]
+    else:
+        head = [_head_noun_to_genitive(head[0]), *head[1:]]
+    return _normalize_spaces(" ".join((*head, *tail)))
+
+
+def _phrase_to_dative_noun(noun: str) -> str:
+    low = noun.casefold()
+    if low.endswith("ия"):
+        return noun[:-2] + "ию"
+    if low.endswith("ие"):
+        return noun[:-1] + "ю"
+    if low.endswith("ки"):
+        return noun[:-1] + "е"
+    if low.endswith("а"):
+        return noun[:-1] + "е"
+    return noun
+
+
+def _title_part_to_acc(part: str) -> str:
+    words = _normalize_spaces(part).split()
+    if not words:
+        return part
+    last = words[-1]
+    low = last.casefold()
+    if low.endswith("ия"):
+        words[-1] = last[:-2] + "ию"
+    elif low == "земляки":
+        words[-1] = "земляков"
+        words = [
+            (word[:-2] + "ых" if word.casefold().endswith("ые") else word)
+            for word in words[:-1]
+        ] + [words[-1]]
+    return _normalize_spaces(" ".join(words))
+
+
+def _place_to_genitive(part: str) -> str:
+    words = []
+    for index, word in enumerate(_normalize_spaces(part).split()):
+        low = word.casefold()
+        if low.endswith(("ой", "ый")) and len(word) > 3:
+            word = word[:-2] + "ого"
+        elif low.endswith("й") and len(word) > 2 and word[-2].casefold() in "аеёиоуыэюя":
+            word = word[:-1] + "я"
+        if index == 0 and word[:1].isupper():
+            word = word[:1].lower() + word[1:]
+        words.append(word)
+    return _normalize_spaces(" ".join(words))
+
+
+def _knowledge_result_from_title(topic_title: str) -> str:
+    parts = [
+        re.sub(r"(?i)^(его|её|ее|их)\s+", "", part.strip().rstrip("."))
+        for part in (topic_title or "").split(",")
+        if part.strip()
+    ]
+    if not parts:
+        return ""
+    context = ""
+    if _is_place_title_part(parts[0]):
+        context = _place_to_genitive(parts[0])
+        parts = parts[1:]
+    objects = []
+    for part in parts:
+        cleaned = _drop_geo_tail(part)
+        if cleaned:
+            objects.append(_title_part_to_acc(cleaned))
+    if not objects:
+        return ""
+    if context and len(objects) >= 2:
+        objects[-2] = _normalize_spaces(f"{objects[-2]} {context}")
+    elif context:
+        objects[-1] = _normalize_spaces(f"{objects[-1]} {context}")
+    if len(objects) == 1:
+        joined = objects[0]
+    else:
+        joined = ", ".join(objects[:-1]) + " и " + objects[-1]
+    return _cap_sentence(_normalize_spaces(f"характеризует {joined}"))
+
+
+def _named_form_control(result: str, frame: ActionFrame, lesson_type: str) -> str:
+    selected = _normalize_spaces(f"{result} {frame.clause} {lesson_type}").casefold()
+    if "диктант" in frame.clause.casefold():
+        if "топограф" in frame.clause.casefold() or "знак" in result.casefold():
+            return "топографический диктант"
+        return "диктант"
+    if "викторин" in selected:
+        if "краевед" in selected:
+            return "краеведческая викторина"
+        return "викторина"
+    return ""
+
+
+def _short_object(text: str, *, keep_first_prep: bool = True) -> str:
+    focus = re.sub(r"\s*\([^)]*\)", "", _normalize_spaces(text)).strip(" .;:")
+    if not focus:
+        return ""
+    tokens = focus.split()
+    content: list[str] = []
+    prep_phrase: list[str] = []
+    in_prep = False
+    for token in tokens:
+        if token in {":", ",", ";"}:
+            break
+        if token.casefold() in {"и", "или"} and not in_prep:
+            break
+        if not in_prep and _is_preposition(token):
+            if not keep_first_prep or prep_phrase or token.casefold() not in {"по", "на", "с"}:
+                break
+            in_prep = True
+        if in_prep:
+            if prep_phrase and (_is_preposition(token) or token.casefold() in {"и", "или"}):
+                break
+            prep_phrase.append(token)
+            if len(prep_phrase) >= 3:
+                break
+            continue
+        if token.casefold().endswith("о") and content and not _is_adjective(token):
+            continue
+        content.append(token)
+    if len(content) >= 3 and all(
+        _is_adjective(word) or word.casefold() in {"свой", "своя", "свое", "свои"}
+        for word in content[:-1]
+    ):
+        content = content[-1:]
+    return _normalize_spaces(" ".join((*content, *prep_phrase)))
+
+
+def _result_actions(result: str) -> list[tuple[str, str]]:
+    text = result.rstrip(".")
+    matches = list(_FINITE_VERB_RE.finditer(text))
+    if not matches:
+        return []
+    actions: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        obj = text[match.end() : end].strip(" ,.;")
+        obj = re.sub(r"^(и|а|но)\s+", "", obj, flags=re.IGNORECASE)
+        actions.append((match.group(0).casefold(), obj))
+    return actions
+
+
+def _product_control(result: str) -> str:
+    text = result.rstrip(".")
+    low = text.casefold()
+    report = re.fullmatch(r"(?i)составляет отч[её]т (.+)", text)
+    if report:
+        return f"проверка отчёта {report.group(1)}"
+    if "меню" in low:
+        if any(stem in low for stem in ("костр", "готов", "приготов")):
+            return "проверка меню и приготовления пищи на костре"
+        return "проверка меню"
+    if "план-график" in low or "плана-график" in low:
+        parts = [
+            _phrase_to_genitive(match.group(0))
+            for match in re.finditer(
+                r"(?i)план-график(?:\s+(?!и\b)\S+)?|план\s+(?!график)[а-яё]+(?:\s+(?!и\b)[а-яё]+)?",
+                text,
+            )
+        ]
+        if parts:
+            return "проверка " + " и ".join(parts)
+        return "проверка плана-графика"
+    if "дневник" in low:
+        focus = re.search(r"(?i)дневник(?:\s+\S+)?", text)
+        raw = focus.group(0) if focus else "дневник"
+        return "проверка " + _phrase_to_genitive(raw.casefold())
+    if "аптечк" in low:
+        match = re.search(r"(?i)((?:[а-яё]+ ){0,2}аптечк[а-яё]*)", low)
+        phrase = match.group(1).strip() if match else "аптечки"
+        return "проверка состава " + _phrase_to_genitive(phrase)
+    if "доклад" in low:
+        match = re.search(r"(?i)доклад\w*(?:\s+по\s+.+)?", text)
+        raw = match.group(0).rstrip(" .") if match else "доклады"
+        raw = re.sub(r"(?i)^доклад[а-яё]*", "докладов", raw, count=1)
+        return "проверка " + raw
+    if re.search(r"(?i)проводит(?:\s+\S+)?\s+наблюден", low):
+        rest = re.sub(r"(?i)^проводит\s+", "", text)
+        focus = re.search(r"(?i)((?:[а-яё]+ )?наблюден\w*(?:\s+за\s+[^.,;]+)?)", rest)
+        phrase = focus.group(1) if focus else "наблюдений"
+        return "проверка " + _phrase_to_genitive(phrase)
+    if not any(head in low for head in _PRODUCT_HEADS):
+        return ""
+    return ""
+
+
+def _imitation_or_route_control(result: str) -> str:
+    low = result.casefold()
+    if "мини-маршрут" in low or "мини маршрут" in low or "движен" in low and "легенд" in low:
+        return "маршрутное задание"
+    if "условно" in low or "имитац" in low:
+        actions = _result_actions(result)
+        if actions:
+            verb, obj = actions[0]
+            noun = _FINITE_TO_NOUN.get(verb, "выполнения")
+            core = re.sub(r"(?i)\s+условно\b.*", "", obj)
+            focus = _phrase_to_genitive(_short_object(core, keep_first_prep=False))
+            dative = _phrase_to_dative_noun(noun)
+            body = _normalize_spaces(f"{dative} {focus}").strip()
+            if "условно" in low:
+                rest = re.search(r"(?i)условно\s+\S+", result)
+                if rest:
+                    body = _normalize_spaces(f"{body} {rest.group(0)}")
+            return f"практическое задание по {body}".rstrip(" .")
+    return ""
+
+
+def _process_control(result: str, lesson_type: str) -> str:
+    low = result.casefold()
+    type_low = lesson_type.casefold()
+    if low.startswith("выполняет упражнения"):
+        return "педагогическое наблюдение за выполнением упражнений"
+    if low.startswith("отрабатывает технику") or "отрабатывает технику" in low:
+        rest = re.sub(r"(?i)^отрабатывает технику\s*", "", result).rstrip(".")
+        rest = rest.split(":")[0]
+        rest = re.split(r"(?i),\s+организ", rest)[0]
+        words = [word for word in _short_object(rest, keep_first_prep=False).split() if not _is_adjective(word)]
+        if any(word.startswith("преодолен") or word.startswith("препятств") for word in words):
+            return "педагогическое наблюдение за техникой преодоления препятствий"
+        if any(word.startswith("движен") for word in words):
+            return "педагогическое наблюдение за техникой движения"
+        if words:
+            return "педагогическое наблюдение за техникой " + " ".join(words[:2])
+        return "педагогическое наблюдение за техникой"
+    if "развертывает" in low and any(stem in low for stem in ("лагер", "бивак")):
+        return "педагогическое наблюдение при развертывании и свертывании лагеря"
+    if "экскурси" in type_low or low.startswith("совершает прогул") or low.startswith("совершает экскурси"):
+        return "педагогическое наблюдение на экскурсии"
+    return ""
+
+
+def _skill_control(result: str) -> str:
+    actions = _result_actions(result)
+    if not actions:
+        return ""
+    verbs = [verb for verb, _obj in actions]
+    if (
+        all(verb in _EXERCISE_SKILL_VERBS for verb in verbs)
+        and not any(word in result.casefold() for word in ("график", "меню", "план", "отчёт", "отчет"))
+    ):
+        nouns = []
+        objects = []
+        for verb, obj in actions:
+            nouns.append(_phrase_to_dative_noun(_FINITE_TO_NOUN[verb]))
+            short = _short_object(obj, keep_first_prep=False)
+            if short:
+                objects.append(_phrase_to_genitive(short.split(",")[0]))
+        object_text = objects[0] if objects else ""
+        if len(nouns) == 1:
+            body = _normalize_spaces(f"{nouns[0]} {object_text}")
+        else:
+            body = _normalize_spaces(f"{' и '.join(nouns)} {object_text}")
+        return f"практическое задание по {body}".rstrip()
+    if any(verb == "изготавливает" for verb, _obj in actions) and any(
+        "транспортир" in obj.casefold() or verb == "разучивает" for verb, obj in actions
+    ):
+        made = []
+        for verb, obj in actions:
+            if verb == "изготавливает":
+                made.extend(
+                    _phrase_to_genitive(part.strip())
+                    for part in obj.split(",")
+                    if part.strip()
+                )
+            elif "транспортир" in obj.casefold():
+                transport = re.search(r"(?i)способ\w*\s+транспортиров\w*", obj)
+                if transport:
+                    made.append(_phrase_to_genitive(transport.group(0)))
+        if made:
+            if len(made) == 1:
+                joined = made[0]
+            else:
+                joined = ", ".join(made[:-1]) + " и " + made[-1]
+            return "проверка изготовления " + joined
+    pieces: list[str] = []
+    for verb, obj in actions:
+        noun = _FINITE_TO_NOUN[verb]
+        short = _short_object(obj)
+        if verb == "выполняет" and "обязанност" in obj.casefold():
+            noun = "исполнения"
+            short = "обязанностей по должностям"
+        elif verb == "выступает" and "соревнован" in obj.casefold():
+            noun = "участия"
+            short = "в соревнованиях"
+        elif verb == "строит" and "график" in obj.casefold():
+            noun = ""
+            graph = re.search(r"(?i)график\w*(?:\s+перевода пар шагов в метры)?", obj)
+            short = _phrase_to_genitive(graph.group(0) if graph else "график")
+        elif verb in {
+            "укладывает",
+            "подгоняет",
+            "ориентирует",
+            "отбирает",
+            "применяет",
+            "изготавливает",
+            "разучивает",
+            "измеряет",
+            "рисует",
+            "составляет",
+        }:
+            short = _phrase_to_genitive(short)
+        if noun and short:
+            pieces.append(_normalize_spaces(f"{noun} {short}"))
+        elif short:
+            pieces.append(short)
+        elif noun:
+            pieces.append(noun)
+    if not pieces:
+        return ""
+    return "проверка " + " и ".join(pieces)
 
 
 def control_from_frame(
@@ -1622,50 +2011,28 @@ def control_from_frame(
     practice_hours: int,
     planned_result: str = "",
 ) -> str:
-    lead = _leading_blob(frame)
+    # Control is a verification method for the selected result, never its infinitive clone.
     type_low = lesson_type.casefold()
-    result_low = (planned_result or "").casefold()
-    blob = _normalize_spaces(
-        f"{planned_result} {frame.object} {lead}"
-    ).casefold()
-    if "викторин" in blob:
-        return "викторина"
-    if _has_stem(lead, ("наблюден",)) and "дневник" not in blob:
-        return "наблюдение"
-    if any(marker in type_low for marker in ("экскурсия", "на местности")):
-        return "наблюдение"
-    if type_low == "игра" or type_low.startswith("игр"):
-        return "наблюдение"
-    if _has_stem(lead, ("прогул", "экскурси", "посещен")):
-        return "наблюдение"
-    if _has_stem(blob, ("отчёт", "отчет", "доклад", "заслушиван")):
-        return "защита результата"
-    focus = _control_focus(planned_result) or _control_focus(frame.object)
-    parallel = _parallel_merged_objects(planned_result)
-    if (
-        parallel
-        and "теоретическ" not in type_low
-        and "беседа" not in type_low
-        and "упражнен" not in result_low
-    ):
-        return f"проверка {_check_focus(parallel)}"
-    for stems, label in _CONTROL_TEMPLATES:
-        if stems == ("упражнен",) and any(
-            key in result_low
-            for key in ("отбор", "азимут", "привяз", "масштаб")
-        ):
-            continue
-        if result_low and _has_all_stems(result_low, stems):
-            return label
-        if stems[0] in {"диктант", "отработ"} and _has_all_stems(blob, stems):
-            return label
     if "теоретическ" in type_low or "беседа" in type_low or (
         theory_hours and not practice_hours
     ):
         return _oral_quiz_control(frame, planned_result)
-    if focus:
-        return f"проверка {_check_focus(focus)}"
-    return "устный опрос"
+    named = _named_form_control(planned_result, frame, lesson_type)
+    if named:
+        return named
+    product = _product_control(planned_result)
+    if product:
+        return product
+    imitation = _imitation_or_route_control(planned_result)
+    if imitation:
+        return imitation
+    process = _process_control(planned_result, lesson_type)
+    if process:
+        return process
+    skill = _skill_control(planned_result)
+    if skill:
+        return skill
+    return _oral_quiz_control(frame, planned_result)
 
 
 def type_from_frame(
@@ -1676,7 +2043,45 @@ def type_from_frame(
     theory_text: str,
     practice_text: str,
     program_content: str,
+    planned_result: str = "",
 ) -> str:
+    # A form names an evidenced activity; it never invents a lesson scenario.
+    if practice_hours and practice_text.strip() and planned_result:
+        result = planned_result.casefold()
+        clause = frame.clause.casefold()
+        if "викторин" in result or re.search(
+            r"(?i)(?:проведен|провод).{0,40}викторин", clause
+        ):
+            return "викторина"
+        if "экскурси" in result and any(x in result for x in ("совершает", "посещает")):
+            return "экскурсия"
+        if result.startswith("исследует") and any(x in clause for x in ("гипотез", "сравнен", "измерен", "наблюден")):
+            return "исследовательское занятие"
+        if "имитац" in clause and "ситуаци" in clause and "действ" in clause:
+            return "ситуационный тренинг"
+        if "составляет" in result and "план" in result and "план-график" in result:
+            return "проектно-практическое занятие"
+        if result.startswith(("проводит наблюдения", "проводит краеведческие наблюдения", "наблюдает")):
+            return "занятие-наблюдение"
+        if result.startswith(("выполняет упражнения", "отрабатывает", "разучивает")):
+            if "движени" in result and "местности" in result:
+                return "учебно-тренировочное занятие на местности"
+            return "учебно-тренировочное занятие"
+        if _result_as_task(planned_result):
+            if "снаряжени" in result or "рюкзак" in result:
+                return "практикум по работе со снаряжением"
+            if "меню" in result and "продукт" in result:
+                return "практикум по организации питания"
+            if "отчёт" in result or "отчет" in result:
+                return "практикум по подготовке отчёта"
+            if "гигиен" in result:
+                return "практикум по личной гигиене"
+            if "азимут" in result or (
+                re.search(r"\bкарт(?:у|е|ы|ой)\b", result)
+                and any(x in result for x in ("компас", "ориентир", "маршрут"))
+            ):
+                return "топографический практикум"
+            return "практикум"
     lead = _leading_clause(frame)
     scores = _line_form_scores(lead)
     if practice_hours and lead:
@@ -1685,7 +2090,7 @@ def type_from_frame(
             r"(?i)^(игр|викторин)", lead
         ):
             dominant = None
-        if dominant and dominant != "беседа":
+        if dominant and dominant not in {"беседа", "исследовательское занятие", "ситуационное занятие"}:
             return dominant
     if theory_hours and not practice_hours:
         theory_scores = _line_form_scores(lead or theory_text)
@@ -1704,6 +2109,74 @@ def type_from_frame(
         practice_text=practice_text,
         program_content=program_content,
     )
+
+
+_TASK_VERBS = {
+    "укладывает": "уложить", "подгоняет": "подогнать",
+    "составляет": "составить", "готовит": "приготовить",
+    "развертывает": "развернуть", "свертывает": "свернуть",
+    "выполняет": "выполнить", "отрабатывает": "отработать",
+    "организует": "организовать", "выступает": "выступить",
+    "оценивает": "оценить", "измеряет": "измерить",
+    "определяет": "определить", "отбирает": "отобрать",
+    "распознаёт": "распознать", "ориентирует": "ориентировать",
+    "строит": "построить", "совершает": "совершить",
+    "посещает": "посетить", "подготавливает": "подготовить",
+    "заслушивает": "заслушать", "проводит": "провести",
+    "применяет": "применить", "формирует": "сформировать",
+    "оказывает": "оказать", "изготавливает": "изготовить",
+    "разучивает": "разучить", "ведёт": "вести",
+    "рисует": "нарисовать", "сравнивает": "сравнить",
+    "решает": "решить", "исследует": "исследовать",
+}
+
+
+def _result_as_task(result: str) -> str:
+    """Closed grammatical conversion; objects and conditions stay verbatim."""
+    text = result.rstrip(".")
+    if not text or text.split()[0].casefold() not in _TASK_VERBS:
+        return ""
+    return re.sub(
+        r"\b(" + "|".join(_TASK_VERBS) + r")\b",
+        lambda match: _TASK_VERBS[match.group().casefold()],
+        text, flags=re.IGNORECASE,
+    )
+
+
+def _observable_result(result: str) -> str:
+    """Remove exercise wrappers only for explicitly named observable operations."""
+    if result.startswith("Выполняет упражнения"):
+        parts = re.split(r" и упражнения ", result.removeprefix("Выполняет упражнения ").rstrip("."))
+        converted = []
+        for part in parts:
+            match = re.fullmatch(
+                r"(?:по|на) (определению|определение|отбору|отбор|измерению|измерение|запоминание|глазомерную оценку|инструментальное измерение) (.+)", part,
+            )
+            if match is None:
+                return result
+            operation, rest = match.groups()
+            verbs = {
+                "определению": "определяет", "определение": "определяет",
+                "отбору": "отбирает", "отбор": "отбирает",
+                "измерению": "измеряет", "измерение": "измеряет",
+                "запоминание": "распознаёт", "глазомерную оценку": "оценивает",
+                "инструментальное измерение": "измеряет",
+            }
+            obj, conditions = _split_object_and_conditions(rest)
+            phrase = f"{verbs[operation]} {_inflect_object_phrase(obj, case='acc')}"
+            if operation == "глазомерную оценку":
+                phrase += " глазомерно"
+            if conditions:
+                phrase += f" {conditions}"
+            converted.append(phrase)
+        return _cap_sentence(" и ".join(converted))
+    # Parenthetical action lists are details, not extra outcomes for the lesson.
+    result = re.sub(
+        r"\s*\(([^()]*)\)",
+        lambda m: "" if _paren_has_actions(m.group(1)) or _is_finite_result_phrase(m.group(1)) else m.group(0),
+        result,
+    )
+    return result.replace("Проводит различные наблюдения", "Проводит наблюдения").replace("Проводит различные краеведческие наблюдения", "Проводит краеведческие наблюдения")
 
 
 def derive_fields_v2(
@@ -1747,6 +2220,15 @@ def derive_fields_v2(
             full_source=topic_title,
             topic_title=topic_title,
         )
+    planned_result = _observable_result(planned_result)
+    if (
+        _result_restates_named_form(planned_result)
+        and theory_text.strip()
+        and _title_has_knowledge_beyond_form(topic_title)
+    ):
+        knowledge = _knowledge_result_from_title(topic_title)
+        if knowledge and not _result_restates_named_form(knowledge):
+            planned_result = knowledge
     lesson_type = type_from_frame(
         frame,
         theory_hours=theory_hours,
@@ -1754,6 +2236,7 @@ def derive_fields_v2(
         theory_text=theory_text,
         practice_text=practice_text,
         program_content=program_content,
+        planned_result=planned_result,
     )
     assessment = control_from_frame(
         frame,
