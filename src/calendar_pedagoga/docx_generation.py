@@ -16,7 +16,11 @@ from docx.oxml.ns import qn
 from docx.shared import Cm
 
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
-from calendar_pedagoga.lesson_display import format_practice_cell, format_theory_cell
+from calendar_pedagoga.lesson_display import (
+    format_practice_cell,
+    format_theory_cell,
+    practice_clause_for_repeated_topic,
+)
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.content_generation import WeekTopicPart
@@ -451,15 +455,35 @@ def _week_topic_parts(source_row) -> tuple[WeekTopicPart, ...]:
     )
 
 
+def _topic_part_key(part: WeekTopicPart) -> tuple[str | None, str, str]:
+    return (part.topic_number, part.topic_title, part.section)
+
+
+def _topic_appearance_counts(
+    rows: tuple[ResolvedLessonRow, ...],
+) -> dict[tuple[str | None, str, str], int]:
+    counts: dict[tuple[str | None, str, str], int] = {}
+    for lesson in rows:
+        for part in _week_topic_parts(lesson.source.source):
+            key = _topic_part_key(part)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _topic_cells_for_lesson(
     lesson: ResolvedLessonRow,
     display_numbers: dict[tuple[str | None, str, str], str],
+    *,
+    topic_counts: dict[tuple[str | None, str, str], int],
+    topic_occurrences: dict[tuple[str | None, str, str], int],
 ) -> tuple[str, str]:
     source_row = lesson.source.source
     theory_lines: list[str] = []
     practice_lines: list[str] = []
     for part in _week_topic_parts(source_row):
-        key = (part.topic_number, part.topic_title, part.section)
+        key = _topic_part_key(part)
+        occurrence_index = topic_occurrences.get(key, 0)
+        topic_occurrences[key] = occurrence_index + 1
         display_number = display_numbers.get(key, part.topic_number or "?")
         theory_cell = format_theory_cell(
             display_number,
@@ -467,11 +491,22 @@ def _topic_cells_for_lesson(
             part.program_content_full,
             part.theory_hours,
         )
+        selected_clause = ""
+        if topic_counts.get(key, 0) > 1 and part.practice_hours:
+            selected_clause = practice_clause_for_repeated_topic(
+                topic_title=part.topic_title,
+                content=part.program_content_full,
+                theory_hours=part.theory_hours,
+                practice_hours=part.practice_hours,
+                occurrence_index=occurrence_index,
+                planned_result=lesson.planned_result,
+            )
         practice_cell = format_practice_cell(
             display_number,
             part.topic_title,
             part.program_content_full,
             part.practice_hours,
+            selected_clause,
         )
         if theory_cell:
             theory_lines.append(theory_cell)
@@ -824,9 +859,16 @@ def _populate_calendar_table(
     display_numbers = _topic_display_numbers(utp)
     _ensure_data_rows(table, len(rows))
     _repeat_table_header_rows(table)
+    topic_counts = _topic_appearance_counts(rows)
+    topic_occurrences: dict[tuple[str | None, str, str], int] = {}
 
     for index, lesson in enumerate(rows):
-        theory_cell, practice_cell = _topic_cells_for_lesson(lesson, display_numbers)
+        theory_cell, practice_cell = _topic_cells_for_lesson(
+            lesson,
+            display_numbers,
+            topic_counts=topic_counts,
+            topic_occurrences=topic_occurrences,
+        )
         source = lesson.source.source
         _write_row(
             table.rows[index + 2],
