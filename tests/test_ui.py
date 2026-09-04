@@ -94,7 +94,7 @@ def test_initial_screen_contains_required_controls() -> None:
     assert app.number_input[0].label == "Начало учебного года"
     assert int(app.number_input[0].value) == default_academic_year_start()
     assert "2026–2027 / 2027–2028 / 2028–2029" not in _page_text(app)
-    assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
+    assert [item.label for item in app.text_input] == ["Группа №", "Класс", "ФИО педагога"]
     assert all(item.value in {"", None} for item in app.text_input)
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
     assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
@@ -290,7 +290,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         ),
         ai_usage=None,
     )
-    assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
+    assert [item.label for item in app.text_input] == ["Группа №", "Класс", "ФИО педагога"]
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
     generate = next(
         button for button in app.button if button.label == "Сформировать календарный план"
@@ -303,6 +303,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert "ai_provider" not in pipeline.call_args.kwargs
     assert pipeline.call_args.kwargs["group_number"] == ""
     assert pipeline.call_args.kwargs["class_name"] == ""
+    assert pipeline.call_args.kwargs["teacher_name"] == ""
     assert pipeline.call_args.kwargs["academic_year"] == _default_year()
     assert "1 г" in (pipeline.call_args.kwargs["program_filename"] or "")
     assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
@@ -323,6 +324,47 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     stored = app.session_state["calendar_warnings"]
     assert SLOT_CONTINUE_WARNING in stored
     assert SLOT_PACK_WARNING in stored
+
+
+def test_teacher_name_is_optional_and_invalidates_download() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 2, _template_file())
+    app.run()
+    _check_button(app).click().run()
+
+    generated = SimpleNamespace(
+        filename="calendar.docx",
+        content=b"generated-docx",
+        warnings=(),
+        ai_usage=None,
+    )
+    teacher = next(item for item in app.text_input if item.label == "ФИО педагога")
+    assert teacher.value in {"", None}
+
+    generate = next(
+        button for button in app.button if button.label == "Сформировать календарный план"
+    )
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
+        generate.click().run()
+    assert pipeline.call_args.kwargs["teacher_name"] == ""
+    assert app.session_state["calendar_generation_succeeded"] is True
+    assert app.session_state["calendar_download"].content == b"generated-docx"
+
+    teacher = next(item for item in app.text_input if item.label == "ФИО педагога")
+    teacher.set_value("Иванов И.И.").run()
+    assert "calendar_generation_invalidated" in app.session_state
+    assert app.session_state["calendar_generation_invalidated"]
+    assert "calendar_download" not in app.session_state
+    assert app.session_state["analysis_ready"] is True
+
+    generate = next(
+        button for button in app.button if button.label == "Сформировать календарный план"
+    )
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
+        generate.click().run()
+    assert pipeline.call_args.kwargs["teacher_name"] == "Иванов И.И."
+    assert app.session_state["calendar_generation_succeeded"] is True
 
 
 def test_teacher_generation_warnings_hide_only_internal_slot_diagnostics() -> None:

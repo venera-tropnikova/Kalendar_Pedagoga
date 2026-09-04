@@ -99,6 +99,7 @@ def run_calendar_pipeline(
     program_filename: str | None = None,
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
     use_content_engine_v2: bool | None = None,
 ) -> PipelineResult:
     """Выполнить полный конвейер формирования календарного плана."""
@@ -146,6 +147,7 @@ def run_calendar_pipeline(
         ),
         group_number=group_number,
         class_name=class_name,
+        teacher_name=teacher_name,
     )
     qa_issues = validate_calendar_docx(
         docx_bytes,

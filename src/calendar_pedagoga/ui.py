@@ -116,10 +116,11 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
 
 def _refresh_generation_inputs(
     utp_file, program_file, template_file, academic_year, group_number, class_name,
+    teacher_name,
 ) -> None:
     revision = _generator_revision()
     analysis = _inputs_fingerprint(utp_file, program_file, template_file, academic_year)
-    inputs = _inputs_fingerprint(analysis, group_number, class_name)
+    inputs = _inputs_fingerprint(analysis, group_number, class_name, teacher_name)
     _sync_generation_fingerprint((inputs, revision))
     analysis_fingerprint = (analysis, revision)
     if st.session_state.get("calendar_analysis_fingerprint") != analysis_fingerprint:
@@ -577,7 +578,7 @@ def _inject_landing_styles() -> None:
     )
 
 
-def _render_group_class_fields() -> tuple[str, str]:
+def _render_group_class_fields() -> tuple[str, str, str]:
     group_col, class_col = st.columns(2)
     with group_col:
         group_number = st.text_input(
@@ -591,7 +592,12 @@ def _render_group_class_fields() -> tuple[str, str]:
             key="class_name",
             help="Необязательно. Если не заполнить, в документе останется линия.",
         )
-    return group_number or "", class_name or ""
+    teacher_name = st.text_input(
+        "ФИО педагога",
+        key="teacher_name",
+        help="Необязательно. Если не заполнить, в документе ничего не добавится.",
+    )
+    return group_number or "", class_name or "", teacher_name or ""
 
 
 def _peek_academic_year_resolution(
@@ -659,7 +665,7 @@ def _render_academic_year_input(utp_file, program_file) -> str:
     return academic_year
 
 
-def _render_upload_screen() -> tuple[object | None, object | None, object | None, str, str, str]:
+def _render_upload_screen() -> tuple[object | None, object | None, object | None, str, str, str, str]:
     _inject_landing_styles()
 
     st.markdown('<div class="kp-hero-top">', unsafe_allow_html=True)
@@ -723,7 +729,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         )
 
     academic_year = _render_academic_year_input(utp_file, program_file)
-    group_number, class_name = _render_group_class_fields()
+    group_number, class_name, teacher_name = _render_group_class_fields()
 
     _render_normative_panel()
 
@@ -734,6 +740,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         academic_year,
         group_number,
         class_name,
+        teacher_name,
     )
 
 
@@ -1143,6 +1150,7 @@ def _show_generation_controls(
     academic_year: str,
     group_number: str,
     class_name: str,
+    teacher_name: str,
 ) -> None:
     if _generator_revision() != _LOADED_GENERATOR_REVISION:
         st.warning("Код приложения обновлён. Перезапустите приложение на localhost:8501 и сформируйте план заново.")
@@ -1191,6 +1199,7 @@ def _show_generation_controls(
                         ),
                         group_number=group_number,
                         class_name=class_name,
+                        teacher_name=teacher_name,
                     )
                     operation.publish_result(result.filename, result.content)
                     st.session_state["calendar_download"] = operation.take_result_for_download()
@@ -1246,11 +1255,12 @@ def run_app() -> None:
         academic_year,
         group_number,
         class_name,
+        teacher_name,
     ) = _render_upload_screen()
 
     _refresh_generation_inputs(
         utp_file, program_file, organization_template_file,
-        academic_year, group_number, class_name,
+        academic_year, group_number, class_name, teacher_name,
     )
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
         st.info("План устарел. Нажмите «Проверить документы» и сформируйте календарный план заново.")
@@ -1439,5 +1449,6 @@ def run_app() -> None:
                 academic_year=academic_year,
                 group_number=group_number,
                 class_name=class_name,
+                teacher_name=teacher_name,
             ),
         )

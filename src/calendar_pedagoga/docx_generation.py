@@ -163,6 +163,12 @@ def _program_header_line(
     return f"«{program}» — {_study_year_label(utp, study_year_hints)} {weekly_part}"
 
 
+_GROUP_CLASS_RE = re.compile(
+    r"Группа\s*№\s*(?:_{2,}|\S+)\s*\(\s*Класс\s+(?:_{2,}|\S+)\s*\)",
+    flags=re.IGNORECASE,
+)
+
+
 def _group_class_line(
     group_number: str | None = None,
     class_name: str | None = None,
@@ -170,6 +176,52 @@ def _group_class_line(
     group = (group_number or "").strip() or "___________"
     klass = (class_name or "").strip() or "_________"
     return f"Группа № {group} (Класс {klass})"
+
+
+def _replace_group_class_prefix(
+    text: str,
+    group_number: str | None,
+    class_name: str | None,
+) -> str:
+    if "группа" not in text.casefold() or not (group_number or class_name):
+        return text
+    if not _GROUP_CLASS_RE.search(text):
+        return text
+    return _GROUP_CLASS_RE.sub(_group_class_line(group_number, class_name), text, count=1)
+
+
+def _append_teacher_name_to_group_line(text: str, teacher_name: str | None) -> str:
+    name = (teacher_name or "").strip()
+    if not name or "группа" not in text.casefold():
+        return text
+    match = _GROUP_CLASS_RE.search(text)
+    if match is None:
+        return text
+    return f"{match.group(0)}\t{name}"
+
+
+def _content_width_twips(document) -> int:
+    section = document.sections[0]
+    return int(
+        section.page_width.twips - section.left_margin.twips - section.right_margin.twips
+    )
+
+
+def _apply_right_teacher_tab(paragraph, document) -> None:
+    """Слева группа/класс, справа ФИО: один абзац и правая табуляция."""
+
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    properties = paragraph._p.get_or_add_pPr()
+    tabs = properties.find(qn("w:tabs"))
+    if tabs is None:
+        tabs = OxmlElement("w:tabs")
+        properties.append(tabs)
+    for old in list(tabs.findall(qn("w:tab"))):
+        tabs.remove(old)
+    tab = OxmlElement("w:tab")
+    tab.set(qn("w:val"), "right")
+    tab.set(qn("w:pos"), str(_content_width_twips(document)))
+    tabs.append(tab)
 
 
 def _enable_cell_wrap(cell) -> None:
@@ -711,6 +763,7 @@ def _fill_organization_header_paragraph(
     study_year_hints: tuple[str | None, ...],
     group_number: str | None,
     class_name: str | None,
+    teacher_name: str | None = None,
 ) -> str:
     updated = text
     program = _quoted_program_name(program_title, utp)
@@ -752,9 +805,8 @@ def _fill_organization_header_paragraph(
             count=1,
         )
 
-    if "группа" in updated.casefold() and (group_number or class_name):
-        return _group_class_line(group_number, class_name)
-    return updated
+    updated = _replace_group_class_prefix(updated, group_number, class_name)
+    return _append_teacher_name_to_group_line(updated, teacher_name)
 
 
 def _fill_organization_header(
@@ -765,6 +817,7 @@ def _fill_organization_header(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
 ) -> None:
     """Подставить значения в шапку шаблона организации, не меняя её состав и стили."""
 
@@ -779,9 +832,13 @@ def _fill_organization_header(
             study_year_hints=study_year_hints,
             group_number=group_number,
             class_name=class_name,
+            teacher_name=teacher_name,
         )
         if updated != original:
             _set_paragraph_text_keep_format(paragraph, updated)
+        name = (teacher_name or "").strip()
+        if name and "группа" in original.casefold() and name in paragraph.text:
+            _apply_right_teacher_tab(paragraph, document)
 
 
 def _write_document_header(
@@ -793,6 +850,7 @@ def _write_document_header(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
     uses_organization_template: bool = False,
 ) -> None:
     if uses_organization_template:
@@ -803,6 +861,7 @@ def _write_document_header(
             study_year_hints=study_year_hints,
             group_number=group_number,
             class_name=class_name,
+            teacher_name=teacher_name,
         )
         return
 
@@ -840,6 +899,7 @@ def _populate_calendar_table(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
     uses_organization_template: bool = False,
 ) -> tuple:
     """Заполнить таблицу календаря строками данных (без объединения месяцев)."""
@@ -857,6 +917,7 @@ def _populate_calendar_table(
         study_year_hints=resolved_hints,
         group_number=group_number,
         class_name=class_name,
+        teacher_name=teacher_name,
         uses_organization_template=uses_organization_template,
     )
 
@@ -911,6 +972,7 @@ def _merge_month_cells_for_pages(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
     uses_organization_template: bool = False,
 ) -> bytes:
     """Собрать DOCX с объединением месяцев по сегментам страниц."""
@@ -924,6 +986,7 @@ def _merge_month_cells_for_pages(
         study_year_hints=study_year_hints,
         group_number=group_number,
         class_name=class_name,
+        teacher_name=teacher_name,
         uses_organization_template=uses_organization_template,
     )
     _apply_explicit_page_breaks(table, columns, rows_by_page)
@@ -948,6 +1011,7 @@ def generate_calendar_docx(
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
     class_name: str | None = None,
+    teacher_name: str | None = None,
 ) -> bytes:
     """Сформировать DOCX: месяц совпадает с датой и merge не пересекает страницы."""
 
@@ -957,6 +1021,7 @@ def generate_calendar_docx(
         "study_year_hints": study_year_hints,
         "group_number": group_number,
         "class_name": class_name,
+        "teacher_name": teacher_name,
         "uses_organization_template": template.uses_organization_template,
     }
 

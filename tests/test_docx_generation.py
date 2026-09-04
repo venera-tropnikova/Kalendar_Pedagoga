@@ -469,6 +469,59 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
     assert empty_group == "Группа № ___________ (Класс _________)"
     assert "Нет" not in empty_group
 
+    empty_teacher = _fill_organization_header_paragraph(
+        "Группа № ___________ (Класс _________)",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number="",
+        class_name="",
+        teacher_name="",
+    )
+    assert empty_teacher == "Группа № ___________ (Класс _________)"
+
+    filled_teacher = _fill_organization_header_paragraph(
+        "Группа № ___________ (Класс _________)",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number="",
+        class_name="",
+        teacher_name="Иванов И.И.",
+    )
+    assert filled_teacher == "Группа № ___________ (Класс _________)\tИванов И.И."
+
+    preserved_tail = _fill_organization_header_paragraph(
+        "Группа № ___________ (Класс _________)                                            Саранцева И.М.",
+        tourists,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        group_number="3",
+        class_name="5А",
+        teacher_name="",
+    )
+    assert preserved_tail.startswith("Группа № 3 (Класс 5А)")
+    assert "Саранцева И.М." in preserved_tail
+
+
+def test_standard_header_does_not_add_teacher_name_line() -> None:
+    document = Document(str(STANDARD_TEMPLATE_PATH))
+    source_count = len(document.paragraphs)
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    _write_document_header(
+        document,
+        utp,
+        academic_year="2026–2027",
+        program_title="КЛЮЧ",
+        group_number="5",
+        class_name="7А",
+        teacher_name="Иванов И.И.",
+    )
+    assert len(document.paragraphs) == source_count
+    assert document.paragraphs[2].text == "2026–2027 учебный год"
+    assert document.paragraphs[3].text == "Группа № 5 (Класс 7А)"
+    assert all("Иванов" not in paragraph.text for paragraph in document.paragraphs)
+
 
 def test_organization_template_keeps_visual_header_and_times_new_roman() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
@@ -560,3 +613,59 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
 
     theory_cell = document.tables[0].rows[2].cells[2]
     assert len(theory_cell.paragraphs) == 1
+
+
+def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    template_path = REFERENCES / "Календарный план.docx"
+    tourists = resolve_utp(
+        None,
+        validate_upload(
+            UploadPurpose.PROGRAM,
+            program_path.name,
+            program_path.read_bytes(),
+        ),
+    )
+    source = Document(str(template_path))
+    empty = Document(str(template_path))
+    _write_document_header(
+        empty,
+        tourists,
+        academic_year="2026–2027",
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        teacher_name="",
+        uses_organization_template=True,
+    )
+    assert len(empty.paragraphs) == len(source.paragraphs)
+    assert empty.paragraphs[2].text == "Группа № ___________ (Класс _________)"
+    assert empty.paragraphs[2].alignment == source.paragraphs[2].alignment
+    assert all("учебный год" not in paragraph.text for paragraph in empty.paragraphs[:4])
+    empty_tabs = empty.paragraphs[2]._p.find(qn("w:pPr"))
+    empty_tab_list = (
+        empty_tabs.find(qn("w:tabs")) if empty_tabs is not None else None
+    )
+    assert empty_tab_list is None or not empty_tab_list.findall(qn("w:tab"))
+
+    filled = Document(str(template_path))
+    _write_document_header(
+        filled,
+        tourists,
+        academic_year="2026–2027",
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        teacher_name="Иванов И.И.",
+        uses_organization_template=True,
+    )
+    assert len(filled.paragraphs) == len(source.paragraphs)
+    group = filled.paragraphs[2]
+    assert group.text == "Группа № ___________ (Класс _________)\tИванов И.И."
+    assert group.alignment == 0  # LEFT
+    tabs = group._p.find(qn("w:pPr")).find(qn("w:tabs"))
+    assert tabs is not None
+    right_tabs = [
+        tab for tab in tabs.findall(qn("w:tab")) if tab.get(qn("w:val")) == "right"
+    ]
+    assert len(right_tabs) == 1
+    assert all(paragraph.text.strip() != "Иванов И.И." for paragraph in filled.paragraphs)
+    assert all("учебный год" not in paragraph.text for paragraph in filled.paragraphs[:4])
