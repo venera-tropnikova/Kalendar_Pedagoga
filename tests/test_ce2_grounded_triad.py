@@ -7,10 +7,13 @@ import pytest
 from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
     _observable_result,
+    build_lesson_content_v2,
     control_from_frame,
     fill_from_source,
     type_from_frame,
 )
+from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
+from calendar_pedagoga.matching import MatchStatus
 
 
 @pytest.mark.parametrize(
@@ -99,7 +102,7 @@ def test_source_fields_are_not_rewritten():
 
 
 CE2_TP1_WEEK_SNAPSHOT = (
-    ("1.1", "теоретическое занятие", "Характеризует историю развития туризма в г. Салават.", "устный опрос по видам туризма"),
+    ("1.1", "теоретическое занятие", "Характеризует историю развития туризма в г. Салават и роль туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности.", "устный опрос по видам туризма и роли туризма в подготовке к защите Родины"),
     ("1.3", "практикум по работе со снаряжением", "Укладывает рюкзаки, подгоняет снаряжение.", "проверка укладки рюкзака и подгонки снаряжения"),
     ("1.4", "практикум", "Развертывает и свертывает лагерь (бивак).", "педагогическое наблюдение при развертывании и свертывании лагеря"),
     ("1.5", "проектно-практическое занятие", "Составляет план подготовки похода и план-график движения.", "проверка плана подготовки похода и плана-графика движения"),
@@ -151,10 +154,21 @@ def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
     upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
     utp = resolve_utp(None, upload)
     program = parse_program(upload.content, upload.filename, study_year=1)
-    rows = build_content_model(build_schedule(utp, "2026–2027"), utp, program, source.name)
+    schedule = build_schedule(utp, "2026–2027")
+    rows = build_content_model(schedule, utp, program, source.name)
     before = repr(rows)
     generated = build_lesson_content_v2(rows)
     assert len(generated) == 36
+    assert len(schedule.weeks) == 36
+    assert utp.table_totals.total == 72
+    assert utp.table_totals.theory == 27
+    assert utp.table_totals.practice == 45
+    assert sum(row.theory_hours for row in rows) == 27
+    assert sum(row.practice_hours for row in rows) == 45
+    assert {(part.topic_number, part.theory_hours) for part in rows[0].week_parts} == {
+        ("1.1", 1),
+        ("1.2", 1),
+    }
     assert repr(rows) == before
     clone = re.compile(
         r"(?i)^(практическая работа|педагогическое наблюдение):\s+"
@@ -185,3 +199,78 @@ def test_control_is_not_infinitive_clone_of_result():
     assert control == "проверка укладки рюкзака и подгонки снаряжения"
     assert "практическая работа:" not in control
     assert "уложить" not in control
+
+
+def _synthetic_week(*parts: tuple[str, str, str, int, int]) -> CalendarContentRow:
+    week_parts = tuple(
+        WeekTopicPart(
+            topic_number=number,
+            topic_title=title,
+            section="Раздел",
+            theory_hours=theory,
+            practice_hours=practice,
+            match_status=MatchStatus.EXACT,
+            program_section="Раздел",
+            program_topic=title,
+            program_content_full=content,
+        )
+        for number, title, content, theory, practice in parts
+    )
+    theory_hours = sum(part.theory_hours for part in week_parts)
+    practice_hours = sum(part.practice_hours for part in week_parts)
+    return CalendarContentRow(
+        week_number=1,
+        date_range="01–06.09",
+        month="Сентябрь",
+        section=week_parts[0].section,
+        topic_number=week_parts[0].topic_number,
+        topic_title=week_parts[0].topic_title,
+        source_topic_title=week_parts[0].topic_title,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        total_hours=theory_hours + practice_hours,
+        match_status=week_parts[0].match_status,
+        program_section=week_parts[0].program_section,
+        program_topic=week_parts[0].program_topic,
+        program_content_full="\n".join(part.program_content_full for part in week_parts),
+        program_content_preview="",
+        source_program_name="program.docx",
+        source_utp_name="utp.docx",
+        week_parts=week_parts,
+    )
+
+
+def test_multi_topic_week_merges_both_grounded_triads():
+    first = (
+        "A.1",
+        "История прибора",
+        "История прибора в городе. Виды приборов.",
+        1,
+        0,
+    )
+    second = (
+        "A.2",
+        "Роль прибора",
+        "Роль прибора в обучении и выборе профессии.",
+        1,
+        0,
+    )
+    alone_first = fill_from_source(
+        topic_title=first[1], program_content=first[2], theory_hours=1, practice_hours=0,
+    )
+    alone_second = fill_from_source(
+        topic_title=second[1], program_content=second[2], theory_hours=1, practice_hours=0,
+    )
+    merged = build_lesson_content_v2((_synthetic_week(first, second),))[0]
+    assert alone_first.lesson_type == alone_second.lesson_type == merged.lesson_type
+    first_object = re.sub(r"(?i)^характеризует\s+", "", alone_first.planned_result).rstrip(".")
+    second_object = re.sub(r"(?i)^характеризует\s+", "", alone_second.planned_result).rstrip(".")
+    assert first_object in merged.planned_result
+    assert second_object in merged.planned_result
+    assert merged.planned_result.casefold().count("характеризует") == 1
+    first_control = alone_first.assessment_method.removeprefix("устный опрос по ")
+    second_control = alone_second.assessment_method.removeprefix("устный опрос по ")
+    assert first_control in merged.assessment_method
+    assert second_control in merged.assessment_method
+    assert merged.assessment_method.startswith("устный опрос по ")
+    assert merged.assessment_method.count("устный опрос") == 1

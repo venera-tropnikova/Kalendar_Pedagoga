@@ -2293,11 +2293,10 @@ def fill_from_source(
     )
 
 
-def _split_row_texts(row: CalendarContentRow) -> tuple[str, str, list[str]]:
-    warnings: list[str] = list(row.warnings)
-    theory_parts: list[str] = []
-    practice_parts: list[str] = []
-    parts = row.week_parts or (
+def _row_week_parts(row: CalendarContentRow) -> tuple[WeekTopicPart, ...]:
+    if row.week_parts:
+        return row.week_parts
+    return (
         WeekTopicPart(
             topic_number=row.topic_number,
             topic_title=row.topic_title,
@@ -2311,37 +2310,161 @@ def _split_row_texts(row: CalendarContentRow) -> tuple[str, str, list[str]]:
             warnings=row.warnings,
         ),
     )
-    topic_totals: dict[tuple[str | None, str, str], tuple[int, int]] = {}
+
+
+def _topic_hour_totals(
+    parts: tuple[WeekTopicPart, ...],
+) -> dict[tuple[str | None, str, str], tuple[int, int]]:
+    totals: dict[tuple[str | None, str, str], tuple[int, int]] = {}
     for part in parts:
         key = (part.topic_number, part.topic_title, part.section)
-        theory, practice = topic_totals.get(key, (0, 0))
-        topic_totals[key] = (theory + part.theory_hours, practice + part.practice_hours)
+        theory, practice = totals.get(key, (0, 0))
+        totals[key] = (theory + part.theory_hours, practice + part.practice_hours)
+    return totals
+
+
+def _part_texts(
+    part: WeekTopicPart,
+    topic_totals: dict[tuple[str | None, str, str], tuple[int, int]],
+) -> tuple[str, str]:
+    topic_theory, topic_practice = topic_totals[
+        (part.topic_number, part.topic_title, part.section)
+    ]
+    theory_text = ""
+    practice_text = ""
+    content = part.program_content_full
+    if content:
+        explicit = _split_explicit_practice(content)
+        if explicit:
+            theory_source, practice_source = explicit
+            if part.theory_hours:
+                theory_text = theory_source
+            if part.practice_hours:
+                practice_text = practice_source
+        elif topic_theory and not topic_practice and part.theory_hours:
+            theory_text = content
+        elif topic_practice and not topic_theory and part.practice_hours:
+            practice_text = content
+        elif topic_theory and topic_practice:
+            theory_text = content
+    return theory_text, practice_text
+
+
+def _split_row_texts(row: CalendarContentRow) -> tuple[str, str, list[str]]:
+    warnings: list[str] = list(row.warnings)
+    parts = _row_week_parts(row)
+    topic_totals = _topic_hour_totals(parts)
+    theory_parts: list[str] = []
+    practice_parts: list[str] = []
     for part in parts:
-        topic_theory, topic_practice = topic_totals[
-            (part.topic_number, part.topic_title, part.section)
-        ]
-        theory_text = ""
-        practice_text = ""
-        content = part.program_content_full
-        if content:
-            explicit = _split_explicit_practice(content)
-            if explicit:
-                theory_source, practice_source = explicit
-                if part.theory_hours:
-                    theory_text = theory_source
-                if part.practice_hours:
-                    practice_text = practice_source
-            elif topic_theory and not topic_practice and part.theory_hours:
-                theory_text = content
-            elif topic_practice and not topic_theory and part.practice_hours:
-                practice_text = content
-            elif topic_theory and topic_practice:
-                theory_text = content
+        theory_text, practice_text = _part_texts(part, topic_totals)
         if theory_text:
             theory_parts.append(theory_text)
         if practice_text:
             practice_parts.append(practice_text)
     return "\n".join(theory_parts), "\n".join(practice_parts), warnings
+
+
+def _unique_phrases(phrases: list[str]) -> list[str]:
+    unique: list[str] = []
+    for phrase in phrases:
+        normalized = _normalize_spaces(phrase).rstrip(" .")
+        if not normalized:
+            continue
+        folded = normalized.casefold()
+        if any(folded == _normalize_spaces(item).rstrip(" .").casefold() for item in unique):
+            continue
+        superseded = False
+        for index, item in enumerate(unique):
+            item_fold = _normalize_spaces(item).rstrip(" .").casefold()
+            if folded in item_fold:
+                superseded = True
+                break
+            if item_fold in folded:
+                unique[index] = _normalize_spaces(phrase)
+                superseded = True
+                break
+        if not superseded:
+            unique.append(_normalize_spaces(phrase))
+    return unique
+
+
+def _join_and(parts: list[str]) -> str:
+    cleaned = [_normalize_spaces(part).rstrip(" .") for part in parts if _normalize_spaces(part)]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return ", ".join(cleaned[:-1]) + " и " + cleaned[-1]
+
+
+def _leading_finite_verb(text: str) -> str:
+    match = re.match(r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет))\b", text.strip())
+    return match.group(1) if match else ""
+
+
+_SHARED_CONTROL_PREFIXES = (
+    "устный опрос по ",
+    "практическое задание по ",
+    "педагогическое наблюдение за ",
+    "педагогическое наблюдение ",
+    "проверка ",
+)
+
+
+def _merge_part_results(results: list[str]) -> str:
+    unique = _unique_phrases(results)
+    if not unique:
+        return ""
+    if len(unique) == 1:
+        return unique[0] if unique[0].endswith(".") else unique[0] + "."
+    verbs = [_leading_finite_verb(item) for item in unique]
+    if all(verbs) and len({verb.casefold() for verb in verbs}) == 1:
+        objects = [_drop_leading_verb(item).rstrip(" .") for item in unique]
+        return _cap_sentence(f"{verbs[0]} {_join_and(objects)}")
+    sentences = [item if item.endswith(".") else f"{item}." for item in unique]
+    return _normalize_spaces(" ".join(sentences))
+
+
+def _merge_part_controls(controls: list[str]) -> str:
+    unique = _unique_phrases(controls)
+    if not unique:
+        return ""
+    if len(unique) == 1:
+        return unique[0]
+    folded = [item.casefold() for item in unique]
+    for prefix in _SHARED_CONTROL_PREFIXES:
+        if all(item.startswith(prefix) for item in folded):
+            tails = [item[len(prefix) :].strip() for item in unique]
+            return prefix + _join_and(_unique_phrases(tails))
+    return "; ".join(unique)
+
+
+def _merge_week_part_fields(
+    derived_parts: list[ContentEngineV2Result],
+) -> tuple[str, str, str]:
+    types = list(dict.fromkeys(item.lesson_type for item in derived_parts if item.lesson_type))
+    lesson_type = types[0] if types else ""
+    planned_result = _merge_part_results([item.planned_result for item in derived_parts])
+    assessment = _merge_part_controls([item.assessment_method for item in derived_parts])
+    return lesson_type, planned_result, assessment
+
+
+def _derive_week_part(
+    part: WeekTopicPart,
+    topic_totals: dict[tuple[str | None, str, str], tuple[int, int]],
+    occurrence_index: int,
+) -> ContentEngineV2Result:
+    theory_text, practice_text = _part_texts(part, topic_totals)
+    return derive_fields_v2(
+        topic_title=part.topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=part.program_content_full or "",
+        theory_hours=part.theory_hours,
+        practice_hours=part.practice_hours,
+        occurrence_index=occurrence_index,
+    )
 
 
 def build_lesson_content_v2(
@@ -2355,31 +2478,51 @@ def build_lesson_content_v2(
     result: list[LessonContentV2Row] = []
     topic_occurrences: dict[tuple[str | None, str, str], int] = {}
     for row in rows:
-        key = (row.topic_number, row.topic_title, row.section)
-        occurrence_index = topic_occurrences.get(key, 0)
-        topic_occurrences[key] = occurrence_index + 1
+        parts = _row_week_parts(row)
         theory_text, practice_text, warnings = _split_row_texts(row)
-        derived = derive_fields_v2(
-            topic_title=row.topic_title,
-            theory_text=theory_text,
-            practice_text=practice_text,
-            program_content=row.program_content_full or "",
-            theory_hours=row.theory_hours,
-            practice_hours=row.practice_hours,
-            occurrence_index=occurrence_index,
-        )
+        if len(parts) > 1:
+            derived_parts: list[ContentEngineV2Result] = []
+            for part in parts:
+                key = (part.topic_number, part.topic_title, part.section)
+                occurrence_index = topic_occurrences.get(key, 0)
+                topic_occurrences[key] = occurrence_index + 1
+                derived_parts.append(
+                    _derive_week_part(part, _topic_hour_totals(parts), occurrence_index)
+                )
+            lesson_type, planned_result, assessment = _merge_week_part_fields(derived_parts)
+            derived = derived_parts[0]
+            extra_warnings = tuple(
+                warning for item in derived_parts for warning in item.warnings
+            )
+        else:
+            key = (row.topic_number, row.topic_title, row.section)
+            occurrence_index = topic_occurrences.get(key, 0)
+            topic_occurrences[key] = occurrence_index + 1
+            derived = derive_fields_v2(
+                topic_title=row.topic_title,
+                theory_text=theory_text,
+                practice_text=practice_text,
+                program_content=row.program_content_full or "",
+                theory_hours=row.theory_hours,
+                practice_hours=row.practice_hours,
+                occurrence_index=occurrence_index,
+            )
+            lesson_type = derived.lesson_type
+            planned_result = derived.planned_result
+            assessment = derived.assessment_method
+            extra_warnings = derived.warnings
         result.append(
             LessonContentV2Row(
                 source=row,
                 theory_text=theory_text,
                 practice_text=practice_text,
-                lesson_type=derived.lesson_type,
-                planned_result=derived.planned_result,
-                assessment_method=derived.assessment_method,
+                lesson_type=lesson_type,
+                planned_result=planned_result,
+                assessment_method=assessment,
                 action=derived.frame.action,
                 object=derived.frame.object,
                 conditions=derived.frame.conditions,
-                warnings=tuple(dict.fromkeys((*warnings, *derived.warnings))),
+                warnings=tuple(dict.fromkeys((*warnings, *extra_warnings))),
             )
         )
     return tuple(result)
