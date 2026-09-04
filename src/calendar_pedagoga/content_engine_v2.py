@@ -104,6 +104,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "укладка": "укладывает",
     "упаковка": "упаковывает",
     "уход": "ухаживает",
+    "отыскание": "находит",
     "фасовка": "фасует",
     "чтение": "читает",
     "закупка": "закупает",
@@ -290,6 +291,8 @@ def _noun_gen_to_acc(word: str) -> str:
         return word
     if low.endswith("ений") and len(word) > 5:
         return word[:-2] + "ия"
+    if low.endswith("ций") and len(word) > 5:
+        return word[:-1] + "и"
     if low.endswith(("ов", "ев", "ёв")) and len(word) > 4:
         stem = word[:-2]
         last = stem[-1:].casefold()
@@ -1117,7 +1120,7 @@ def _trim_long_parentheticals(text: str) -> str:
 
 _OBSERVABLE_OP_HEAD = re.compile(
     r"(?i)^(определению|определение|измерению|измерение|отбору|отбор|"
-    r"оценке|глазомерную|инструментальное)\b"
+    r"отысканию|отыскание|оценке|глазомерную|инструментальное)\b"
 )
 
 
@@ -1131,7 +1134,7 @@ def _is_parallel_observable_series(parts: list[str]) -> bool:
     if len(parts) < 2:
         return False
     if not re.search(
-        r"(?i)\b(?:по|на)\s+(?:определен|измерен|отбор|оценк|глазомерн|инструментальн)",
+        r"(?i)\b(?:по|на)\s+(?:определен|измерен|отбор|отыскан|оценк|глазомерн|инструментальн)",
         parts[0],
     ):
         return False
@@ -1680,6 +1683,7 @@ _FINITE_TO_NOUN = {
     "оценивает": "оценки",
     "измеряет": "измерения",
     "отбирает": "отбора",
+    "находит": "отыскания",
     "применяет": "применения",
     "изготавливает": "изготовления",
     "разучивает": "разучивания",
@@ -1698,7 +1702,7 @@ _FINITE_TO_NOUN = {
     "разжигает": "разжигания",
     "подбирает": "подбора",
 }
-_EXERCISE_SKILL_VERBS = {"определяет", "оценивает", "измеряет"}
+_EXERCISE_SKILL_VERBS = {"определяет", "оценивает", "измеряет", "отбирает", "находит"}
 _FINITE_VERB_RE = re.compile(
     r"(?i)\b(" + "|".join(sorted(_FINITE_TO_NOUN, key=len, reverse=True)) + r")\b"
 )
@@ -1874,6 +1878,8 @@ def _head_noun_to_genitive(word: str) -> str:
         changed = core[:-1] + "ов"
     elif low.endswith("ости"):
         changed = core[:-1] + "ей"
+    elif low.endswith("ции"):
+        changed = core[:-1] + "й"
     elif low.endswith("ь"):
         changed = core[:-1] + "и"
     elif low.endswith("й") and len(core) > 2 and core[-2].casefold() in "аеёиоуыэюя":
@@ -1929,6 +1935,8 @@ def _phrase_to_dative_noun(noun: str) -> str:
         return noun[:-1] + "ю"
     if low.endswith("ки"):
         return noun[:-1] + "е"
+    if low.endswith("ора"):
+        return noun[:-1] + "у"
     if low.endswith("а"):
         return noun[:-1] + "е"
     return noun
@@ -2316,14 +2324,14 @@ def _skill_control(result: str) -> str:
             body = _normalize_spaces(f"{' и '.join(nouns)} {object_text}")
         else:
             full_objects = [
-                _phrase_to_genitive(obj.split(",")[0].strip())
+                _phrase_to_genitive(
+                    re.sub(r"\s*\([^)]*\)", "", obj.split(",")[0]).strip()
+                )
                 for _verb, obj in actions
             ]
-            body = _normalize_spaces(
-                " и ".join(
-                    f"{noun} {obj}".strip()
-                    for noun, obj in zip(nouns, full_objects)
-                )
+            body = _join_and(
+                f"{noun} {obj}".strip()
+                for noun, obj in zip(nouns, full_objects)
             )
         return f"практическое задание по {body}".rstrip()
     if any(verb == "изготавливает" for verb, _obj in actions) and any(
@@ -2536,6 +2544,7 @@ _TASK_VERBS = {
     "решает": "решить", "исследует": "исследовать",
     "ухаживает": "ухаживать", "ремонтирует": "ремонтировать",
     "разжигает": "разжечь", "подбирает": "подобрать",
+    "находит": "найти",
 }
 
 
@@ -2552,12 +2561,13 @@ def _result_as_task(result: str) -> str:
 
 
 _EXERCISE_OP_RE = re.compile(
-    r"(?i)(?:по|на) (определению|определение|отбору|отбор|измерению|"
-    r"измерение|запоминание|глазомерную оценку|инструментальное измерение) (.+)"
+    r"(?i)(?:по|на) (определению|определение|отбору|отбор|отысканию|"
+    r"отыскание|измерению|измерение|запоминание|глазомерную оценку|"
+    r"инструментальное измерение) (.+)"
 )
 _EXERCISE_OP_SPLIT_RE = re.compile(
     r",\s+(?=(?:определению|определение|измерению|измерение|отбору|отбор|"
-    r"оценке|глазомерную|инструментальное)\b)"
+    r"отысканию|отыскание|оценке|глазомерную|инструментальное)\b)"
 )
 
 
@@ -2599,18 +2609,25 @@ def _observable_result(result: str) -> str:
             verbs = {
                 "определению": "определяет", "определение": "определяет",
                 "отбору": "отбирает", "отбор": "отбирает",
+                "отысканию": "находит", "отыскание": "находит",
                 "измерению": "измеряет", "измерение": "измеряет",
                 "запоминание": "распознаёт", "глазомерную оценку": "оценивает",
                 "инструментальное измерение": "измеряет",
             }
             obj, conditions = _split_object_and_conditions(rest)
-            phrase = f"{verbs[operation]} {_inflect_object_phrase(obj, case='acc')}"
+            if not obj and conditions:
+                locative = re.match(r"(?i)^((?:на|по|в)\s+\S+)\s+(.+)$", conditions)
+                if locative:
+                    obj, conditions = locative.group(2), ""
+                else:
+                    obj, conditions = conditions, ""
+            phrase = f"{verbs[operation]} {_inflect_object_phrase(obj, case='acc')}".strip()
             if operation == "глазомерную оценку":
                 phrase += " глазомерно"
             if conditions:
                 phrase += f" {conditions}"
             converted.append(phrase)
-        return _cap_sentence(" и ".join(converted))
+        return _cap_sentence(_join_and(converted))
     # Parenthetical action lists are details, not extra outcomes for the lesson.
     result = re.sub(
         r"\s*\(([^()]*)\)",

@@ -17,11 +17,6 @@ TOO_DENSE_FREEZE = {
         "практическое задание по измерению шага; проверка графика перевода пар шагов в метры для разных условий ходьбы",
         "измерительный практикум",
     ),
-    "2.6": (
-        "Отбирает основные контрольные ориентиры на карте по заданному маршруту.",
-        "практическое задание по отбору основных контрольных ориентиров на карте по заданному маршруту",
-        "практикум по ориентированию",
-    ),
 }
 
 
@@ -120,6 +115,28 @@ def test_too_dense_topics_stay_frozen() -> None:
         assert derived.planned_result == result
         assert derived.assessment_method == control
         assert derived.lesson_type == lesson_type
+
+
+def test_selected_clause_keeps_three_orientation_operations() -> None:
+    derived = _fill_tp_topic("2.6")
+    assert derived.planned_result == (
+        "Отбирает основные контрольные ориентиры на карте по заданному маршруту, "
+        "находит сходные (параллельные) ситуации и определяет способы привязки."
+    )
+    assert derived.assessment_method == (
+        "практическое задание по отбору основных контрольных ориентиров "
+        "на карте по заданному маршруту, отысканию сходных ситуаций "
+        "и определению способов привязки"
+    )
+    assert derived.lesson_type == "практикум по ориентированию"
+    low = derived.planned_result.casefold()
+    assert "легенд" not in low
+    assert "абрис" not in low
+    assert "мини" not in low
+    assert "график" not in low
+    practice = derived.practice_text.casefold()
+    assert "легенд" in practice
+    assert "абрис" in practice
 
 
 def test_snapshot_changes_only_five_loss_weeks() -> None:

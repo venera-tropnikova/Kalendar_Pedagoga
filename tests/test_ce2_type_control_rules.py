@@ -19,7 +19,7 @@ def test_audit_snapshot_preserves_results_and_untouched_rows():
     # RESULT digest captured before this task. TYPE/CONTROL freeze excludes
     # the agreed change weeks so neighbouring rows cannot drift silently.
     changed = {2, 3, 4, 6, 9, 11, 12, 13, 14, 16, 17, 23, 29, 30, 31, 36}
-    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == "29cc61ccf2b8e5c43dd7c47abdb979700fd45ed372ef46ee59e4ccf08ae02981"
+    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == "5c1ffe45bc7e43c9707a93d958d8f59f6c56db51f086076d223243ec12ba448a"
     assert _digest([list(row[1:]) for week, row in enumerate(
         CE2_TP1_WEEK_SNAPSHOT, 1
     ) if week not in changed]) == "46338c7d732ed525b695d03de2bc3512e3de6282ec8264d66b12cf175e63c510"
