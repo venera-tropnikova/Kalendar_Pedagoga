@@ -1950,6 +1950,11 @@ def _process_control(result: str, lesson_type: str) -> str:
     low = result.casefold()
     type_low = lesson_type.casefold()
     if low.startswith("выполняет упражнения"):
+        remainder = _normalize_spaces(
+            re.sub(r"(?i)^выполняет упражнения\s*", "", result)
+        ).rstrip(".")
+        if remainder:
+            return "педагогическое наблюдение за выполнением упражнений " + remainder
         return "педагогическое наблюдение за выполнением упражнений"
     if low.startswith("отрабатывает технику") or "отрабатывает технику" in low:
         rest = re.sub(r"(?i)^отрабатывает технику\s*", "", result).rstrip(".")
