@@ -192,11 +192,27 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert not app.exception
     assert "Документы проверены" in text
     assert "Год обучения:</strong> 1 год обучения" in text
-    assert "Возраст:</strong> Не найдено" in text
+    assert "Возраст:</strong> Не найдено" not in text
     assert "Нормативная проверка" in text
-    assert "Что в порядке" in text
+    assert "Основные данные программы и УТП проверены." in text
+    assert "Что в порядке" not in text
     assert "PASS" not in text
     assert "NOT CHECKED" not in text
+    assert "Данные успешно прочитаны" not in text
+    assert "Некоторые поля отсутствуют" not in text
+    assert "Что не найдено и как это влияет на Word" not in text
+    assert "На файл Word не влияет." not in text
+    assert "Недостающие сведения не мешают сформировать календарный план." in text
+    assert "На что обратить внимание" in text
+    assert "Что не удалось проверить" in text
+    assert "Проверка вашей программы и УТП" in text
+    captions = " ".join(item.value or "" for item in getattr(app, "caption", []))
+    assert "Справочник документов из реестра" in f"{text} {captions}"
+    assert not any(button.label == "Заменить документы" for button in app.button)
+    assert "Чтобы заменить документы" in text
+    assert not any(
+        "Данные успешно прочитаны" in (item.value or "") for item in app.success
+    )
 
 
 def test_generation_click_runs_pipeline_and_exposes_download() -> None:
@@ -209,7 +225,9 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     generated = SimpleNamespace(
         filename="calendar.docx",
         content=b"generated-docx",
-        warnings=(),
+        warnings=(
+            "Ширина таблицы не задана явно; возможны переносы на новые страницы.",
+        ),
         ai_usage=None,
     )
     assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
@@ -234,3 +252,5 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert app.session_state["calendar_download"].content == b"generated-docx"
     assert [item.value for item in app.success][-1] == "Календарный план готов"
     assert app.get("download_button")[0].label == "Скачать календарный план"
+    assert "Ширина таблицы" not in _page_text(app)
+    assert not any("Ширина таблицы" in (item.value or "") for item in app.warning)

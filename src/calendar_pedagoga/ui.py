@@ -366,9 +366,9 @@ def _inject_landing_styles() -> None:
             margin: 0.1rem 0 0.2rem 0;
         }
         .kp-normative details {
-            border: 1px solid #eef2f7;
+            border: 1px dashed #cbd5e1;
             border-radius: 10px;
-            background: #fafbfc;
+            background: #f4f6f8;
             padding: 0.15rem 0.65rem;
             margin: 0;
         }
@@ -465,8 +465,9 @@ def _inject_landing_styles() -> None:
             margin: 0.45rem 0 0.15rem 0;
         }
         .kp-normative-check {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
+            background: #f8fbff;
+            border: 1px solid #bfdbfe;
+            border-left: 4px solid #2563eb;
             border-radius: 10px;
             padding: 0.75rem 1rem 0.85rem 1rem;
             margin: 0.55rem 0 0.45rem 0;
@@ -476,7 +477,13 @@ def _inject_landing_styles() -> None:
             font-size: 1.02rem;
             font-weight: 600;
             color: #111827;
+            margin: 0 0 0.2rem 0;
+        }
+        .kp-normative-check-lead {
+            font-size: 0.9rem;
+            color: #4b5563;
             margin: 0 0 0.45rem 0;
+            line-height: 1.4;
         }
         .kp-normative-check-label {
             font-size: 0.92rem;
@@ -648,7 +655,8 @@ def _render_normative_panel() -> None:
     st.markdown('<div class="kp-normative">', unsafe_allow_html=True)
     with st.expander("Нормативная база", expanded=False):
         st.caption(
-            "Справочная информация; на календарь автоматически не влияет."
+            "Справочник документов из реестра. Это не проверка вашей программы "
+            "и на календарь автоматически не влияет."
         )
         st.write(
             f"Версия: **{registry_snapshot.registry_version}** · действует с: "
@@ -714,8 +722,22 @@ def _render_normative_panel() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _value(value: object | None) -> str:
-    return str(value) if value is not None else "Не найдено"
+def _fact(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+_TABLE_WIDTH_WARNING = (
+    "Ширина таблицы не задана явно; возможны переносы на новые страницы."
+)
+
+
+def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        warning for warning in warnings if warning != _TABLE_WIDTH_WARNING
+    )
 
 
 def _collect_analysis_warnings(
@@ -740,16 +762,23 @@ def _render_normative_report(report: NormativeReport) -> None:
     sections: list[str] = [
         '<div class="kp-normative-check">',
         '<p class="kp-normative-check-title">Нормативная проверка</p>',
+        '<p class="kp-normative-check-lead">'
+        "Проверка вашей программы и УТП по требованиям ДОП. "
+        "На календарный план не влияет.</p>",
     ]
+    if report.passed:
+        sections.append(
+            '<p class="kp-normative-check-label ok">'
+            "✓ Основные данные программы и УТП проверены.</p>"
+        )
     groups = (
-        (report.passed, "ok", "Что в порядке"),
         (report.warnings, "warn", "На что обратить внимание"),
         (report.unchecked, "skip", "Что не удалось проверить"),
     )
     for checks, css, title in groups:
         if not checks:
             continue
-        mark = {"ok": "✓", "warn": "⚠", "skip": "—"}[css]
+        mark = {"warn": "⚠", "skip": "—"}[css]
         sections.append(
             f'<p class="kp-normative-check-label {css}">{mark} {html.escape(title)}</p>'
         )
@@ -768,7 +797,6 @@ def _render_teacher_analysis_screen(
     program: ProgramData | None,
     schedule: ScheduleResult,
     matches: tuple[ContentMatch, ...],
-    detail_warnings: tuple[str, ...],
     academic_year: str,
     source_utp_name: str | None = None,
     program_filename: str | None = None,
@@ -779,21 +807,34 @@ def _render_teacher_analysis_screen(
 
     st.markdown('<div class="kp-results">', unsafe_allow_html=True)
     st.markdown('<p class="kp-results-title">Документы проверены</p>', unsafe_allow_html=True)
-    st.success("Данные успешно прочитаны. Можно формировать календарный план.")
 
-    program_name = metadata.program_name or (program.title if program else None)
-    study_year = study_year_label(
-        metadata.study_year,
-        source_utp_name,
-        program_filename,
+    program_name = _fact(metadata.program_name or (program.title if program else None))
+    study_year = _fact(
+        study_year_label(
+            metadata.study_year,
+            source_utp_name,
+            program_filename,
+        )
     )
-    student_age = metadata.student_age or (program.student_age if program else None)
-    summary_lines = [
-        f"<p><strong>Программа:</strong> {_value(program_name)}</p>",
-        f"<p><strong>Год обучения:</strong> {_value(study_year)}</p>",
-        f"<p><strong>Возраст:</strong> {_value(student_age)}</p>",
-        '<p class="kp-summary-label"><strong>Учебная нагрузка:</strong></p>',
-    ]
+    student_age = _fact(
+        metadata.student_age or (program.student_age if program else None)
+    )
+    matched = 0
+    total = len(matches)
+    if program and matches:
+        matched = sum(
+            match.status is not MatchStatus.NOT_MATCHED for match in matches
+        )
+    summary_lines: list[str] = []
+    if program_name:
+        summary_lines.append(f"<p><strong>Программа:</strong> {html.escape(program_name)}</p>")
+    if study_year:
+        summary_lines.append(f"<p><strong>Год обучения:</strong> {html.escape(study_year)}</p>")
+    if student_age:
+        summary_lines.append(f"<p><strong>Возраст:</strong> {html.escape(student_age)}</p>")
+    summary_lines.append(
+        '<p class="kp-summary-label"><strong>Учебная нагрузка:</strong></p>'
+    )
     if totals:
         summary_lines.extend(
             [
@@ -801,10 +842,16 @@ def _render_teacher_analysis_screen(
                 f"<p>{totals.total} часов</p>",
                 f"<p>{totals.theory} ч теория</p>",
                 f"<p>{totals.practice} ч практика</p>",
+                (
+                    f"<p>{totals.total} часа распределены на "
+                    f"{len(schedule.weeks)} учебных недель.</p>"
+                ),
             ]
         )
     else:
         summary_lines.append(f"<p>{weeks} недель</p>")
+    if program and matches and matched == total:
+        summary_lines.append(f"<p>Все {total} тем найдены в программе.</p>")
 
     st.markdown(
         '<div class="kp-results-summary">' + "".join(summary_lines) + "</div>",
@@ -819,41 +866,16 @@ def _render_teacher_analysis_screen(
         )
     )
 
-    if program and matches:
-        matched = sum(
-            match.status is not MatchStatus.NOT_MATCHED for match in matches
-        )
-        total = len(matches)
-        if matched == total:
-            st.markdown(
-                '<div class="kp-results-status">',
-                unsafe_allow_html=True,
-            )
-            st.success(f"Все {total} тем найдены в программе")
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.warning(f"Найдено {matched} из {total} тем в программе")
+    if program and matches and matched != total:
+        st.warning(f"Найдено {matched} из {total} тем в программе")
     elif program is None:
         st.info("Образовательная программа не загружена.")
 
-    if totals:
-        st.markdown(
-            '<div class="kp-results-status">',
-            unsafe_allow_html=True,
-        )
-        st.success(
-            f"{totals.total} часа распределены на {len(schedule.weeks)} учебных недель."
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    if detail_warnings:
-        st.info(
-            "Некоторые поля отсутствуют в исходных документах. "
-            "Приложение сможет дополнить их при формировании плана."
-        )
-        with st.expander("Подробнее"):
-            for warning in detail_warnings:
-                st.write(f"• {warning}")
+    st.markdown(
+        '<p class="kp-results-note">Недостающие сведения не мешают '
+        "сформировать календарный план.</p>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -959,7 +981,9 @@ def _show_generation_result() -> None:
 
     if st.session_state.get("calendar_generation_succeeded"):
         st.success("Календарный план готов")
-        for warning in st.session_state.get("calendar_warnings", ()):
+        for warning in _teacher_generation_warnings(
+            tuple(st.session_state.get("calendar_warnings", ()))
+        ):
             st.warning(warning)
 
     download = st.session_state.get("calendar_download")
@@ -1155,9 +1179,6 @@ def run_app() -> None:
             "выше и нажмите «Проверить документы» снова.</p>",
             unsafe_allow_html=True,
         )
-        if st.button("Заменить документы", key="replace_documents"):
-            _reset_analysis_state()
-            st.rerun()
 
         if validated_utp.filename.startswith("УТП из файла"):
             st.info("Учебно-тематический план найден внутри программы обучения.")
@@ -1167,7 +1188,6 @@ def run_app() -> None:
             program=program,
             schedule=schedule,
             matches=matches,
-            detail_warnings=tuple(detail_warnings),
             academic_year=academic_year,
             source_utp_name=validated_utp.filename,
             program_filename=(
