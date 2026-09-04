@@ -42,6 +42,8 @@ class ProgramData:
     age_min: int | None = None
     age_max: int | None = None
     attestation_statements: tuple[str, ...] = ()
+    academic_year: str | None = None
+    academic_year_mentions: tuple = ()
 
 
 def find_libreoffice() -> Path | None:
@@ -426,6 +428,7 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
     expected_knowledge, expected_skills = _structured_expected_outcomes(paragraphs)
     knowledge = tuple(dict.fromkeys([*year_knowledge, *expected_knowledge]))
     skills = tuple(dict.fromkeys([*year_skills, *expected_skills]))
+    academic_year, academic_year_mentions = _program_academic_year(text)
     duration_text = _first_match(
         text,
         (
@@ -466,6 +469,8 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
         age_min=age_min,
         age_max=age_max,
         attestation_statements=extract_attestation_statements(text),
+        academic_year=academic_year,
+        academic_year_mentions=academic_year_mentions,
     )
 
 
@@ -558,6 +563,17 @@ def study_year_label(
     if raw:
         return raw if "год" in raw.casefold() else f"{raw} год обучения"
     return None
+
+
+def _program_academic_year(text: str) -> tuple[str | None, tuple]:
+    from calendar_pedagoga.academic_year import (
+        extract_academic_year_mentions,
+        unique_academic_years,
+    )
+
+    mentions = extract_academic_year_mentions(text)
+    years = unique_academic_years(mentions)
+    return (years[0] if len(years) == 1 else None), mentions
 
 
 def parse_program(

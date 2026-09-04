@@ -72,6 +72,26 @@ def test_generated_table_marks_header_rows_for_word_repeat() -> None:
             assert marker is None, f"data row {index} must not repeat as header"
 
 
+def _key_docx_for_year(academic_year: str) -> bytes:
+    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
+    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
+    utp = parse_utp(utp_path)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
+    content = build_content_model(build_schedule(utp, academic_year), utp, program, utp_path.name)
+    resolved = resolve_lesson_content(build_lesson_content(content))
+    return generate_calendar_docx(
+        utp,
+        resolved,
+        select_calendar_template(),
+        academic_year,
+    )
+
+
+def _week_cells(content: bytes) -> list[str]:
+    table = Document(BytesIO(content)).tables[0]
+    return [row.cells[1].text for row in table.rows[2:]]
+
+
 def test_key_generation_produces_36_data_rows() -> None:
     content = _key_docx()
     document = Document(BytesIO(content))
@@ -82,6 +102,25 @@ def test_key_generation_produces_36_data_rows() -> None:
     table = document.tables[0]
     assert len(table.rows) == 38
     assert len(table.columns) >= 8
+
+
+def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:
+    year_2026 = _key_docx_for_year("2026–2027")
+    year_2027 = _key_docx_for_year("2027–2028")
+    doc_2026 = Document(BytesIO(year_2026))
+    doc_2027 = Document(BytesIO(year_2027))
+    assert doc_2026.paragraphs[2].text == "2026–2027 учебный год"
+    assert doc_2027.paragraphs[2].text == "2027–2028 учебный год"
+    weeks_2026 = _week_cells(year_2026)
+    weeks_2027 = _week_cells(year_2027)
+    assert any("01–06.09" in cell for cell in weeks_2026)
+    assert any("28–30.12" in cell for cell in weeks_2026)
+    assert any("11–17.01" in cell for cell in weeks_2026)
+    assert any("01–05.09" in cell for cell in weeks_2027)
+    assert all("28–30.12" not in cell for cell in weeks_2027)
+    assert all("11–17.01" not in cell for cell in weeks_2027)
+    assert not has_blocking_qa_issues(validate_calendar_docx(year_2026, expected_weeks=36))
+    assert not has_blocking_qa_issues(validate_calendar_docx(year_2027, expected_weeks=36))
 
 
 def test_key_generation_passes_structural_qa() -> None:

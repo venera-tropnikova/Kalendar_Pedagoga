@@ -108,6 +108,8 @@ def test_age_range_only_from_explicit_span() -> None:
 
 def test_academic_year_helpers() -> None:
     assert normalize_academic_year("план на 2026 - 2027 учебный") == "2026–2027"
+    assert normalize_academic_year("2026/27") == "2026–2027"
+    assert normalize_academic_year("2026–2028") is None
     assert academic_year_period("2026–2027") == (date(2026, 9, 1), date(2027, 8, 31))
     assert academic_year_period("2026") is None
 
@@ -338,6 +340,23 @@ def test_local_grid_gap_and_short_week_do_not_change_schedule() -> None:
         schedule=gap_schedule,
     )
     assert _verdicts(gap_report)["vacation_gap"] == "warning"
+
+
+def test_other_year_skips_approved_grid_and_vacation_profile() -> None:
+    schedule = build_schedule(parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"), "2027–2028")
+    report = evaluate_normative_mvp(
+        parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"),
+        None,
+        academic_year="2027–2028",
+        schedule=schedule,
+    )
+    verdicts = _verdicts(report)
+    assert verdicts["academic_grid"] == "warning"
+    assert verdicts["vacation_gap"] == "not_checked"
+    assert verdicts["academic_year_match"] == "warning"
+    assert "только утверждённая сетка 2026–2027" in " ".join(
+        item.teacher_text for item in report.checks if item.check_id == "academic_grid"
+    )
 
 
 def test_reference_key_and_tour_guides_expose_layers() -> None:

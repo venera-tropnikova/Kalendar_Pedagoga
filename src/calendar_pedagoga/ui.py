@@ -10,6 +10,18 @@ from pathlib import Path
 
 import streamlit as st
 
+from calendar_pedagoga.academic_year import (
+    APPROVED_ACADEMIC_YEAR,
+    AcademicYearResolution,
+    AcademicYearStatus,
+    academic_year_start,
+    default_academic_year_start,
+    format_academic_year,
+    mentions_from_program,
+    mentions_from_utp,
+    resolve_academic_year,
+    resolve_academic_year_from_documents,
+)
 from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
@@ -44,7 +56,7 @@ from calendar_pedagoga.upload_validation import (
     ValidatedUpload,
     validate_upload,
 )
-from calendar_pedagoga.parsing import UtpParseResult
+from calendar_pedagoga.parsing import UtpParseResult, parse_utp
 from calendar_pedagoga.matching import ContentMatch, MatchStatus, match_utp_to_program
 from calendar_pedagoga.program_parsing import (
     ProgramData,
@@ -57,10 +69,6 @@ from calendar_pedagoga.scheduling import (
     ScheduleValidationError,
     build_schedule,
 )
-
-
-ACADEMIC_YEARS: tuple[str, ...] = ("2026–2027",)
-SUPPORTED_ACADEMIC_YEAR = ACADEMIC_YEARS[0]
 
 
 def _generator_revision() -> str:
@@ -586,6 +594,71 @@ def _render_group_class_fields() -> tuple[str, str]:
     return group_number or "", class_name or ""
 
 
+def _peek_academic_year_resolution(
+    utp_file, program_file,
+) -> AcademicYearResolution:
+    utp_mentions: tuple = ()
+    program_mentions: tuple = ()
+    if utp_file is not None:
+        try:
+            utp_mentions = mentions_from_utp(parse_utp(utp_file.getvalue()))
+        except Exception:
+            utp_mentions = ()
+    if program_file is not None:
+        filename = getattr(program_file, "name", "") or ""
+        try:
+            if filename.lower().endswith(".docx"):
+                program = parse_program(program_file.getvalue(), filename)
+                program_mentions = mentions_from_program(program)
+                if utp_file is None:
+                    try:
+                        utp_mentions = mentions_from_utp(parse_utp(program_file.getvalue()))
+                    except Exception:
+                        pass
+        except Exception:
+            program_mentions = ()
+    return resolve_academic_year(utp_mentions, program_mentions)
+
+
+def _render_academic_year_input(utp_file, program_file) -> str:
+    resolution = _peek_academic_year_resolution(utp_file, program_file)
+    docs_fp = _inputs_fingerprint(utp_file, program_file)
+    suggested = academic_year_start(resolution.suggested)
+    if st.session_state.get("academic_year_docs_fp") != docs_fp:
+        st.session_state["academic_year_start"] = (
+            suggested if suggested is not None else default_academic_year_start()
+        )
+        st.session_state["academic_year_docs_fp"] = docs_fp
+    st.session_state.setdefault("academic_year_start", default_academic_year_start())
+
+    st.markdown(
+        '<div class="kp-step-card kp-step-card-year-header">'
+        '<p class="kp-step-title">4. Учебный год</p>'
+        '<p class="kp-step-note">Задаётся началом Y и показывается как Y–(Y+1)</p>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    start = int(
+        st.number_input(
+            "Начало учебного года",
+            min_value=1990,
+            max_value=2100,
+            step=1,
+            key="academic_year_start",
+            help="Учебный год хранится как начало Y и канон Y–(Y+1). Список лет не задаётся.",
+        )
+    )
+    academic_year = format_academic_year(start)
+    st.caption(f"Учебный год: {academic_year}")
+    if resolution.status is AcademicYearStatus.CONFLICT:
+        st.warning(resolution.message)
+    elif resolution.status in {AcademicYearStatus.AUTO, AcademicYearStatus.SINGLE}:
+        st.info(resolution.message)
+    elif resolution.status is AcademicYearStatus.MISSING and (utp_file or program_file):
+        st.caption(resolution.message)
+    return academic_year
+
+
 def _render_upload_screen() -> tuple[object | None, object | None, object | None, str, str, str]:
     _inject_landing_styles()
 
@@ -599,24 +672,8 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown(
-        '<div class="kp-step-card kp-step-card-year-header">'
-        '<p class="kp-step-title">1. Учебный год</p>'
-        '<p class="kp-step-note">Выберите год, на который составляется календарный план</p>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    academic_year = st.selectbox(
-        "Учебный год",
-        options=ACADEMIC_YEARS,
-        index=0,
-        help="Расписание поддерживает учебный год 2026–2027 (36 недель).",
-        label_visibility="collapsed",
-    )
-    group_number, class_name = _render_group_class_fields()
-
-    st.markdown(
         '<div class="kp-step-card">'
-        '<p class="kp-step-title">2. Программа обучения'
+        '<p class="kp-step-title">1. Программа обучения'
         '<span class="kp-badge kp-badge-required">обязательно</span></p>'
         '<p class="kp-step-note">Документ с содержанием программы и, если есть, '
         "учебно-тематическим планом</p>"
@@ -634,7 +691,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
     with utp_col:
         st.markdown(
             '<div class="kp-step-card">'
-            '<p class="kp-step-title">3. Учебно-тематический план'
+            '<p class="kp-step-title">2. Учебно-тематический план'
             '<span class="kp-badge kp-badge-optional">необязательно</span></p>'
             '<p class="kp-step-note">Загрузите отдельно, только если УТП находится в другом файле</p>'
             "</div>",
@@ -649,7 +706,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
     with template_col:
         st.markdown(
             '<div class="kp-step-card">'
-            '<p class="kp-step-title">4. Шаблон календарного плана'
+            '<p class="kp-step-title">3. Шаблон календарного плана'
             '<span class="kp-badge kp-badge-optional">необязательно</span></p>'
             '<p class="kp-step-note">Если есть образец вашей организации — загрузите его; иначе используем стандартный</p>'
             "</div>",
@@ -664,6 +721,9 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
                 "DOCX, до 10 МБ."
             ),
         )
+
+    academic_year = _render_academic_year_input(utp_file, program_file)
+    group_number, class_name = _render_group_class_fields()
 
     _render_normative_panel()
 
@@ -875,7 +935,13 @@ def _collapsed_pass_line(
     return passed[0].teacher_text
 
 
-def _render_normative_report(report: NormativeReport) -> None:
+def _short_week_note(academic_year: str) -> str:
+    if academic_year == APPROVED_ACADEMIC_YEAR:
+        return _SHORT_WEEK_NOTE
+    return "Короткие недели получили полную нагрузку. Даты приложение не сдвигает."
+
+
+def _render_normative_report(report: NormativeReport, *, academic_year: str) -> None:
     sections: list[str] = [
         '<div class="kp-normative-check">',
         '<p class="kp-normative-check-title">Нормативная и методическая проверка</p>',
@@ -916,7 +982,7 @@ def _render_normative_report(report: NormativeReport) -> None:
             sections.append("</ul>")
         if short_week_notes:
             sections.append(
-                f'<p class="kp-normative-note">{html.escape(_SHORT_WEEK_NOTE)}</p>'
+                f'<p class="kp-normative-note">{html.escape(_short_week_note(academic_year))}</p>'
             )
         if warnings:
             sections.append(
@@ -979,8 +1045,22 @@ def _render_teacher_analysis_screen(
             match.status is not MatchStatus.NOT_MATCHED for match in matches
         )
     summary_lines: list[str] = []
+    resolution = resolve_academic_year_from_documents(utp, program)
     if program_name:
         summary_lines.append(f"<p><strong>Программа:</strong> {html.escape(program_name)}</p>")
+    summary_lines.append(
+        f"<p><strong>Учебный год:</strong> {html.escape(academic_year)}</p>"
+    )
+    if (
+        resolution.status in {AcademicYearStatus.AUTO, AcademicYearStatus.SINGLE}
+        and resolution.suggested == academic_year
+        and resolution.sources
+    ):
+        source = resolution.sources[0]
+        summary_lines.append(
+            "<p>Источник учебного года: "
+            f"{html.escape(source.origin)} — «{html.escape(source.snippet)}»</p>"
+        )
     if study_year:
         summary_lines.append(f"<p><strong>Год обучения:</strong> {html.escape(study_year)}</p>")
     if student_age:
@@ -1010,6 +1090,8 @@ def _render_teacher_analysis_screen(
         '<div class="kp-results-summary">' + "".join(summary_lines) + "</div>",
         unsafe_allow_html=True,
     )
+    for warning in schedule.warnings:
+        st.info(warning)
     if after_summary is not None:
         after_summary()
     _render_normative_report(
@@ -1020,7 +1102,8 @@ def _render_teacher_analysis_screen(
             study_year_hints=(source_utp_name, program_filename),
             schedule=schedule,
             lessons=_lesson_views_for_normative(content_rows),
-        )
+        ),
+        academic_year=academic_year,
     )
 
     if program and matches and matched != total:

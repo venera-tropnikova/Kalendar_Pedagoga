@@ -162,6 +162,7 @@ def run_calendar_pipeline(
 
     warnings = sorted(
         {
+            *schedule.warnings,
             *(
                 warning
                 for row in content_rows

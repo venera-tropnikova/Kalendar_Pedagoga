@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-import re
 
+from calendar_pedagoga.academic_year import (
+    APPROVED_ACADEMIC_YEAR,
+    APPROVED_WEEK_COUNT,
+    academic_year_period,
+    normalize_academic_year,
+)
 from calendar_pedagoga.normative_registry import (
     NormativeDocument,
     NormativeRegistry,
@@ -72,8 +77,6 @@ class NormativeReport:
         return tuple(item for item in self.checks if item.layer is layer)
 
 
-APPROVED_ACADEMIC_YEAR = "2026–2027"
-APPROVED_WEEK_COUNT = 36
 VACATION_GAP_START = date(2026, 12, 31)
 VACATION_GAP_END = date(2027, 1, 10)
 
@@ -88,26 +91,6 @@ _PRACTICE_TYPE_MARKERS = (
     "проектно-практич",
     "наблюден",
 )
-
-
-def normalize_academic_year(value: str | None) -> str | None:
-    if not value:
-        return None
-    found = re.search(r"(\d{4})\s*[-–]\s*(\d{4})", value)
-    if found is None:
-        return None
-    return f"{found.group(1)}–{found.group(2)}"
-
-
-def academic_year_period(academic_year: str | None) -> tuple[date, date] | None:
-    normalized = normalize_academic_year(academic_year)
-    if normalized is None:
-        return None
-    start_year = int(normalized[:4])
-    end_year = int(normalized[5:])
-    if end_year != start_year + 1:
-        return None
-    return date(start_year, 9, 1), date(end_year, 8, 31)
 
 
 def _document_covers_period(document: NormativeDocument, start: date, end: date) -> bool:
@@ -605,7 +588,18 @@ def _check_academic_grid(
     )
 
 
-def _check_vacation_gap(schedule: ScheduleResult | None) -> NormativeCheck:
+def _check_vacation_gap(
+    schedule: ScheduleResult | None,
+    academic_year: str,
+) -> NormativeCheck:
+    selected = normalize_academic_year(academic_year)
+    if selected is not None and selected != APPROVED_ACADEMIC_YEAR:
+        return NormativeCheck(
+            "vacation_gap",
+            NormativeVerdict.NOT_CHECKED,
+            "Каникулы этого учебного года не заданы — разрыв 31.12–10.01 не сверялся.",
+            NormativeLayer.LOCAL,
+        )
     if schedule is None:
         return NormativeCheck(
             "vacation_gap",
@@ -720,7 +714,7 @@ def evaluate_normative_mvp(
         _check_registry(academic_year=academic_year, registry=source),
         _check_academic_year(utp, academic_year),
         _check_academic_grid(schedule, academic_year),
-        _check_vacation_gap(schedule),
+        _check_vacation_gap(schedule, academic_year),
         _check_short_week_full_load(utp, schedule),
         _check_age(utp, program),
         _check_duration(program),

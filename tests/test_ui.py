@@ -6,6 +6,7 @@ from unittest.mock import patch
 from docx import Document
 from streamlit.testing.v1 import AppTest
 
+from calendar_pedagoga.academic_year import default_academic_year_start, format_academic_year
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.ui import _teacher_generation_warnings
 
@@ -28,6 +29,14 @@ def _reference_named(*parts: str) -> Path:
 
 def _program_file() -> Path:
     return _reference_named("туристы-проводники", "1")
+
+
+def _utp_file() -> Path:
+    return _reference_named("утп", "ключ")
+
+
+def _default_year() -> str:
+    return format_academic_year(default_academic_year_start())
 
 
 def _template_file() -> Path:
@@ -82,8 +91,9 @@ def test_initial_screen_contains_required_controls() -> None:
         "УТП — учебно-тематический план, DOCX, до 10 МБ.",
         "Шаблон — только образец календарного плана организации, DOCX, до 10 МБ.",
     ]
-    assert app.selectbox[0].label == "Учебный год"
-    assert app.selectbox[0].options == ["2026–2027"]
+    assert app.number_input[0].label == "Начало учебного года"
+    assert int(app.number_input[0].value) == default_academic_year_start()
+    assert "2026–2027 / 2027–2028 / 2028–2029" not in _page_text(app)
     assert [item.label for item in app.text_input] == ["Группа №", "Класс"]
     assert all(item.value in {"", None} for item in app.text_input)
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
@@ -121,7 +131,7 @@ def test_clear_template_keeps_program() -> None:
     assert program.name in names
     assert template.name not in names
     assert len(_clear_buttons(app)) == 1
-    assert app.selectbox[0].value == "2026–2027"
+    assert int(app.number_input[0].value) == default_academic_year_start()
 
 
 def test_clear_program_resets_analysis_but_keeps_other_files() -> None:
@@ -144,7 +154,7 @@ def test_clear_program_resets_analysis_but_keeps_other_files() -> None:
     assert "Документы проверены" not in _page_text(app)
     assert app.session_state["upload_nonce_program"] == 1
     assert app.session_state["upload_nonce_template"] == template_nonce
-    assert app.selectbox[0].value == "2026–2027"
+    assert int(app.number_input[0].value) == default_academic_year_start()
 
 
 def test_clear_wrong_utp_keeps_program_and_template() -> None:
@@ -185,6 +195,26 @@ def test_cleared_slot_accepts_new_upload() -> None:
     assert len(_clear_buttons(app)) == 2
 
 
+def test_utp_year_is_suggested_after_upload() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 1, _utp_file())
+    app.run()
+
+    assert not app.exception
+    assert int(app.number_input[0].value) == 2026
+    notices = " ".join(
+        [
+            _page_text(app),
+            " ".join(item.value or "" for item in getattr(app, "info", [])),
+            " ".join(item.value or "" for item in getattr(app, "caption", [])),
+        ]
+    )
+    assert "2026–2027" in notices
+    assert "УТП" in notices
+    assert "2026–2027 / 2027–2028" not in notices
+
+
 def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
@@ -194,7 +224,9 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     text = _page_text(app)
     assert not app.exception
     assert "Документы проверены" in text
+    assert "Учебный год:</strong> " in text
     assert "Год обучения:</strong> 1 год обучения" in text
+    assert "Источник учебного года" not in text
     assert "Возраст:</strong> Не найдено" not in text
     assert "Нормативная и методическая проверка" in text
     assert "Документы закона" in text
@@ -271,7 +303,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert "ai_provider" not in pipeline.call_args.kwargs
     assert pipeline.call_args.kwargs["group_number"] == ""
     assert pipeline.call_args.kwargs["class_name"] == ""
-    assert pipeline.call_args.kwargs["academic_year"] == "2026–2027"
+    assert pipeline.call_args.kwargs["academic_year"] == _default_year()
     assert "1 г" in (pipeline.call_args.kwargs["program_filename"] or "")
     assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
     assert "Группа Нет" not in _page_text(app)

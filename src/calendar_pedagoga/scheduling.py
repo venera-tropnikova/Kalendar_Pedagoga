@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from calendar_pedagoga.academic_year import (
+    APPROVED_ACADEMIC_YEAR,
+    APPROVED_WEEK_COUNT,
+    missing_local_exceptions_warning,
+    normalize_academic_year,
+)
 from calendar_pedagoga.parsing import Topic, UtpParseResult
 
 
@@ -44,18 +50,22 @@ class ScheduledElement:
 class ScheduleResult:
     weeks: tuple[AcademicWeek, ...]
     elements: tuple[ScheduledElement, ...]
+    warnings: tuple[str, ...] = ()
 
 
 class ScheduleValidationError(ValueError):
     """Календарная сетка не прошла обязательные контрольные проверки."""
 
 
-def build_academic_weeks(
-    academic_year: str = "2026–2027", weeks_count: int = 36
-) -> tuple[AcademicWeek, ...]:
-    """Построить подтверждённую эталонами сетку 2026–2027."""
-    if academic_year.replace("-", "–") != "2026–2027" or weeks_count != 36:
-        raise ValueError("MVP поддерживает только 2026–2027 учебный год и 36 недель.")
+def _month_label(start: date, end: date) -> str:
+    if start.month == end.month:
+        return MONTHS[start.month]
+    return f"{MONTHS[start.month]} / {MONTHS[end.month]}"
+
+
+def _approved_2026_2027_ranges(weeks_count: int) -> list[tuple[date, date]]:
+    """Утверждённый профиль 2026–2027: короткие недели и зимний разрыв."""
+
     ranges: list[tuple[date, date]] = []
     start = date(2026, 9, 1)
     ranges.append((start, date(2026, 9, 6)))
@@ -68,16 +78,40 @@ def build_academic_weeks(
     while len(ranges) < weeks_count:
         ranges.append((start, start + timedelta(days=6)))
         start += timedelta(days=7)
+    return ranges
+
+
+def _basic_academic_week_ranges(start_year: int, weeks_count: int) -> list[tuple[date, date]]:
+    """36 календарных недель от 1 сентября без годовых каникул и переносов."""
+
+    start = date(start_year, 9, 1)
+    first_end = start + timedelta(days=6 - start.weekday())
+    ranges = [(start, first_end)]
+    cursor = first_end + timedelta(days=1)
+    while len(ranges) < weeks_count:
+        week_end = cursor + timedelta(days=6)
+        ranges.append((cursor, week_end))
+        cursor = week_end + timedelta(days=1)
+    return ranges
+
+
+def build_academic_weeks(
+    academic_year: str = "2026–2027", weeks_count: int = 36
+) -> tuple[AcademicWeek, ...]:
+    """Построить сетку: профиль 2026–2027 или базовые 36 недель другого года."""
+
+    canonical = normalize_academic_year(academic_year)
+    if canonical is None or weeks_count != APPROVED_WEEK_COUNT:
+        raise ValueError("Учебный год должен быть парой YYYY–YYYY+1, сетка — 36 недель.")
+    if canonical == APPROVED_ACADEMIC_YEAR:
+        ranges = _approved_2026_2027_ranges(weeks_count)
+    else:
+        ranges = _basic_academic_week_ranges(int(canonical[:4]), weeks_count)
     # Если учебная неделя пересекает границу месяцев, показываем оба месяца.
     # Такая строка получает собственную подпись (например, «Сентябрь / Октябрь»)
     # и поэтому не объединяется с соседними месячными блоками в DOCX.
-    def month_label(start: date, end: date) -> str:
-        if start.month == end.month:
-            return MONTHS[start.month]
-        return f"{MONTHS[start.month]} / {MONTHS[end.month]}"
-
     return tuple(
-        AcademicWeek(index, start, end, month_label(start, end), "2026–2027")
+        AcademicWeek(index, start, end, _month_label(start, end), canonical)
         for index, (start, end) in enumerate(ranges, start=1)
     )
 
@@ -128,7 +162,13 @@ def build_schedule(
                 if used == weekly_load:
                     week_index += 1
                     used = 0
-    result = ScheduleResult(weeks, tuple(elements))
+    canonical = normalize_academic_year(academic_year) or academic_year
+    warnings = (
+        ()
+        if canonical == APPROVED_ACADEMIC_YEAR
+        else (missing_local_exceptions_warning(canonical),)
+    )
+    result = ScheduleResult(weeks, tuple(elements), warnings)
     validate_schedule(result, utp)
     return result
 

@@ -73,6 +73,15 @@ def test_same_filename_changed_bytes_invalidates_download():
     assert "calendar_context" not in app.session_state
 
 
+def test_academic_year_change_invalidates_analysis_and_download():
+    app = _generated_app()
+    with patch.object(ui, "run_calendar_pipeline") as pipeline:
+        app.number_input[0].set_value(2027).run()
+        pipeline.assert_not_called()
+    _assert_invalidated(app)
+    assert "analysis_ready" not in app.session_state or not app.session_state["analysis_ready"]
+
+
 @pytest.mark.parametrize("field", [0, 1])
 def test_group_or_class_change_invalidates_but_keeps_analysis(field):
     app = _generated_app()

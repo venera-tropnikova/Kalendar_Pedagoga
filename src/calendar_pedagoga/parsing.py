@@ -39,6 +39,7 @@ class Section:
 class UtpMetadata:
     program_name: str | None = None
     academic_year: str | None = None
+    academic_year_mentions: tuple = ()
     study_year: str | None = None
     student_age: str | None = None
     hours_per_week: int | None = None
@@ -85,9 +86,14 @@ def _number_and_title(value: str) -> tuple[str | None, str]:
 
 def _metadata(paragraphs: list[str]) -> UtpMetadata:
     text = "\n".join(_clean(p) for p in paragraphs if _clean(p))
-    academic_year = _match(text, r"план\s+на\s+(\d{4}\s*[-–]\s*\d{4})\s+учебн")
-    if academic_year:
-        academic_year = re.sub(r"\s*[-–]\s*", "–", academic_year)
+    from calendar_pedagoga.academic_year import (
+        extract_academic_year_mentions,
+        unique_academic_years,
+    )
+
+    mentions = extract_academic_year_mentions(text)
+    years = unique_academic_years(mentions)
+    academic_year = years[0] if len(years) == 1 else None
     weekly = _match(text, r"Количество часов в неделю:\s*(\d+)")
     yearly = _match(text, r"Общее количество часов в год:\s*(\d+)")
     weeks = _match(text, r"(\d+)\s+учебн\w*\s+недел")
@@ -95,6 +101,7 @@ def _metadata(paragraphs: list[str]) -> UtpMetadata:
     return UtpMetadata(
         program_name=_match(text, r"программ(?:ой|е)\s+[«\"]([^»\"]+)[»\"]"),
         academic_year=academic_year,
+        academic_year_mentions=mentions,
         study_year=_match(text, r"Год обучения:\s*([^\n]+)"),
         student_age=_match(text, r"Возраст обучающихся:\s*([^\n]+)"),
         hours_per_week=int(weekly) if weekly else None,

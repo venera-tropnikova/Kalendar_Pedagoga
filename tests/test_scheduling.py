@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from calendar_pedagoga.parsing import parse_utp
-from calendar_pedagoga.scheduling import build_schedule
+from calendar_pedagoga.scheduling import build_academic_weeks, build_schedule
 
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
@@ -60,3 +60,11 @@ def test_cross_month_weeks_show_both_months() -> None:
 
     # Короткая декабрьская неделя не пересекает месяц.
     assert by_range["28–30.12"] == "Декабрь"
+
+
+def test_other_year_does_not_copy_2026_winter_gap() -> None:
+    approved = tuple((week.start, week.end) for week in build_academic_weeks("2026–2027"))
+    other = tuple((week.start, week.end) for week in build_academic_weeks("2027–2028"))
+    assert approved != other
+    assert approved[17][0].isoformat() == "2026-12-28"
+    assert all(week[0].year != 2026 for week in other)
