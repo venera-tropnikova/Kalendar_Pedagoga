@@ -6,6 +6,9 @@ from unittest.mock import patch
 from docx import Document
 from streamlit.testing.v1 import AppTest
 
+from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
+from calendar_pedagoga.ui import _teacher_generation_warnings
+
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
@@ -249,6 +252,9 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         content=b"generated-docx",
         warnings=(
             "Ширина таблицы не задана явно; возможны переносы на новые страницы.",
+            SLOT_CONTINUE_WARNING,
+            SLOT_PACK_WARNING,
+            "Неоднозначное соответствие для «Тема»: вариант А",
         ),
         ai_usage=None,
     )
@@ -276,3 +282,24 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert app.get("download_button")[0].label == "Скачать календарный план"
     assert "Ширина таблицы" not in _page_text(app)
     assert not any("Ширина таблицы" in (item.value or "") for item in app.warning)
+    assert not any("продолжение уже представленного" in (item.value or "") for item in app.warning)
+    assert not any("нескольких исходных практических" in (item.value or "") for item in app.warning)
+    assert any(
+        "Неоднозначное соответствие для «Тема»" in (item.value or "")
+        for item in app.warning
+    )
+    stored = app.session_state["calendar_warnings"]
+    assert SLOT_CONTINUE_WARNING in stored
+    assert SLOT_PACK_WARNING in stored
+
+
+def test_teacher_generation_warnings_hide_only_internal_slot_diagnostics() -> None:
+    visible = "Неоднозначное соответствие для «Тема»: вариант А"
+    assert _teacher_generation_warnings(
+        (
+            "Ширина таблицы не задана явно; возможны переносы на новые страницы.",
+            SLOT_CONTINUE_WARNING,
+            SLOT_PACK_WARNING,
+            visible,
+        )
+    ) == (visible,)

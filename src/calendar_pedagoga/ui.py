@@ -35,6 +35,7 @@ from calendar_pedagoga.organization_template import (
     select_calendar_template,
 )
 from calendar_pedagoga.pipeline import PipelineError, run_calendar_pipeline
+from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.resolve_utp import UtpResolutionError, resolve_utp
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
@@ -761,9 +762,18 @@ _TABLE_WIDTH_WARNING = (
 )
 
 
+_INTERNAL_SLOT_WARNINGS = frozenset(
+    {
+        _TABLE_WIDTH_WARNING,
+        SLOT_PACK_WARNING,
+        SLOT_CONTINUE_WARNING,
+    }
+)
+
+
 def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
-        warning for warning in warnings if warning != _TABLE_WIDTH_WARNING
+        warning for warning in warnings if warning not in _INTERNAL_SLOT_WARNINGS
     )
 
 
