@@ -191,13 +191,18 @@ def _replace_group_class_prefix(
 
 
 def _append_teacher_name_to_group_line(text: str, teacher_name: str | None) -> str:
-    name = (teacher_name or "").strip()
-    if not name or "группа" not in text.casefold():
+    if "группа" not in text.casefold():
         return text
-    match = _GROUP_CLASS_RE.search(text)
+    match = _GROUP_CLASS_RE.search(text.replace("\t", ""))
+    if match is None:
+        match = _GROUP_CLASS_RE.search(text)
     if match is None:
         return text
-    return f"{match.group(0)}\t{name}"
+    group = match.group(0)
+    name = (teacher_name or "").strip()
+    if name:
+        return f"\t{group}\t{name}"
+    return f"\t{group}"
 
 
 def _content_width_twips(document) -> int:
@@ -207,10 +212,11 @@ def _content_width_twips(document) -> int:
     )
 
 
-def _apply_right_teacher_tab(paragraph, document) -> None:
-    """Слева группа/класс, справа ФИО: один абзац и правая табуляция."""
+def _apply_group_teacher_tabs(paragraph, document) -> None:
+    """Группа/класс по центру, ФИО справа: один абзац, center tab + right tab."""
 
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    width = _content_width_twips(document)
     properties = paragraph._p.get_or_add_pPr()
     tabs = properties.find(qn("w:tabs"))
     if tabs is None:
@@ -218,10 +224,14 @@ def _apply_right_teacher_tab(paragraph, document) -> None:
         properties.append(tabs)
     for old in list(tabs.findall(qn("w:tab"))):
         tabs.remove(old)
-    tab = OxmlElement("w:tab")
-    tab.set(qn("w:val"), "right")
-    tab.set(qn("w:pos"), str(_content_width_twips(document)))
-    tabs.append(tab)
+    center = OxmlElement("w:tab")
+    center.set(qn("w:val"), "center")
+    center.set(qn("w:pos"), str(width // 2))
+    tabs.append(center)
+    right = OxmlElement("w:tab")
+    right.set(qn("w:val"), "right")
+    right.set(qn("w:pos"), str(width))
+    tabs.append(right)
 
 
 def _enable_cell_wrap(cell) -> None:
@@ -836,9 +846,10 @@ def _fill_organization_header(
         )
         if updated != original:
             _set_paragraph_text_keep_format(paragraph, updated)
-        name = (teacher_name or "").strip()
-        if name and "группа" in original.casefold() and name in paragraph.text:
-            _apply_right_teacher_tab(paragraph, document)
+        if "группа" in paragraph.text.casefold() and _GROUP_CLASS_RE.search(
+            paragraph.text.replace("\t", "")
+        ):
+            _apply_group_teacher_tabs(paragraph, document)
 
 
 def _write_document_header(

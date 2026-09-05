@@ -457,7 +457,7 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
         group_number="3",
         class_name="5А",
     )
-    assert filled_group == "Группа № 3 (Класс 5А)"
+    assert filled_group == "\tГруппа № 3 (Класс 5А)"
     empty_group = _fill_organization_header_paragraph(
         "Группа № ___________ (Класс _________)",
         tourists,
@@ -466,7 +466,7 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
         group_number="",
         class_name="",
     )
-    assert empty_group == "Группа № ___________ (Класс _________)"
+    assert empty_group == "\tГруппа № ___________ (Класс _________)"
     assert "Нет" not in empty_group
 
     empty_teacher = _fill_organization_header_paragraph(
@@ -478,7 +478,7 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
         class_name="",
         teacher_name="",
     )
-    assert empty_teacher == "Группа № ___________ (Класс _________)"
+    assert empty_teacher == "\tГруппа № ___________ (Класс _________)"
 
     filled_teacher = _fill_organization_header_paragraph(
         "Группа № ___________ (Класс _________)",
@@ -489,7 +489,7 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
         class_name="",
         teacher_name="Иванов И.И.",
     )
-    assert filled_teacher == "Группа № ___________ (Класс _________)\tИванов И.И."
+    assert filled_teacher == "\tГруппа № ___________ (Класс _________)\tИванов И.И."
 
     preserved_tail = _fill_organization_header_paragraph(
         "Группа № ___________ (Класс _________)                                            Саранцева И.М.",
@@ -500,8 +500,8 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
         class_name="5А",
         teacher_name="",
     )
-    assert preserved_tail.startswith("Группа № 3 (Класс 5А)")
-    assert "Саранцева И.М." in preserved_tail
+    assert preserved_tail == "\tГруппа № 3 (Класс 5А)"
+    assert "Саранцева И.М." not in preserved_tail
 
 
 def test_standard_header_does_not_add_teacher_name_line() -> None:
@@ -552,7 +552,7 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
     assert "Туристы-проводники" in header_texts[1]
     assert "1 год обучения" in header_texts[1]
     assert "72" in header_texts[1]
-    assert header_texts[2] == "Группа № ___________ (Класс _________)"
+    assert header_texts[2] == "\tГруппа № ___________ (Класс _________)"
     assert all("учебный год" not in text for text in header_texts)
 
     for paragraph in document.paragraphs[:3]:
@@ -638,14 +638,12 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
         uses_organization_template=True,
     )
     assert len(empty.paragraphs) == len(source.paragraphs)
-    assert empty.paragraphs[2].text == "Группа № ___________ (Класс _________)"
-    assert empty.paragraphs[2].alignment == source.paragraphs[2].alignment
+    assert empty.paragraphs[2].text == "\tГруппа № ___________ (Класс _________)"
+    assert empty.paragraphs[2].alignment == 0  # LEFT
     assert all("учебный год" not in paragraph.text for paragraph in empty.paragraphs[:4])
-    empty_tabs = empty.paragraphs[2]._p.find(qn("w:pPr"))
-    empty_tab_list = (
-        empty_tabs.find(qn("w:tabs")) if empty_tabs is not None else None
-    )
-    assert empty_tab_list is None or not empty_tab_list.findall(qn("w:tab"))
+    empty_tabs = empty.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:tabs"))
+    empty_vals = [tab.get(qn("w:val")) for tab in empty_tabs.findall(qn("w:tab"))]
+    assert empty_vals == ["center", "right"]
 
     filled = Document(str(template_path))
     _write_document_header(
@@ -659,13 +657,11 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
     )
     assert len(filled.paragraphs) == len(source.paragraphs)
     group = filled.paragraphs[2]
-    assert group.text == "Группа № ___________ (Класс _________)\tИванов И.И."
+    assert group.text == "\tГруппа № ___________ (Класс _________)\tИванов И.И."
     assert group.alignment == 0  # LEFT
     tabs = group._p.find(qn("w:pPr")).find(qn("w:tabs"))
     assert tabs is not None
-    right_tabs = [
-        tab for tab in tabs.findall(qn("w:tab")) if tab.get(qn("w:val")) == "right"
-    ]
-    assert len(right_tabs) == 1
+    tab_vals = [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
+    assert tab_vals == ["center", "right"]
     assert all(paragraph.text.strip() != "Иванов И.И." for paragraph in filled.paragraphs)
     assert all("учебный год" not in paragraph.text for paragraph in filled.paragraphs[:4])
