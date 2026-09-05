@@ -13,7 +13,7 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm
+from docx.shared import Cm, Pt
 
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
 from calendar_pedagoga.lesson_display import (
@@ -29,6 +29,8 @@ from calendar_pedagoga.program_parsing import infer_study_year_number
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
+STANDARD_TABLE_FONT_FAMILY = "Times New Roman"
+STANDARD_GROUP_SPACE_AFTER_PT = 6
 _MONTH_CELL_MARGIN_DXA = 40
 PRINT_TOP_MARGIN_CM = 1.0
 
@@ -320,6 +322,38 @@ def _without_bold(properties):
     cleaned.insert(0, bold_cs)
     cleaned.insert(0, bold)
     return cleaned
+
+
+def _set_run_font_family(run, family: str) -> None:
+    """Явно закрепить одно семейство шрифта для всех наборов символов OOXML."""
+
+    run.font.name = family
+    run_properties = run._r.get_or_add_rPr()
+    fonts = run_properties.get_or_add_rFonts()
+    for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+        fonts.set(qn(f"w:{attribute}"), family)
+    for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        qualified = qn(f"w:{attribute}")
+        if qualified in fonts.attrib:
+            del fonts.attrib[qualified]
+
+
+def _apply_standard_table_font(table) -> None:
+    """Унифицировать шрифт стандартной таблицы, сохранив размер и начертание."""
+
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    _set_run_font_family(run, STANDARD_TABLE_FONT_FAMILY)
+
+
+def _apply_standard_header_font(document) -> None:
+    """Закрепить шрифт создаваемой шапки standard-template без смены начертания."""
+
+    for paragraph in document.paragraphs:
+        for run in paragraph.runs:
+            _set_run_font_family(run, STANDARD_TABLE_FONT_FAMILY)
 
 
 def _set_paragraph_text_keep_format(paragraph, text: str, run_properties=None) -> None:
@@ -877,7 +911,7 @@ def _write_document_header(
         return
 
     if document.paragraphs:
-        document.paragraphs[0].text = "Календарный план"
+        _set_paragraph_text_keep_format(document.paragraphs[0], "Календарный план")
     program_line = _program_header_line(
         utp,
         program_title=program_title,
@@ -885,19 +919,37 @@ def _write_document_header(
     )
     year_line = f"{academic_year} учебный год"
     group_line = _group_class_line(group_number, class_name)
+    teacher = (teacher_name or "").strip()
+    group_teacher_line = f"\t{group_line}\t{teacher}" if teacher else group_line
+    group_paragraph = None
     if len(document.paragraphs) > 3:
-        document.paragraphs[1].text = program_line
-        document.paragraphs[2].text = year_line
-        document.paragraphs[3].text = group_line
+        _set_paragraph_text_keep_format(document.paragraphs[1], program_line)
+        _set_paragraph_text_keep_format(document.paragraphs[2], year_line)
+        group_paragraph = document.paragraphs[3]
+        _set_paragraph_text_keep_format(group_paragraph, group_teacher_line)
     elif len(document.paragraphs) > 2:
-        document.paragraphs[1].text = f"{program_line}\n{year_line}"
-        document.paragraphs[2].text = group_line
+        _set_paragraph_text_keep_format(
+            document.paragraphs[1], f"{program_line}\n{year_line}"
+        )
+        group_paragraph = document.paragraphs[2]
+        _set_paragraph_text_keep_format(group_paragraph, group_teacher_line)
     elif len(document.paragraphs) > 1:
-        document.paragraphs[1].text = f"{program_line}\n{year_line}\n{group_line}"
+        _set_paragraph_text_keep_format(
+            document.paragraphs[1],
+            f"{program_line}\n{year_line}\n{group_teacher_line}",
+        )
+        group_paragraph = document.paragraphs[1]
+    if teacher and group_paragraph is not None:
+        _apply_group_teacher_tabs(group_paragraph, document)
+    if group_paragraph is not None:
+        group_paragraph.paragraph_format.space_after = Pt(
+            STANDARD_GROUP_SPACE_AFTER_PT
+        )
     for paragraph in document.paragraphs:
         blob = paragraph.text.casefold()
         if "название программы" in blob or "г.об" in blob:
-            paragraph.text = program_line
+            _set_paragraph_text_keep_format(paragraph, program_line)
+    _apply_standard_header_font(document)
 
 
 def _populate_calendar_table(
@@ -961,6 +1013,9 @@ def _populate_calendar_table(
             assessment_method=lesson.assessment_method,
         )
         _prevent_row_split(table.rows[index + 2])
+
+    if not uses_organization_template:
+        _apply_standard_table_font(table)
 
     months = tuple(lesson.source.source.month for lesson in rows)
     return table, columns, months

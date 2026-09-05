@@ -5,6 +5,8 @@ from functools import lru_cache
 import pytest
 from calendar_pedagoga.docx_generation import (
     PRINT_TOP_MARGIN_CM,
+    STANDARD_GROUP_SPACE_AFTER_PT,
+    STANDARD_TABLE_FONT_FAMILY,
     STANDARD_TEMPLATE_PATH,
     _fill_organization_header_paragraph,
     _group_class_line,
@@ -70,6 +72,47 @@ def test_generated_table_marks_header_rows_for_word_repeat() -> None:
             assert not marker.attrib, f"header row {index} must be <w:tblHeader/>"
         else:
             assert marker is None, f"data row {index} must not repeat as header"
+
+
+def _explicit_run_fonts(run) -> tuple[str | None, ...]:
+    run_properties = run._r.find(qn("w:rPr"))
+    fonts = run_properties.find(qn("w:rFonts")) if run_properties is not None else None
+    if fonts is None:
+        return (None, None, None, None)
+    return tuple(
+        fonts.get(qn(f"w:{attribute}"))
+        for attribute in ("ascii", "hAnsi", "eastAsia", "cs")
+    )
+
+
+def test_standard_table_uses_one_explicit_font_family() -> None:
+    table = Document(BytesIO(_key_docx())).tables[0]
+    header_runs = [
+        run
+        for row in table.rows[:2]
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text.strip()
+    ]
+    body_runs = [
+        run
+        for row in table.rows[2:]
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text.strip()
+    ]
+    expected = (STANDARD_TABLE_FONT_FAMILY,) * 4
+
+    assert header_runs
+    assert body_runs
+    assert all(_explicit_run_fonts(run) == expected for run in header_runs)
+    assert all(_explicit_run_fonts(run) == expected for run in body_runs)
+    assert all(run.bold is True for run in header_runs)
+    assert all(run.bold is False for run in body_runs)
+    assert {run.font.size.pt for run in header_runs if run.font.size} == {12.0}
+    assert {run.font.size.pt for run in body_runs if run.font.size} == {12.0}
 
 
 def _key_docx_for_year(academic_year: str) -> bytes:
@@ -504,7 +547,7 @@ def test_organization_header_replaces_values_without_academic_year_line() -> Non
     assert "Саранцева И.М." not in preserved_tail
 
 
-def test_standard_header_does_not_add_teacher_name_line() -> None:
+def test_standard_header_adds_teacher_name_to_group_line() -> None:
     document = Document(str(STANDARD_TEMPLATE_PATH))
     source_count = len(document.paragraphs)
     utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
@@ -519,8 +562,79 @@ def test_standard_header_does_not_add_teacher_name_line() -> None:
     )
     assert len(document.paragraphs) == source_count
     assert document.paragraphs[2].text == "2026–2027 учебный год"
+    group = document.paragraphs[3]
+    assert group.text == "\tГруппа № 5 (Класс 7А)\tИванов И.И."
+    assert group.alignment == 0  # LEFT: позицию задают center/right tabs
+    assert group.paragraph_format.space_after.pt == STANDARD_GROUP_SPACE_AFTER_PT
+    tabs = group._p.find(qn("w:pPr")).find(qn("w:tabs"))
+    assert tabs is not None
+    assert [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))] == [
+        "center",
+        "right",
+    ]
+    assert all(paragraph.text.strip() != "Иванов И.И." for paragraph in document.paragraphs)
+
+
+def test_standard_header_keeps_empty_teacher_behavior() -> None:
+    document = Document(str(STANDARD_TEMPLATE_PATH))
+    source_count = len(document.paragraphs)
+    source_alignment = document.paragraphs[3].alignment
+    source_properties = document.paragraphs[3]._p.find(qn("w:pPr"))
+    source_tabs = source_properties.find(qn("w:tabs")) if source_properties is not None else None
+    source_tab_values = (
+        [tab.get(qn("w:val")) for tab in source_tabs.findall(qn("w:tab"))]
+        if source_tabs is not None
+        else []
+    )
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    _write_document_header(
+        document,
+        utp,
+        academic_year="2026–2027",
+        program_title="КЛЮЧ",
+        group_number="5",
+        class_name="7А",
+        teacher_name="",
+    )
+    assert len(document.paragraphs) == source_count
     assert document.paragraphs[3].text == "Группа № 5 (Класс 7А)"
-    assert all("Иванов" not in paragraph.text for paragraph in document.paragraphs)
+    assert document.paragraphs[3].alignment == source_alignment
+    assert (
+        document.paragraphs[3].paragraph_format.space_after.pt
+        == STANDARD_GROUP_SPACE_AFTER_PT
+    )
+    paragraph_properties = document.paragraphs[3]._p.find(qn("w:pPr"))
+    tabs = paragraph_properties.find(qn("w:tabs")) if paragraph_properties is not None else None
+    tab_values = (
+        [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
+        if tabs is not None
+        else []
+    )
+    assert tab_values == source_tab_values
+
+
+def test_standard_header_uses_explicit_times_new_roman() -> None:
+    document = Document(str(STANDARD_TEMPLATE_PATH))
+    utp = parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx")
+    _write_document_header(
+        document,
+        utp,
+        academic_year="2026–2027",
+        program_title="КЛЮЧ",
+        group_number="5",
+        class_name="7А",
+        teacher_name="Иванов И.И.",
+    )
+    expected = (STANDARD_TABLE_FONT_FAMILY,) * 4
+    runs = [
+        run
+        for paragraph in document.paragraphs[:4]
+        for run in paragraph.runs
+        if run.text.strip()
+    ]
+    assert runs
+    assert all(_explicit_run_fonts(run) == expected for run in runs)
+    assert {run.font.size.pt for run in runs if run.font.size} == {12.0}
 
 
 def test_organization_template_keeps_visual_header_and_times_new_roman() -> None:
