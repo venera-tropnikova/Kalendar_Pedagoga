@@ -152,4 +152,8 @@ def test_changed_code_cannot_regenerate_with_old_imports():
         assert not app.exception
         assert not app.get("download_button")
         assert not any(b.label == "Сформировать календарный план" for b in app.button)
-        assert any("Перезапустите" in item.value for item in app.warning)
+        assert not any(
+            "Код приложения обновлён" in (item.value or "")
+            or "Перезапустите приложение" in (item.value or "")
+            for item in (*app.warning, *app.info)
+        )
