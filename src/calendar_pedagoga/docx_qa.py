@@ -585,6 +585,129 @@ def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
         shutil.rmtree(temp_path, ignore_errors=True)
 
 
+@dataclass(frozen=True)
+class DataRowPageSpan:
+    """Physical span; split_safe requires positive rendered-cell evidence."""
+    start_page: int
+    end_page: int
+    split_safe: bool = False
+
+
+def _data_row_page_spans_pdf(
+    content: bytes, pdf: bytes, total_rows: int,
+) -> tuple[DataRowPageSpan, ...] | None:
+    """Match complete cell contents across PDF table fragments, never week numbers alone."""
+    import pymupdf
+
+    source = Document(BytesIO(content)).tables[0]
+
+    def normalized(text):
+        return "".join(char for char in (text or "").casefold() if char.isalnum())
+
+    def identifier(text):
+        # Punctuation belongs to dates/identifiers and must not disappear.
+        return re.sub(r"\s+", "", text or "")
+
+    expected = []
+    identifiers = []
+    protected_columns = []
+    merged_rows = []
+    for row in source.rows[2:]:
+        seen = set()
+        cells = []
+        for cell in row.cells:
+            cells.append("" if cell._tc in seen else normalized(cell.text))
+            seen.add(cell._tc)
+        expected.append(cells)
+        identifiers.append([identifier(cell.text) for cell in row.cells])
+        protected_columns.append({0, 1} | {
+            index for index, cell in enumerate(row.cells)
+            if cell._tc.xpath('./w:tcPr/w:textDirection | ./w:tcPr/w:vMerge')
+        })
+        merged_rows.append(bool(row._tr.xpath('.//w:vMerge')))
+    if len(expected) != total_rows:
+        return None
+    spans = []
+    accumulated = [""] * len(source.columns)
+    start_page = None
+    complete_identifiers = set()
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        for page_number, page in enumerate(document, start=1):
+            tables = [table for table in page.find_tables().tables
+                      if table.col_count == len(source.columns)]
+            if len(tables) != 1:
+                return None
+            for fragment in tables[0].extract()[2:]:
+                if len(spans) >= total_rows:
+                    return None
+                target = expected[len(spans)]
+                protected = protected_columns[len(spans)]
+                start_page = start_page or page_number
+                # Rotated cells can be clipped or attached to the next PDF row.
+                # Match row identity by the unchanged narrative cells instead.
+                for column in protected:
+                    if identifier(fragment[column]) == identifiers[len(spans)][column]:
+                        complete_identifiers.add(column)
+                body_columns = set(range(len(target))) - protected
+                if not any(target[column] for column in body_columns):
+                    return None
+                for column in body_columns:
+                    accumulated[column] += normalized(fragment[column])
+                    if not target[column].startswith(accumulated[column]):
+                        return None
+                if all(accumulated[column] == target[column] for column in body_columns):
+                    safe = (protected <= complete_identifiers and not merged_rows[len(spans)])
+                    spans.append(DataRowPageSpan(start_page, page_number, safe))
+                    accumulated = [""] * len(target)
+                    start_page = None
+                    complete_identifiers = set()
+    return tuple(spans) if len(spans) == total_rows and start_page is None else None
+
+
+def detect_data_row_page_spans(
+    content: bytes, *, total_rows: int,
+) -> tuple[DataRowPageSpan, ...] | None:
+    """Measure every data row, including both ends of rows crossing a page."""
+    if total_rows == 0:
+        return ()
+
+    # A rendered PDF proves identifier visibility as well as page boundaries.
+    pdf = _docx_to_pdf_bytes(content)
+    if pdf is not None:
+        try:
+            spans = _data_row_page_spans_pdf(content, pdf, total_rows)
+            if spans is not None:
+                return spans
+        except Exception:
+            logger.debug("PDF row-span measurement unavailable", exc_info=False)
+
+    def collect(_word, document):
+        document.Repaginate()
+        pages = [[] for _ in range(total_rows)]
+        for cell in document.Tables(1).Range.Cells:
+            index = int(cell.RowIndex) - 3
+            if not 0 <= index < total_rows or int(cell.ColumnIndex) == 1:
+                continue
+            first = cell.Range.Duplicate
+            last = cell.Range.Duplicate
+            first.Collapse(1)  # wdCollapseStart
+            last.End = max(last.Start, last.End - 1)  # exclude end-of-cell marker
+            last.Collapse(0)  # wdCollapseEnd
+            pages[index].extend((int(first.Information(_WD_ACTIVE_END_PAGE_NUMBER)),
+                                 int(last.Information(_WD_ACTIVE_END_PAGE_NUMBER))))
+        if any(not values for values in pages):
+            return None
+        return tuple(DataRowPageSpan(min(values), max(values)) for values in pages)
+
+    try:
+        spans = _run_with_word_document(content, collect)
+        if spans is not None:
+            return spans
+    except Exception:
+        logger.debug("Word row-span measurement unavailable", exc_info=False)
+    return None
+
+
 def detect_data_row_indices_by_page(
     content: bytes,
     *,

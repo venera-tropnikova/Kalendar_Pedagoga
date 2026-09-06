@@ -7,6 +7,7 @@ import html
 import hashlib
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from io import BytesIO
 from zipfile import BadZipFile
 from datetime import date, timedelta
@@ -54,7 +55,15 @@ from calendar_pedagoga.organization_template import (
     select_calendar_template,
 )
 from calendar_pedagoga.pipeline import PipelineError, run_calendar_pipeline
-from calendar_pedagoga.docx_generation import _columns_for_table
+from calendar_pedagoga.docx_generation import (
+    _allow_row_split,
+    _columns_for_table,
+    _merge_month_cells_by_page_segments,
+    _prevent_row_split,
+    _remove_vmerge,
+    _save_document,
+)
+from calendar_pedagoga.docx_qa import detect_data_row_page_spans
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.resolve_utp import UtpResolutionError, resolve_utp
 from calendar_pedagoga.transient_documents import TransientDocumentSession
@@ -654,6 +663,8 @@ def _monthly_plan_docx(
 ) -> bytes:
     """Выделить строки месяца из готового годового DOCX без пересчёта."""
 
+    from docx.table import _Cell
+
     selected_weeks = {
         week.number for week in _month_weeks(academic_year, year, month)
     }
@@ -666,22 +677,66 @@ def _monthly_plan_docx(
     table = document.tables[0]
     columns = _columns_for_table(table)
     kept_rows = 0
-    for row in list(table.rows[2:]):
-        first_line = row.cells[columns.week].text.splitlines()[:1]
+    # Resolve inherited identifiers before deleting a possible merge anchor.
+    original_rows = [
+        (row, deepcopy(row.cells[columns.month]._tc), deepcopy(row.cells[columns.week]._tc))
+        for row in table.rows[2:]
+    ]
+    months = []
+    for row, month_cell, week_cell in original_rows:
+        first_line = _Cell(week_cell, row).text.splitlines()[:1]
         try:
             week_number = int(first_line[0].strip()) if first_line else None
         except ValueError:
             week_number = None
         if week_number in selected_weeks:
+            for column, restored in ((columns.month, month_cell), (columns.week, week_cell)):
+                _remove_vmerge(_Cell(restored, row))
+                row._tr.replace(row._tr.tc_lst[column], restored)
+            months.append(row.cells[columns.month].text)
+            _allow_row_split(row)
             kept_rows += 1
             continue
         table._tbl.remove(row._tr)
 
     if kept_rows == 0:
         raise ValueError("В готовом календарном плане нет строк выбранного месяца.")
-    output = BytesIO()
-    document.save(output)
-    return output.getvalue()
+    unmerged = _save_document(document)
+
+    def fallback():
+        # Missing/unstable pagination is not permission to reuse annual merges.
+        for row in table.rows[2:]:
+            _prevent_row_split(row)
+        return _save_document(document)
+
+    spans = detect_data_row_page_spans(unmerged, total_rows=kept_rows)
+    keep_together = set()
+    for _ in range(kept_rows + 2):
+        if not spans:
+            return fallback()
+        pages = {}
+        for index, span in enumerate(spans):
+            if span.start_page == span.end_page:
+                pages.setdefault(span.start_page, []).append(index)
+            elif not span.split_safe:
+                keep_together.add(index)
+        candidate = Document(BytesIO(unmerged))
+        candidate_table = candidate.tables[0]
+        for index in keep_together | {index for indices in pages.values() for index in indices}:
+            _prevent_row_split(candidate_table.rows[index + 2])
+        # Week/date cells stay independent; never inherit a cross-row merge.
+        _merge_month_cells_by_page_segments(
+            candidate_table, columns, tuple(months),
+            tuple(tuple(indices) for indices in pages.values()),
+        )
+        result = _save_document(candidate)
+        detected = detect_data_row_page_spans(result, total_rows=kept_rows)
+        if detected == spans:
+            if any(span.start_page != span.end_page and not span.split_safe for span in detected):
+                return fallback()
+            return result
+        spans = detected
+    return fallback()
 
 
 def _adjacent_academic_month(

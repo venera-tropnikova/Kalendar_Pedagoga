@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from io import BytesIO
+from math import ceil
 from pathlib import Path
 import re
 
@@ -62,6 +63,102 @@ def _prevent_row_split(row) -> None:
     tr_pr = row._tr.get_or_add_trPr()
     if tr_pr.find(qn("w:cantSplit")) is None:
         tr_pr.append(OxmlElement("w:cantSplit"))
+
+
+def _allow_row_split(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    for marker in list(tr_pr.findall(qn("w:cantSplit"))):
+        tr_pr.remove(marker)
+    for marker in row._tr.xpath(".//w:pPr/w:pageBreakBefore"):
+        marker.getparent().remove(marker)
+
+
+def _protect_vertical_cell_height(table) -> None:
+    """Give rotated identifiers an intrinsic minimum, never an exact height.
+
+    Word's automatic row sizing can ignore the inline extent of rotated text.
+    Measure explicit lines without wrapping: after rotation their width is the
+    required row height. Paragraph/line spacing lies on the perpendicular axis;
+    retaining an unwrapped line prevents Word from adding a clipped third line.
+    """
+    import pymupdf
+
+    table_styles = []
+    style = table.style
+    while style is not None:
+        table_styles.append(style.element)
+        style = style.base_style
+    defaults = table.part.document.styles.element
+
+    def value(elements, path, attribute, default):
+        for element in elements:
+            if element is not None:
+                matches = element.xpath(path)
+                if matches and matches[0].get(qn('w:' + attribute)) is not None:
+                    return matches[0].get(qn('w:' + attribute))
+        return default
+
+    fonts = {}
+    for row in table.rows[2:]:
+        minimum = 0.0
+        for cell in row.cells:
+            direction = value([cell._tc], './w:tcPr/w:textDirection', 'val', '')
+            if direction not in ('btLr', 'tbRl') or not cell.text.strip():
+                continue
+            margins = {}
+            for side in ('left', 'right', 'top', 'bottom'):
+                inherited = value([table._tbl] + table_styles,
+                                  './w:tblPr/w:tblCellMar/w:' + side, 'w', '0')
+                margins[side] = float(value([cell._tc],
+                    './w:tcPr/w:tcMar/w:' + side, 'w', inherited)) / 20
+            for paragraph in cell.paragraphs:
+                styles = []
+                style = paragraph.style
+                while style is not None:
+                    styles.append(style.element)
+                    style = style.base_style
+                inherited = styles + table_styles
+                line_width = widest = largest = 0.0
+                for run in paragraph.runs:
+                    run_styles = []
+                    style = run.style
+                    while style is not None:
+                        run_styles.append(style.element)
+                        style = style.base_style
+                    sources = [run._r] + run_styles + inherited
+                    default_size = value([defaults], './w:docDefaults/w:rPrDefault/w:rPr/w:sz', 'val', '24')
+                    size = float(value(sources, './w:rPr/w:sz', 'val', default_size)) / 2
+                    family = value(sources, './w:rPr/w:rFonts', 'ascii', 'Times New Roman').lower()
+                    bold = value(sources, './w:rPr/w:b', 'val', '0') not in ('0', 'false', 'off')
+                    # MuPDF supplies portable serif/sans metrics and Unicode
+                    # fallback glyphs; no installed desktop font is required.
+                    face = ('hebo' if bold else 'helv') if any(
+                        name in family for name in ('arial', 'calibri', 'sans')) else ('tibo' if bold else 'tiro')
+                    if face not in fonts:
+                        fonts[face] = pymupdf.Font(face)
+                    largest = max(largest, size)
+                    for index, text in enumerate(run.text.replace('\r', '\n').split('\n')):
+                        if index:
+                            widest = max(widest, line_width)
+                            line_width = 0
+                        line_width += fonts[face].text_length(text, fontsize=size)
+                widest = max(widest, line_width)
+                # Include indents in the rotated inline axis. Line/paragraph
+                # spacing is not added to this axis; it is preserved unchanged.
+                indents = sum(float(value([paragraph._p] + inherited,
+                    './w:pPr/w:ind', side, '0')) / 20 for side in ('left', 'right'))
+                # A small font-relative allowance covers glyph overhang and
+                # renderer rounding, in addition to the inherited cell padding.
+                minimum = max(minimum, widest + indents + margins['left'] +
+                              margins['right'] + margins['top'] + margins['bottom'] + largest / 4)
+        if minimum:
+            properties = row._tr.get_or_add_trPr()
+            height = properties.find(qn('w:trHeight'))
+            if height is None:
+                height = OxmlElement('w:trHeight')
+                properties.append(height)
+            height.set(qn('w:val'), str(max(ceil(minimum * 20), int(height.get(qn('w:val'), '0')))))
+            height.set(qn('w:hRule'), 'atLeast')
 
 
 def _repeat_table_header_rows(table, header_row_count: int = 2) -> None:
@@ -666,8 +763,8 @@ def _merge_month_cell_group(
 ) -> None:
     """Объединить месяц внутри одного сегмента страницы через w:vMerge.
 
-    Merge не пересекает границы страниц: сегменты считаются заранее, а на
-    старте каждой новой страницы ставится pageBreakBefore. Поэтому:
+    Сегменты включают только целые строки одной измеренной страницы;
+    после merge границы проверяются повторным рендером. Поэтому:
     - одинаковые месяцы сливаются в один блок на странице;
     - переходная неделя («Сентябрь / Октябрь») остаётся отдельной строкой;
     - при продолжении месяца на новом листе подпись появляется снова;
@@ -765,7 +862,8 @@ def _merge_month_cells_by_page_segments(
         group_start = page_rows[0]
         for index in range(1, len(page_rows)):
             row_index = page_rows[index]
-            if months[row_index] != months[group_start]:
+            if (months[row_index] != months[group_start]
+                    or row_index != page_rows[index - 1] + 1):
                 group_rows = table.rows[2 + group_start : 2 + page_rows[index - 1] + 1]
                 _merge_month_cell_group(group_rows, columns, months[group_start])
                 group_start = row_index
@@ -1012,10 +1110,12 @@ def _populate_calendar_table(
             planned_result=lesson.planned_result,
             assessment_method=lesson.assessment_method,
         )
-        _prevent_row_split(table.rows[index + 2])
+        _allow_row_split(table.rows[index + 2])
 
     if not uses_organization_template:
         _apply_standard_table_font(table)
+
+    _protect_vertical_cell_height(table)
 
     months = tuple(lesson.source.source.month for lesson in rows)
     return table, columns, months
@@ -1033,6 +1133,7 @@ def _merge_month_cells_for_pages(
     rows: tuple[ResolvedLessonRow, ...],
     rows_by_page: tuple[tuple[int, ...], ...],
     *,
+    keep_together: frozenset[int] = frozenset(),
     academic_year: str,
     program_title: str | None = None,
     study_year_hints: tuple[str | None, ...] = (),
@@ -1055,7 +1156,11 @@ def _merge_month_cells_for_pages(
         teacher_name=teacher_name,
         uses_organization_template=uses_organization_template,
     )
-    _apply_explicit_page_breaks(table, columns, rows_by_page)
+    for index in keep_together:
+        _prevent_row_split(table.rows[index + 2])
+    for page_rows in rows_by_page:
+        for index in page_rows:
+            _prevent_row_split(table.rows[index + 2])
     _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
     return _save_document(document)
 
@@ -1094,28 +1199,46 @@ def generate_calendar_docx(
     # Первый проход: без merge. Он нужен, чтобы получить фактическую пагинацию
     # Microsoft Word для текущего шаблона и объёма текста.
     preview_document = _load_template(template)
-    _populate_calendar_table(preview_document, utp, rows, **header)
+    preview_table, _, _ = _populate_calendar_table(preview_document, utp, rows, **header)
     preview = _save_document(preview_document)
 
-    from calendar_pedagoga.docx_qa import detect_data_row_indices_by_page
+    def conservative_fallback():
+        # No unverified split, merge or forced break when measurement fails.
+        for row in preview_table.rows[2:]:
+            _prevent_row_split(row)
+        return _save_document(preview_document)
 
-    rows_by_page = detect_data_row_indices_by_page(preview, total_rows=len(rows))
-    if not rows_by_page:
+    from calendar_pedagoga.docx_qa import detect_data_row_page_spans
+
+    spans = detect_data_row_page_spans(preview, total_rows=len(rows))
+    if not spans:
         # Без надёжной пагинации безопаснее оставить месяц в каждой строке,
         # чем объединить его через границу страницы и получить пустой столбец.
-        return preview
+        return conservative_fallback()
 
-    # После merge высоты строк могут слегка измениться. Каждый найденный старт
-    # страницы Word фиксируем pageBreakBefore и пересобираем до стабилизации.
-    for _ in range(6):
+    # Merge only complete, contiguous rows on the same measured page. Never
+    # turn a preview page boundary into a forced break in the final document.
+    keep_together = set()
+    for _ in range(len(rows) + 2):
+        keep_together.update(index for index, span in enumerate(spans)
+                             if span.start_page != span.end_page and not span.split_safe)
+        pages = {}
+        for index, span in enumerate(spans):
+            if span.start_page == span.end_page:
+                pages.setdefault(span.start_page, []).append(index)
+        rows_by_page = tuple(tuple(indices) for indices in pages.values())
         document = _load_template(template)
         merged = _merge_month_cells_for_pages(
-            document, utp, rows, rows_by_page, **header
+            document, utp, rows, rows_by_page, keep_together=frozenset(keep_together), **header
         )
-        detected = detect_data_row_indices_by_page(merged, total_rows=len(rows))
-        if not detected or detected == rows_by_page:
+        detected = detect_data_row_page_spans(merged, total_rows=len(rows))
+        if detected == spans:
+            if any(span.start_page != span.end_page and not span.split_safe for span in detected):
+                return conservative_fallback()
             return merged
-        rows_by_page = detected
+        if not detected:
+            return conservative_fallback()
+        spans = detected
 
-    document = _load_template(template)
-    return _merge_month_cells_for_pages(document, utp, rows, rows_by_page, **header)
+    # An unstable merge must not impose an unverified pagination constraint.
+    return conservative_fallback()

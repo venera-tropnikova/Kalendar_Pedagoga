@@ -435,7 +435,9 @@ def test_month_detail_uses_scheduling_months_and_ready_snapshot_rows() -> None:
     assert rows == (("№6", *row6), ("№9", *row9))
 
 
-def test_monthly_docx_is_an_unchanged_subset_of_the_annual_docx() -> None:
+def test_monthly_docx_is_an_unchanged_subset_of_the_annual_docx(monkeypatch) -> None:
+    # This is a content-projection test; renderer boundaries have separate tests.
+    monkeypatch.setattr(ui, 'detect_data_row_page_spans', lambda *args, **kwargs: None)
     annual_path = (
         REFERENCES
         / "Календарный_план_Туристы_проводники_3_год_2026-2027_Верно.docx"
