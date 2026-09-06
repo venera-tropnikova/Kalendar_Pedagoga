@@ -1,6 +1,8 @@
 """Grounding checks: forms and controls cannot supply missing programme facts."""
 
 import re
+import os
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +16,58 @@ from calendar_pedagoga.content_engine_v2 import (
 )
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
+
+
+def test_row_local_practice_cannot_be_replaced_by_whole_program_theory():
+    from calendar_pedagoga.content_engine_v2 import derive_fields_v2, select_source_clause
+    kwargs = dict(topic_title="Животный мир", theory_text="",
+                  practice_text="Животные в рисунках детей. Запрещающие знаки.",
+                  program_content="Животный мир. Птицы: перелетные, оседлые, зимующие.",
+                  theory_hours=0, practice_hours=2)
+    clause, theory_only, pool = select_source_clause(**kwargs)
+    assert not theory_only
+    assert "Птицы" not in clause
+    assert all("Птицы" not in part for part in pool)
+    actual = derive_fields_v2(**kwargs)
+    assert actual.planned_result == "Выполняет практическое задание по теме „Животный мир“."
+    assert "птиц" not in actual.planned_result.casefold()
+    assert actual.practice_text == kwargs["practice_text"]
+
+
+def test_real_key1_all_36_weeks_keep_sources_and_hours():
+    source_name = os.environ.get("CALENDAR_KEY1_DOC")
+    if not source_name:
+        pytest.skip("Set CALENDAR_KEY1_DOC to the real user regression document")
+    from calendar_pedagoga.content_generation import build_content_model
+    from calendar_pedagoga.program_parsing import parse_program
+    from calendar_pedagoga.resolve_utp import resolve_utp
+    from calendar_pedagoga.scheduling import build_schedule
+    from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
+    source = Path(source_name)
+    upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
+    utp = resolve_utp(None, upload)
+    program = parse_program(upload.content, upload.filename, study_year=1)
+    schedule = build_schedule(utp, "2026–2027")
+    rows = build_content_model(schedule, utp, program, source.name)
+    before = repr(rows)
+    generated = build_lesson_content_v2(rows)
+    assert len(generated) == len(schedule.weeks) == 36
+    assert (utp.table_totals.total, utp.table_totals.theory, utp.table_totals.practice) == (72, 22, 50)
+    assert sum(row.theory_hours for row in rows) == 22
+    assert sum(row.practice_hours for row in rows) == 50
+    # Unnumbered topics are distinct positions too; number alone is not an ID.
+    assert len({(part.topic_number, part.topic_title) for row in rows for part in row.week_parts}) == 19
+    assert repr(rows) == before
+    assert generated == build_lesson_content_v2(rows)
+    for source_row, lesson in zip(rows, generated):
+        assert lesson.source is source_row
+        text = f"{lesson.planned_result} {lesson.assessment_method}".casefold()
+        assert not any(bad in text for bad in ("имену", "в проведение", "ролевых игре", "подвижныхе", "развлечает", "предприявает", "занявает", "природныму"))
+        assert text.count("„") == text.count("“")
+        titles = {part.topic_title.strip(" .") for part in source_row.week_parts}
+        for title in re.findall("„([^“]+)“", lesson.planned_result):
+            assert title in titles
+    assert generated[16].planned_result == "Выполняет практическое задание по теме „Животный мир Башкортостана“."
 
 
 @pytest.mark.parametrize(

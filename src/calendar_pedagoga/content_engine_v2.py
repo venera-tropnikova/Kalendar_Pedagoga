@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
@@ -109,6 +109,12 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "чтение": "читает",
     "закупка": "закупает",
     "ремонт": "ремонтирует",
+    "ведение": "ведёт",
+    "выступление": "выступает",
+    "формирование": "формирует",
+    "оценка": "оценивает",
+    "отбор": "отбирает",
+    "заслушивание": "заслушивает",
 }
 
 _KNOWLEDGE_NOUNS = {
@@ -430,6 +436,18 @@ def _noun_to_prepositional(word: str) -> str:
     return word
 
 
+class _UncertainGrammar(ValueError):
+    """Internal abstention, not a change to the CE2 output contract."""
+
+
+def _require_simple_inflection(phrase: str) -> None:
+    # No dependency parser: coordinated heads, lists and nested clauses are
+    # outside the supported grammar. Prepositional tails are copied verbatim.
+    head = re.split(r"(?i)\s+(?:по|для|при|на|в|с|со|к|от|из)\s+", phrase, maxsplit=1)[0]
+    if re.search(r"[,;:()«»\"]|\b(?:и|или|а|как|котор\w*)\b", head, re.I):
+        raise _UncertainGrammar("coordinated_or_nested_phrase")
+
+
 def _inflect_object_phrase(phrase: str, *, case: str) -> str:
     tokens = re.findall(r"\s+|[^\s]+", phrase)
     out: list[str] = []
@@ -591,37 +609,7 @@ def _conjugate_verbal_noun(word: str) -> str | None:
     mapped = _VERBAL_NOUN_TO_VERB.get(lemma.casefold())
     if mapped:
         return mapped
-    low = lemma.casefold()
-    if low in _STATE_OR_KNOWLEDGE_LEMMAS:
-        return None
-    if low.endswith("ование") and len(lemma) > 7:
-        return lemma[: -len("ование")] + "ует"
-    if low.endswith("евание") and len(lemma) > 7:
-        return lemma[: -len("евание")] + "юет"
-    if low.endswith("ывание") and len(lemma) > 7:
-        return lemma[: -len("ывание")] + "ывает"
-    if low.endswith("ивание") and len(lemma) > 7:
-        return lemma[: -len("ивание")] + "ивает"
-    if low.endswith("товление") and len(lemma) > 9:
-        return lemma[: -len("товление")] + "тавливает"
-    if low.endswith("ание") and not low.endswith("ование") and len(lemma) > 5:
-        return lemma[: -len("ание")] + "ает"
-    if low.endswith("ение") and len(lemma) > 5:
-        if low.endswith("ведение") and low != "ведение":
-            return None
-        stem = lemma[: -len("ение")]
-        last = stem[-1:].casefold()
-        if last == "л" and len(stem) >= 2 and stem[-2].casefold() in "пбвфм":
-            return stem[:-1] + "ает"
-        if last == "л":
-            return stem + "яет"
-        if last in "чщжш":
-            return stem + "ает"
-        if last in "дтб" and len(stem) <= 4:
-            return stem + "ёт"
-        return stem + "яет"
-    if low.endswith("тие") and len(lemma) > 4:
-        return lemma[: -len("тие")] + "вает"
+    # An ending is not evidence of a verb, its meaning or its valency.
     return None
 
 
@@ -892,7 +880,8 @@ def _characterize(text: str) -> tuple[str, str, str, str]:
         return "", "", "", ""
     first = tokens[0]
     prefix, core, suffix = _strip_punct_word(first)
-    acc = _noun_nom_to_acc(core)
+    # Unknown nominal number is not inferred from its final letter.
+    acc = _noun_nom_to_acc(core) if core.casefold() in _KNOWLEDGE_NOUNS else core
     if acc and not re.match(r"^[А-ЯЁ]{2,}$", acc):
         acc = acc[:1].lower() + acc[1:]
     tokens[0] = f"{prefix}{acc}{suffix}"
@@ -1217,7 +1206,7 @@ def _drop_knowledge_wrappers(text: str) -> str:
     return _normalize_spaces(" ".join(words))
 
 
-def transform_clause_to_result(
+def _transform_clause_candidate(
     clause: str,
     *,
     theory_only: bool,
@@ -1284,6 +1273,33 @@ def transform_clause_to_result(
         conditions=", ".join(conditions),
     )
     return result, frame
+
+
+def _safe_topic_fields(topic_title: str, *, practical: bool) -> tuple[str, str]:
+    # Quote source text rather than guessing its case, number or verb valency.
+    title = _normalize_spaces(topic_title).strip(" .")
+    if not title:
+        return (
+            "Выполняет практическое задание." if practical else "Характеризует материал занятия.",
+            "педагогическое наблюдение за выполнением задания" if practical else "устный опрос",
+        )
+    topic = f"по теме „{title}“"
+    return (
+        f"Выполняет практическое задание {topic}." if practical else f"Характеризует материал {topic}.",
+        f"педагогическое наблюдение за выполнением задания {topic}" if practical else f"устный опрос {topic}",
+    )
+
+
+def transform_clause_to_result(
+    clause: str, *, theory_only: bool, full_source: str, topic_title: str = "",
+) -> tuple[str, ActionFrame]:
+    try:
+        return _transform_clause_candidate(
+            clause, theory_only=theory_only, full_source=full_source, topic_title=topic_title,
+        )
+    except _UncertainGrammar:
+        result, _ = _safe_topic_fields(topic_title or clause, practical=not theory_only)
+        return result, ActionFrame(clause, "", "", "")
 
 
 def _is_generic_topic_word(word: str) -> bool:
@@ -1626,18 +1642,8 @@ def select_source_clause(
     aligned = pick(extra_units, True)
     chosen = primary[0] if primary else (aligned[0] if aligned else topic_title)
     pool = units or extra_units
-    if (
-        primary
-        and aligned
-        and primary[1] == 0
-        and aligned[1] >= 2
-        and _action_class(primary[0], theory_only=False) <= 1
-    ):
-        chosen = aligned[0]
-        pool = extra_units
-        if _action_class(chosen, theory_only=False) <= 1:
-            theory_only = True
-    elif primary:
+    # Whole-program topic overlap must never replace the actual row source.
+    if primary:
         same = [
             unit
             for unit in units
@@ -2593,7 +2599,7 @@ def _exercise_operation_parts(body: str) -> list[str]:
     return [body]
 
 
-def _observable_result(result: str) -> str:
+def _observable_result_candidate(result: str) -> str:
     """Remove exercise wrappers only for explicitly named observable operations."""
     if result.startswith("Выполняет упражнения"):
         body = result.removeprefix("Выполняет упражнения ").rstrip(".")
@@ -2635,6 +2641,15 @@ def _observable_result(result: str) -> str:
         result,
     )
     return result.replace("Проводит различные наблюдения", "Проводит наблюдения").replace("Проводит различные краеведческие наблюдения", "Проводит краеведческие наблюдения")
+
+
+def _observable_result(result: str) -> str:
+    try:
+        return _observable_result_candidate(result)
+    except _UncertainGrammar:
+        # A source-grounded exercise is already observable. Do not rewrite
+        # its coordinated object merely to remove the exercise wrapper.
+        return result
 
 
 def _lower_lead(text: str) -> str:
@@ -2961,7 +2976,7 @@ def _slot_control_from_result(result: str) -> str:
     return "педагогическое наблюдение за " + _join_and(parts)
 
 
-def derive_fields_v2(
+def _derive_fields_candidate(
     *,
     topic_title: str,
     theory_text: str,
@@ -3124,6 +3139,115 @@ def derive_fields_v2(
     )
 
 
+def _quality_issue(
+    result: str, control: str, *, source: str = "", clause: str = "",
+) -> str:
+    """Validate a finished candidate; syntax complexity alone is not a defect."""
+    if not result or not control:
+        return "empty_triad"
+    if source and clause:
+        source_words = {word[:4] for word in _word_tokens(source.casefold()) if len(word) >= 4}
+        clause_words = {word[:4] for word in _word_tokens(clause.casefold()) if len(word) >= 4}
+        if clause_words - source_words:
+            return "source_leakage"
+    allowed = set(_VERBAL_NOUN_TO_VERB.values()) | {
+        "характеризует", "называет", "совершает", "участвует", "осваивает",
+        "распознаёт", "исследует", "работает", "ориентируется",
+    }
+    first = result.split()[0].casefold()
+    if first not in allowed:
+        return "unproven_predicate"
+    for left, right in re.findall(r"(?i)\b(\w+)\s+и\s+(\w+)", result):
+        if left.casefold() in allowed and right.casefold() not in allowed:
+            return "unproven_coordinated_predicate"
+    for match in re.finditer(r"(?i)\bучаствует\s+в\s+([^.,;:]+)", result):
+        words = match.group(1).casefold().split()
+        while words and _is_adjective(words[0]):
+            words.pop(0)
+        if not words or words[0] not in {
+            "играх", "эстафетах", "занятиях", "викторине", "конкурсе", "соревнованиях",
+        }:
+            return "unproven_participation_case"
+    if re.search(r"(?i)\bориентирует\s+(?:на|по|в)\b", result):
+        return "unproven_verb_valency"
+    for text in (result, control):
+        if text.count("(") != text.count(")") or text.count("«") != text.count("»") or text.count("„") != text.count("“"):
+            return "unbalanced_delimiters"
+        if re.search(r"[.!?]\s*[,;]|[,;]\s*[,;]", text):
+            return "broken_clause_join"
+    # Structural damage has priority over uncertain case diagnostics.
+    nominal = re.match(r"(?i)^характеризует\s+([а-яё-]+)", result)
+    if nominal and not re.search(r"[ыиуюеь]$", nominal.group(1)):
+        return "unproven_object_case"
+    # A surviving genitive modifier after these transitive predicates is not
+    # evidence of a successfully converted direct object. Do not guess a repair.
+    if re.search(r"(?i)\b(?:проводит|выполняет|подготавливает)\s+[а-яё]+(?:ых|их)\b", result):
+        return "unproven_object_case"
+    if re.search(r"(?i)\b(?:подготовки|выполнения)\s+[а-яё]+(?:ое|ая|ые)\b", control):
+        return "unsafe_control_case"
+    if control.startswith("устный опрос") and not control.startswith("устный опрос по теме „"):
+        # Closed, already-supported knowledge heads; no arbitrary tail gets
+        # certified solely because the generator put 'по' in front of it.
+        if not re.match(r"устный опрос по (?:истории|биографии|роли|строению|видам|значению|понятию)\b", control):
+            return "unsafe_oral_control"
+        # A valid first head does not certify a raw object appended after a
+        # comma (for example, nominative instead of the case required by 'по').
+        for tail in control.split(",")[1:]:
+            if not re.match(r"\s*(?:истории|биографии|роли|строению|видам|значению|понятию)\b", tail):
+                return "unsafe_oral_control"
+    return ""
+
+
+def _closed_candidate(
+    candidate: ContentEngineV2Result, *, issue: str, topic_title: str, practical: bool,
+) -> ContentEngineV2Result | None:
+    """Small source-backed repairs, never a second unrestricted generator."""
+    if issue in {"unsafe_oral_control", "unsafe_control_case"}:
+        _, control = _safe_topic_fields(topic_title, practical=practical)
+        return replace(candidate, assessment_method=control)
+    if issue == "unproven_predicate" and re.match(r"(?i)^работа\s+(?:в|на|с)\s", candidate.frame.clause):
+        result = re.sub(r"(?i)^работа\b", "Работает", candidate.planned_result)
+        # Repair the dependent control as well; it was built from a nominal
+        # fragment and cannot certify the newly completed predicate.
+        _, control = _safe_topic_fields(topic_title, practical=practical)
+        return replace(candidate, planned_result=result, assessment_method=control)
+    if issue == "unproven_verb_valency" and re.match(r"(?i)^ориентирование\s+(?:на|по|в)\s", candidate.frame.clause):
+        return replace(candidate, planned_result=re.sub(r"(?i)\bориентирует\b", "Ориентируется", candidate.planned_result))
+    return None
+
+
+def derive_fields_v2(
+    *, topic_title: str, theory_text: str, practice_text: str,
+    program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
+    occurrence_index: int = 0, practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    local = _normalize_spaces(f"{theory_text} {practice_text}")
+    context = local or program_content
+    practical = bool(practice_hours and practice_text.strip())
+    candidate = _derive_fields_candidate(
+        topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
+        program_content=context, theory_hours=theory_hours, practice_hours=practice_hours,
+        occurrence_index=occurrence_index, practice_appearance_count=practice_appearance_count,
+    )
+    grounded_source = f"{context} {topic_title}"
+    issue = _quality_issue(candidate.planned_result, candidate.assessment_method,
+                           source=grounded_source, clause=candidate.frame.clause)
+    if not issue:
+        return candidate
+    repaired = _closed_candidate(candidate, issue=issue, topic_title=topic_title, practical=practical)
+    if repaired is not None:
+        repair_issue = _quality_issue(repaired.planned_result, repaired.assessment_method,
+                                      source=grounded_source, clause=repaired.frame.clause)
+        if not repair_issue:
+            return repaired
+    result, control = _safe_topic_fields(topic_title, practical=practical)
+    return replace(
+        candidate, frame=ActionFrame(candidate.frame.clause, "", "", ""),
+        planned_result=result, assessment_method=control,
+        warnings=(*candidate.warnings, f"Безопасный шаблон CE2: {issue}."),
+    )
+
+
 def fill_from_source(
     *,
     topic_title: str,
@@ -3283,6 +3407,8 @@ _SHARED_CONTROL_PREFIXES = (
 
 
 def _merge_part_results(results: list[str]) -> str:
+    if any("по теме „" in item for item in results):
+        return " ".join(dict.fromkeys(item for item in results if item))
     unique = _unique_phrases(results)
     if not unique:
         return ""
@@ -3297,6 +3423,8 @@ def _merge_part_results(results: list[str]) -> str:
 
 
 def _merge_part_controls(controls: list[str]) -> str:
+    if any("по теме „" in item for item in controls):
+        return "; ".join(dict.fromkeys(item for item in controls if item))
     unique = _unique_phrases(controls)
     if not unique:
         return ""

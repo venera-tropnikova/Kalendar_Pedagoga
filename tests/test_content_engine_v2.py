@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 import re
+import pytest
 
 from calendar_pedagoga.content_engine_v2 import fill_from_source
 from calendar_pedagoga.program_parsing import infer_study_year_number, parse_program
@@ -231,7 +232,7 @@ def test_institutional_organization_is_not_student_organizing() -> None:
     assert derived.lesson_type == "теоретическое занятие"
 
 
-def test_verbal_nouns_conjugate_by_suffix_not_word_list() -> None:
+def test_verbal_nouns_use_verified_pairs_not_suffix_generation() -> None:
     diary = fill_from_source(
         topic_title="Дневник",
         program_content="Ведение дневника наблюдений.",
@@ -655,3 +656,75 @@ def test_all_tour_guides_topics_stay_specific() -> None:
         assert "норматив" not in derived.planned_result.casefold()
         assert not re.search(r"\d+\s*%", derived.planned_result)
     assert checked >= 30
+
+
+@pytest.mark.parametrize("word", ["Развлечение", "Предприятие", "Занятие", "Калибрование", "Абракание"])
+def test_unknown_verbal_nouns_never_create_new_verbs(word):
+    from calendar_pedagoga.content_engine_v2 import _conjugate_verbal_noun
+    assert _conjugate_verbal_noun(word) is None
+
+
+@pytest.mark.parametrize("source", [
+    "Имена и фамилии членов семьи.",
+    "Проведение дидактических и ролевых игр.",
+    "Подвижных игр, праздников с участием родителей.",
+    "Подготовка и участие в мероприятиях.",
+    "Подготовка личного и общественного снаряжения.",
+])
+@pytest.mark.parametrize("practical", [False, True])
+def test_uncertain_phrase_uses_exact_grounded_safe_template(source, practical):
+    from calendar_pedagoga.content_engine_v2 import derive_fields_v2
+    derived = derive_fields_v2(
+        topic_title="Учебная тема", theory_text="" if practical else source,
+        practice_text=source if practical else "", theory_hours=int(not practical),
+        practice_hours=int(practical),
+    )
+    # This coordinated phrase has a valid grounded candidate. It is the one
+    # positive case in this matrix, not a reason to normalize every result.
+    expected_result = "Подготавливает личное и общественное снаряжение." if source == "Подготовка личного и общественного снаряжения." else (
+        "Выполняет практическое задание по теме „Учебная тема“." if practical
+        else "Характеризует материал по теме „Учебная тема“."
+    )
+    assert derived.planned_result == expected_result
+    assert derived.assessment_method == (
+        "педагогическое наблюдение за выполнением задания по теме „Учебная тема“" if practical
+        else "устный опрос по теме „Учебная тема“"
+    )
+    assert (derived.practice_text if practical else derived.theory_text) == source
+
+
+@pytest.mark.parametrize("result, reason", [
+    ("Неизвестный материал.", "unproven_predicate"),
+    ("Развлечает школьные праздники.", "unproven_predicate"),
+    ("Участвует в проведение игр.", "unproven_participation_case"),
+    ("Подготавливает и участие в празднике.", "unproven_coordinated_predicate"),
+    ("Совершает прогулки., Походы.", "broken_clause_join"),
+    ("Характеризует материал (первая часть.", "unbalanced_delimiters"),
+])
+def test_quality_gate_rejects_unproven_candidates(result, reason):
+    from calendar_pedagoga.content_engine_v2 import _quality_issue
+    assert _quality_issue(result, "проверка выполнения задания") == reason
+
+
+def test_safe_topic_quotes_survive_multi_part_merge():
+    from calendar_pedagoga.content_engine_v2 import _merge_part_results, _merge_part_controls
+    results = ["Характеризует материал по теме „История, люди и события“.",
+               "Выполняет практическое задание по теме „Наблюдения (часть 1)“."]
+    controls = ["устный опрос по теме „История, люди и события“",
+                "педагогическое наблюдение за выполнением задания по теме „Наблюдения (часть 1)“"]
+    assert _merge_part_results(results) == " ".join(results)
+    assert _merge_part_controls(controls) == "; ".join(controls)
+
+
+def test_oral_control_valid_head_does_not_certify_raw_coordinated_object():
+    from calendar_pedagoga.content_engine_v2 import _quality_issue, fill_from_source
+    assert _quality_issue(
+        "Характеризует историю создания учреждения, адрес.",
+        "устный опрос по истории создания учреждения, адрес",
+    ) == "unsafe_oral_control"
+    result = fill_from_source(
+        topic_title="Учреждение", program_content="История создания учреждения, адрес.",
+        theory_hours=1, practice_hours=0,
+    )
+    assert result.planned_result == "Характеризует историю создания учреждения, адрес."
+    assert result.assessment_method == "устный опрос по теме „Учреждение“"
