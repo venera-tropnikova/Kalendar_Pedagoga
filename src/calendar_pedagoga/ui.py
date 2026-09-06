@@ -6,6 +6,7 @@ import calendar
 import html
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from copy import deepcopy
 from io import BytesIO
@@ -3100,7 +3101,20 @@ def _show_generation_controls(
     class_name: str,
     teacher_name: str,
 ) -> None:
-    if _generator_revision() != _LOADED_GENERATOR_REVISION:
+    current_revision = _generator_revision()
+    if current_revision != _LOADED_GENERATOR_REVISION:
+        logging.getLogger(__name__).warning(
+            "Generator revision mismatch: loaded=%s current=%s",
+            _LOADED_GENERATOR_REVISION, current_revision,
+        )
+        st.button(
+            "Сформировать календарный план",
+            type="primary",
+            use_container_width=True,
+            disabled=True,
+            key="generate_calendar",
+        )
+        st.info("Приложение обновилось. Обновите страницу, чтобы продолжить.")
         _show_generation_result()
         return
 

@@ -13,11 +13,19 @@ PROGRAM = ROOT / "references" / "Программа ТУРИСТЫ-ПРОВОД�
 MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
-def _generated_app():
+def _generated_app(with_utp=False, with_template=False):
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
+    assert not any(b.label == "Сформировать календарный план" for b in app.button)
     app.get("file_uploader")[0].set_value((PROGRAM.name, PROGRAM.read_bytes(), MIME))
+    if with_utp:
+        utp = ROOT / "references" / "УТП ТП 3г. 2ч.docx"
+        app.get("file_uploader")[1].set_value((utp.name, utp.read_bytes(), MIME))
+    if with_template:
+        template = ROOT / "references" / "Календарный план.docx"
+        app.get("file_uploader")[2].set_value((template.name, template.read_bytes(), MIME))
     app.run()
     next(b for b in app.button if b.label == "Проверить документы").click().run()
+    assert not next(b for b in app.button if b.label == "Сформировать календарный план").disabled
     generated = SimpleNamespace(filename="calendar.docx", content=b"test-docx", warnings=())
     with patch.object(ui, "run_calendar_pipeline", return_value=generated) as pipeline:
         next(b for b in app.button if b.label == "Сформировать календарный план").click().run()
@@ -141,9 +149,10 @@ def test_generator_revision_reads_bytes_on_each_call():
     assert ui._generator_revision() == before
 
 
-def test_changed_code_cannot_regenerate_with_old_imports():
+@pytest.mark.parametrize('with_utp,with_template', [(False, False), (True, False), (True, True)])
+def test_changed_code_cannot_regenerate_with_old_imports(with_utp, with_template, caplog):
     with patch.object(ui, "_generator_revision", return_value="old") as revision, patch.object(ui, "_LOADED_GENERATOR_REVISION", "old"):
-        app = _generated_app()
+        app = _generated_app(with_utp, with_template)
         revision.return_value = "new"
         app.run()
         with patch.object(ui, "run_calendar_pipeline") as pipeline:
@@ -151,9 +160,15 @@ def test_changed_code_cannot_regenerate_with_old_imports():
             pipeline.assert_not_called()
         assert not app.exception
         assert not app.get("download_button")
-        assert not any(b.label == "Сформировать календарный план" for b in app.button)
-        assert not any(
-            "Код приложения обновлён" in (item.value or "")
-            or "Перезапустите приложение" in (item.value or "")
-            for item in (*app.warning, *app.info)
-        )
+        assert next(b for b in app.button if b.label == "Сформировать календарный план").disabled
+        assert any(item.value == "Приложение обновилось. Обновите страницу, чтобы продолжить."
+                   for item in app.info)
+        mismatch_logs = [record.getMessage() for record in caplog.records
+                         if record.name == ui.__name__ and 'revision mismatch' in record.getMessage()]
+        assert mismatch_logs
+        assert set(mismatch_logs) == {'Generator revision mismatch: loaded=old current=new'}
+        # Simulate a fresh process with current imports; normal STATE 2 returns.
+        with patch.object(ui, '_LOADED_GENERATOR_REVISION', 'new'):
+            app.run()
+            assert not next(b for b in app.button if b.label == "Сформировать календарный план").disabled
+            assert not any('Приложение обновилось.' in item.value for item in app.info)
