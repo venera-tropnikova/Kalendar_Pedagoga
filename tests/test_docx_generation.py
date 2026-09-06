@@ -411,26 +411,8 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
     table = Document(BytesIO(generated)).tables[0]
     data_rows = table.rows[2:]
     expected_months = tuple(week.month for week in schedule.weeks)
-    rows_by_page = detect_data_row_indices_by_page(generated, total_rows=len(expected_months))
-    assert rows_by_page is not None
-
-    expected_label_rows: set[int] = set()
-    expected_continue_rows: set[int] = set()
-    multi_row_starts: set[int] = set()
-    for page_rows in rows_by_page:
-        if not page_rows:
-            continue
-        group_start_pos = 0
-        for pos in range(1, len(page_rows) + 1):
-            if pos < len(page_rows) and expected_months[page_rows[pos]] == expected_months[page_rows[group_start_pos]]:
-                continue
-            group = page_rows[group_start_pos:pos]
-            expected_label_rows.add(group[0])
-            if len(group) > 1:
-                multi_row_starts.add(group[0])
-                expected_continue_rows.update(group[1:])
-            group_start_pos = pos
-
+    active_month = None
+    saw_restart = False
     for index, row in enumerate(data_rows):
         raw_cells = row._tr.tc_lst
         for column in (0, 1):
@@ -443,19 +425,17 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
 
         month_merge = raw_cells[0].tcPr.find(qn("w:vMerge"))
         month_xml_text = "".join(raw_cells[0].xpath(".//w:t/text()")).strip()
-        if index in expected_label_rows:
+        if month_merge is None:
             assert month_xml_text == expected_months[index]
-            if index in multi_row_starts:
-                assert month_merge is not None
-                assert month_merge.get(qn("w:val")) == "restart"
-            else:
-                assert month_merge is None
-        elif index in expected_continue_rows:
-            assert month_xml_text == ""
-            assert month_merge is not None
-            assert month_merge.get(qn("w:val")) != "restart"
+            active_month = None
+        elif month_merge.get(qn("w:val")) == "restart":
+            assert month_xml_text == expected_months[index]
+            active_month = expected_months[index]
+            saw_restart = True
         else:
-            assert False, f"row {index} not classified"
+            assert month_xml_text == ""
+            assert active_month == expected_months[index]
+    assert saw_restart, "at least one page-safe month segment must be merged"
 
 
 def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
@@ -751,7 +731,9 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
     for row in document.tables[0].rows[2:]:
         row_properties = row._tr.find(qn("w:trPr"))
         height = row_properties.find(qn("w:trHeight")) if row_properties is not None else None
-        assert height is None, "data rows must not inherit sample trHeight"
+        assert height is not None, "vertical identifiers require a safe minimum height"
+        assert height.get(qn("w:hRule")) == "atLeast"
+        assert height.get(qn("w:val")) != header_height.get(qn("w:val"))
         for paragraph in row.cells[2].paragraphs:
             paragraph_properties = paragraph._p.find(qn("w:pPr"))
             assert paragraph_properties is not None

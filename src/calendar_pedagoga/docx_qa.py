@@ -577,12 +577,8 @@ def _raise_missing_libreoffice_output(
     raise RuntimeError(f"{message}; diagnostics logged.")
 
 
-def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
-    """Сконвертировать DOCX в PDF: сначала Word (эталон), иначе LibreOffice."""
-
-    word_pdf = _docx_to_pdf_bytes_word(content)
-    if word_pdf is not None:
-        return word_pdf
+def _docx_to_pdf_bytes_libreoffice(content: bytes) -> bytes | None:
+    """Convert DOCX to PDF with LibreOffice only."""
 
     soffice = find_libreoffice()
     if soffice is None:
@@ -611,6 +607,38 @@ def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
         return pdfs[0].read_bytes()
     finally:
         shutil.rmtree(temp_path, ignore_errors=True)
+
+
+def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
+    """Сконвертировать DOCX в PDF: сначала Word (эталон), иначе LibreOffice."""
+
+    word_pdf = _docx_to_pdf_bytes_word(content)
+    if word_pdf is not None:
+        return word_pdf
+    return _docx_to_pdf_bytes_libreoffice(content)
+
+
+def _pagination_measurement_copy(content: bytes) -> bytes:
+    """Make vertical identifiers measurable by LibreOffice without changing output.
+
+    LibreOffice keeps a table row whole when it contains vertical Month/Week/Date
+    text even if ``w:cantSplit`` is absent.  The copy is used only to measure the
+    narrative cells; the returned production DOCX retains its text directions.
+    """
+
+    document = Document(BytesIO(content))
+    if not document.tables:
+        return content
+    for row in document.tables[0].rows[2:]:
+        # Calendar schema: the first three physical columns are Month, Week
+        # and Date. Narrative cells must retain their production geometry even
+        # in the measurement copy.
+        for cell in row._tr.tc_lst[:3]:
+            for direction in list(cell.xpath("./w:tcPr/w:textDirection")):
+                direction.getparent().remove(direction)
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 @dataclass(frozen=True)
@@ -699,8 +727,15 @@ def detect_data_row_page_spans(
     if total_rows == 0:
         return ()
 
-    # A rendered PDF proves identifier visibility as well as page boundaries.
-    pdf = _docx_to_pdf_bytes(content)
+    # Word paginates the production layout directly. LibreOffice cannot split
+    # rows containing vertical identifiers, so on Linux it receives a temporary
+    # measurement copy with those directions removed. The original content is
+    # still the source of expected cell text and is never modified.
+    pdf = _docx_to_pdf_bytes_word(content)
+    if pdf is None:
+        pdf = _docx_to_pdf_bytes_libreoffice(
+            _pagination_measurement_copy(content)
+        )
     if pdf is not None:
         try:
             spans = _data_row_page_spans_pdf(content, pdf, total_rows)

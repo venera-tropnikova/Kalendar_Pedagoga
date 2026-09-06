@@ -1158,9 +1158,6 @@ def _merge_month_cells_for_pages(
     )
     for index in keep_together:
         _prevent_row_split(table.rows[index + 2])
-    for page_rows in rows_by_page:
-        for index in page_rows:
-            _prevent_row_split(table.rows[index + 2])
     _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
     return _save_document(document)
 
@@ -1202,43 +1199,70 @@ def generate_calendar_docx(
     preview_table, _, _ = _populate_calendar_table(preview_document, utp, rows, **header)
     preview = _save_document(preview_document)
 
-    def conservative_fallback():
-        # No unverified split, merge or forced break when measurement fails.
-        for row in preview_table.rows[2:]:
-            _prevent_row_split(row)
-        return _save_document(preview_document)
+    def unmerged_fallback(unsafe_rows: frozenset[int] = frozenset()):
+        # A missing measurement is not evidence that every row needs
+        # cantSplit. Keep identifiers self-contained by avoiding merges and
+        # protect only rows whose split was positively measured as unsafe.
+        document = _load_template(template)
+        table, _, _ = _populate_calendar_table(document, utp, rows, **header)
+        for index in unsafe_rows:
+            _prevent_row_split(table.rows[index + 2])
+        return _save_document(document)
 
     from calendar_pedagoga.docx_qa import detect_data_row_page_spans
 
     spans = detect_data_row_page_spans(preview, total_rows=len(rows))
     if not spans:
-        # Без надёжной пагинации безопаснее оставить месяц в каждой строке,
-        # чем объединить его через границу страницы и получить пустой столбец.
-        return conservative_fallback()
+        # Без надёжной пагинации оставить месяц в каждой строке и не вводить
+        # неподтверждённые ограничения разбиения.
+        return unmerged_fallback()
 
-    # Merge only complete, contiguous rows on the same measured page. Never
-    # turn a preview page boundary into a forced break in the final document.
-    keep_together = set()
-    for _ in range(len(rows) + 2):
-        keep_together.update(index for index, span in enumerate(spans)
-                             if span.start_page != span.end_page and not span.split_safe)
-        pages = {}
-        for index, span in enumerate(spans):
-            if span.start_page == span.end_page:
-                pages.setdefault(span.start_page, []).append(index)
-        rows_by_page = tuple(tuple(indices) for indices in pages.values())
-        document = _load_template(template)
-        merged = _merge_month_cells_for_pages(
-            document, utp, rows, rows_by_page, keep_together=frozenset(keep_together), **header
+    # Stabilize only the unmerged measurement layout. This prevents vMerge
+    # geometry from manufacturing new cantSplit constraints. Every potentially
+    # split row is excluded from the later merge groups by its measured span.
+    keep_together: set[int] = set()
+    for _ in range(len(rows) + 1):
+        newly_confirmed = {
+            index for index, span in enumerate(spans)
+            if span.start_page != span.end_page
+            and not span.split_safe
+            and index not in keep_together
+        }
+        if not newly_confirmed:
+            break
+        keep_together.update(newly_confirmed)
+        protected_preview = unmerged_fallback(frozenset(keep_together))
+        detected = detect_data_row_page_spans(
+            protected_preview, total_rows=len(rows)
         )
-        detected = detect_data_row_page_spans(merged, total_rows=len(rows))
-        if detected == spans:
-            if any(span.start_page != span.end_page and not span.split_safe for span in detected):
-                return conservative_fallback()
-            return merged
         if not detected:
-            return conservative_fallback()
+            # Retain the last complete unmerged measurement. The newly
+            # protected rows were already excluded from merge groups by their
+            # measured cross-page spans; a renderer failing to re-identify the
+            # protected preview is not a reason to discard all safe merges.
+            break
         spans = detected
+    else:
+        return unmerged_fallback(frozenset(keep_together))
 
-    # An unstable merge must not impose an unverified pagination constraint.
-    return conservative_fallback()
+    pages: dict[int, list[int]] = {}
+    for index, span in enumerate(spans):
+        if span.start_page == span.end_page:
+            pages.setdefault(span.start_page, []).append(index)
+    # The last row measured on a page is boundary-adjacent: another renderer
+    # may split it even when the measurement renderer kept it whole. Keep its
+    # Month/Week/Date cells self-contained instead of placing it in vMerge.
+    rows_by_page = tuple(
+        tuple(indices[:-1])
+        for indices in pages.values()
+        if len(indices) > 1
+    )
+    document = _load_template(template)
+    return _merge_month_cells_for_pages(
+        document,
+        utp,
+        rows,
+        rows_by_page,
+        keep_together=frozenset(keep_together),
+        **header,
+    )
