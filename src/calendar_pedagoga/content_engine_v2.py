@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import logging
 import re
 from difflib import SequenceMatcher
 
@@ -30,6 +31,9 @@ from calendar_pedagoga.practice_slots import (
     practice_units_from_text,
     slot_is_continuation,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -3467,11 +3471,69 @@ def _merge_part_controls(controls: list[str]) -> str:
     return "; ".join(unique)
 
 
-def _merge_week_part_fields(
+_GENERIC_LESSON_TYPES = {
+    "теоретическое занятие",
+    "практическое занятие",
+    "комбинированное занятие",
+}
+
+
+def _aggregate_week_lesson_type(
+    parts: tuple[WeekTopicPart, ...],
     derived_parts: list[ContentEngineV2Result],
+    *,
+    theory_text: str,
+    practice_text: str,
+) -> str:
+    """Classify the complete week instead of selecting one part by position."""
+
+    types = list(dict.fromkeys(
+        item.lesson_type for item in derived_parts if item.lesson_type
+    ))
+    candidate = types[0] if len(types) == 1 else ""
+    theory_hours = sum(part.theory_hours for part in parts)
+    practice_hours = sum(part.practice_hours for part in parts)
+
+    if theory_hours and not practice_hours:
+        return "теоретическое занятие"
+
+    if practice_hours and not theory_hours:
+        if candidate and candidate not in _GENERIC_LESSON_TYPES:
+            return candidate
+        return "практическое занятие"
+
+    if theory_hours and practice_hours:
+        # One evidenced special form may describe an integrated lesson. For a
+        # multipart week it must be independently selected for every part.
+        if candidate and candidate not in _GENERIC_LESSON_TYPES:
+            return candidate
+        if theory_text.strip() and practice_text.strip():
+            return "комбинированное занятие"
+        logger.info(
+            "CE2 type ambiguity: mixed hours without both row-local sources"
+        )
+        if len(derived_parts) == 1:
+            return derived_parts[0].lesson_type
+        # Positional selection (types[0]) is forbidden for a composite week.
+        # The hour allocation itself proves that both modes are present.
+        return "комбинированное занятие"
+
+    return candidate or (derived_parts[0].lesson_type if derived_parts else "")
+
+
+def _merge_week_part_fields(
+    parts: tuple[WeekTopicPart, ...],
+    derived_parts: list[ContentEngineV2Result],
+    *,
+    theory_text: str,
+    practice_text: str,
 ) -> tuple[str, str, str]:
-    types = list(dict.fromkeys(item.lesson_type for item in derived_parts if item.lesson_type))
-    lesson_type = types[0] if types else ""
+    lesson_type = _aggregate_week_lesson_type(
+        parts,
+        derived_parts,
+        theory_text=theory_text,
+        practice_text=practice_text,
+    )
     planned_result = _merge_part_results([item.planned_result for item in derived_parts])
     assessment = _merge_part_controls([item.assessment_method for item in derived_parts])
     return lesson_type, planned_result, assessment
@@ -3540,7 +3602,12 @@ def build_lesson_content_v2(
                         count if part.practice_hours else 0,
                     )
                 )
-            lesson_type, planned_result, assessment = _merge_week_part_fields(derived_parts)
+            lesson_type, planned_result, assessment = _merge_week_part_fields(
+                parts,
+                derived_parts,
+                theory_text=theory_text,
+                practice_text=practice_text,
+            )
             derived = derived_parts[0]
             extra_warnings = tuple(
                 warning for item in derived_parts for warning in item.warnings
@@ -3562,7 +3629,12 @@ def build_lesson_content_v2(
                 occurrence_index=occurrence_index,
                 practice_appearance_count=count if row.practice_hours else 0,
             )
-            lesson_type = derived.lesson_type
+            lesson_type = _aggregate_week_lesson_type(
+                parts,
+                [derived],
+                theory_text=theory_text,
+                practice_text=practice_text,
+            )
             planned_result = derived.planned_result
             assessment = derived.assessment_method
             extra_warnings = derived.warnings

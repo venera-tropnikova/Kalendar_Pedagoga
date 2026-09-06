@@ -8,6 +8,8 @@ import pytest
 
 from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
+    ContentEngineV2Result,
+    _aggregate_week_lesson_type,
     _observable_result,
     build_lesson_content_v2,
     control_from_frame,
@@ -68,6 +70,9 @@ def test_real_key1_all_36_weeks_keep_sources_and_hours():
         for title in re.findall("„([^“]+)“", lesson.planned_result):
             assert title in titles
     assert generated[16].planned_result == "Выполняет практическое задание по теме „Животный мир Башкортостана“."
+    assert generated[0].lesson_type == "комбинированное занятие"
+    assert generated[21].lesson_type == "комбинированное занятие"
+    assert generated[25].lesson_type == "комбинированное занятие"
 
 
 @pytest.mark.parametrize(
@@ -369,3 +374,81 @@ def test_multi_topic_week_merges_both_grounded_triads():
     assert second_control in merged.assessment_method
     assert merged.assessment_method.startswith("устный опрос по ")
     assert merged.assessment_method.count("устный опрос") == 1
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        (
+            (
+                ("A.1", "Теория", "Основные понятия.", 1, 0),
+                ("A.2", "Практика", "Выполнение упражнения.", 0, 1),
+            ),
+            "комбинированное занятие",
+        ),
+        (
+            (
+                ("A.1", "Первая тема", "Основные понятия.", 1, 0),
+                ("A.2", "Вторая тема", "История развития.", 1, 0),
+            ),
+            "теоретическое занятие",
+        ),
+        (
+            (
+                ("A.1", "Первое упражнение", "Выполнение упражнения.", 0, 1),
+                ("A.2", "Второе упражнение", "Отработка навыка.", 0, 1),
+            ),
+            "практическое занятие",
+        ),
+    ],
+)
+def test_week_type_aggregates_complete_hour_composition(parts, expected):
+    generated = build_lesson_content_v2((_synthetic_week(*parts),))[0]
+    assert generated.lesson_type == expected
+
+
+def _type_part(theory, practice):
+    return WeekTopicPart(
+        topic_number="A.1",
+        topic_title="Устройство прибора",
+        section="Раздел",
+        theory_hours=theory,
+        practice_hours=practice,
+        match_status=MatchStatus.EXACT,
+        program_section="Раздел",
+        program_topic="Устройство прибора",
+        program_content_full="Устройство прибора. Выполнение упражнения с прибором.",
+    )
+
+
+def _type_result(lesson_type):
+    return ContentEngineV2Result(
+        frame=ActionFrame("", "", "", ""),
+        lesson_type=lesson_type,
+        planned_result="",
+        assessment_method="",
+        theory_text="",
+        practice_text="",
+    )
+
+
+def test_single_mixed_part_uses_combined_type_when_both_sources_are_present():
+    actual = _aggregate_week_lesson_type(
+        (_type_part(1, 1),),
+        [_type_result("практическое занятие")],
+        theory_text="Основные понятия.",
+        practice_text="Выполнение упражнения.",
+    )
+    assert actual == "комбинированное занятие"
+
+
+def test_mixed_part_with_missing_row_local_source_preserves_candidate(caplog):
+    with caplog.at_level("INFO"):
+        actual = _aggregate_week_lesson_type(
+            (_type_part(1, 1),),
+            [_type_result("практическое занятие")],
+            theory_text="",
+            practice_text="Выполнение упражнения.",
+        )
+    assert actual == "практическое занятие"
+    assert "CE2 type ambiguity" in caplog.text
