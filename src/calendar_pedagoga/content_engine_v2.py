@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import re
+from difflib import SequenceMatcher
 
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.lesson_content import (
@@ -3177,6 +3178,10 @@ def _quality_issue(
             return "broken_clause_join"
     # Structural damage has priority over uncertain case diagnostics.
     nominal = re.match(r"(?i)^характеризует\s+([а-яё-]+)", result)
+    if nominal and _predicate_repeats_object("характеризует", nominal.group(1)):
+        return "tautological_predicate_object"
+    if nominal and _unproven_raw_colon_subject(nominal.group(1), clause):
+        return "unproven_object_case"
     if nominal and not re.search(r"[ыиуюеь]$", nominal.group(1)):
         return "unproven_object_case"
     # A surviving genitive modifier after these transitive predicates is not
@@ -3196,6 +3201,30 @@ def _quality_issue(
             if not re.match(r"\s*(?:истории|биографии|роли|строению|видам|значению|понятию)\b", tail):
                 return "unsafe_oral_control"
     return ""
+
+
+def _predicate_repeats_object(predicate: str, object_head: str) -> bool:
+    """Detect a derivational tautology without a topic-specific vocabulary."""
+
+    left = re.sub(r"[^а-яё]", "", predicate.casefold())
+    right = re.sub(r"[^а-яё]", "", object_head.casefold())
+    if min(len(left), len(right)) < 7:
+        return False
+    common_prefix = 0
+    for left_char, right_char in zip(left, right):
+        if left_char != right_char:
+            break
+        common_prefix += 1
+    return common_prefix >= 7 and SequenceMatcher(None, left, right).ratio() >= 0.72
+
+
+def _unproven_raw_colon_subject(object_head: str, clause: str) -> bool:
+    """Reject an unchanged nominal heading before ':' as an unproven object."""
+
+    if ":" not in clause:
+        return False
+    source_head = re.match(r"(?i)^\s*([а-яё-]+)", clause)
+    return bool(source_head and source_head.group(1).casefold() == object_head.casefold())
 
 
 def _closed_candidate(

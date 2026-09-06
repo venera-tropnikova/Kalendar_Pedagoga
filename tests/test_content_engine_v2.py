@@ -706,6 +706,48 @@ def test_quality_gate_rejects_unproven_candidates(result, reason):
     assert _quality_issue(result, "проверка выполнения задания") == reason
 
 
+def test_quality_gate_rejects_unchanged_nominal_heading_after_characterizes():
+    from calendar_pedagoga.content_engine_v2 import _quality_issue, derive_fields_v2
+
+    source = "Животные региона: перелётные, оседлые, кочующие."
+    assert _quality_issue(
+        "Характеризует животные региона: перелётные, оседлые, кочующие.",
+        "устный опрос по теме „Животный мир“",
+        clause=source,
+    ) == "unproven_object_case"
+    derived = derive_fields_v2(
+        topic_title="Животный мир",
+        theory_text=source,
+        practice_text="",
+        theory_hours=1,
+        practice_hours=0,
+    )
+    assert derived.planned_result == "Характеризует материал по теме „Животный мир“."
+    assert "unproven_object_case" in " ".join(derived.warnings)
+
+
+def test_quality_gate_rejects_derivational_predicate_object_tautology():
+    from calendar_pedagoga.content_engine_v2 import _quality_issue, derive_fields_v2
+
+    source = "Характеристика и особенности способов передвижения."
+    assert _quality_issue(
+        "Характеризует характеристику и особенности способов передвижения.",
+        "устный опрос по теме „Способы передвижения“",
+        clause=source,
+    ) == "tautological_predicate_object"
+    derived = derive_fields_v2(
+        topic_title="Способы передвижения",
+        theory_text=source,
+        practice_text="",
+        theory_hours=1,
+        practice_hours=0,
+    )
+    assert derived.planned_result == (
+        "Характеризует материал по теме „Способы передвижения“."
+    )
+    assert "tautological_predicate_object" in " ".join(derived.warnings)
+
+
 def test_safe_topic_quotes_survive_multi_part_merge():
     from calendar_pedagoga.content_engine_v2 import _merge_part_results, _merge_part_controls
     results = ["Характеризует материал по теме „История, люди и события“.",
