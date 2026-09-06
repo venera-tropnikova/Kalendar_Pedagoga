@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -17,6 +18,8 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from calendar_pedagoga.program_parsing import find_libreoffice
+
+logger = logging.getLogger(__name__)
 
 _WD_ACTIVE_END_PAGE_NUMBER = 3
 _WD_EXPORT_FORMAT_PDF = 17
@@ -431,30 +434,53 @@ def _png_ink_ratio_fallback(path: Path) -> float:
     return 0.05 if path.stat().st_size >= _MIN_PAGE_FILE_BYTES else 0.0
 
 
-def _save_libreoffice_failure(
-    temp_path: Path,
+def _libreoffice_version(soffice: Path) -> str:
+    try:
+        result = subprocess.run(
+            [str(soffice), "--headless", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"unavailable: {type(error).__name__}: {error}"
+    output = (result.stdout or result.stderr or "").strip()
+    return output or f"unavailable: return code {result.returncode}"
+
+
+def _log_libreoffice_failure(
+    soffice: Path,
     command: list[str],
     *,
     return_code: int | None,
     stdout: str | None,
     stderr: str | None,
-) -> Path:
-    diagnostics_path = temp_path / "libreoffice_failure.json"
-    diagnostics_path.write_text(
-        json.dumps(
-            {
-                "command": command,
-                "return_code": return_code,
-                "stdout": stdout or "",
-                "stderr": stderr or "",
-                "temp_directory": str(temp_path),
-            },
-            ensure_ascii=False,
-            indent=2,
+    pdf_path: Path | None = None,
+    pdf_page_count: int | None = None,
+    pymupdf_error: BaseException | None = None,
+) -> None:
+    pdf_exists = pdf_path.is_file() if pdf_path is not None else False
+    diagnostics = {
+        "soffice_executable": str(soffice),
+        "libreoffice_version": _libreoffice_version(soffice),
+        "command": command,
+        "return_code": return_code,
+        "stdout": stdout or "",
+        "stderr": stderr or "",
+        "pdf_exists": pdf_exists,
+        "pdf_size": pdf_path.stat().st_size if pdf_exists else None,
+        "pdf_page_count": pdf_page_count,
+        "pymupdf_exception_type": (
+            type(pymupdf_error).__name__ if pymupdf_error is not None else None
         ),
-        encoding="utf-8",
+        "pymupdf_exception_message": (
+            str(pymupdf_error) if pymupdf_error is not None else None
+        ),
+    }
+    logger.error(
+        "LibreOffice visual QA failure: %s",
+        json.dumps(diagnostics, ensure_ascii=False, sort_keys=True),
     )
-    return diagnostics_path
 
 
 def _run_soffice(
@@ -478,55 +504,49 @@ def _run_soffice(
             timeout=180,
         )
     except subprocess.TimeoutExpired as error:
-        diagnostics = _save_libreoffice_failure(
-            temp_path,
+        _log_libreoffice_failure(
+            soffice,
             command,
             return_code=None,
             stdout=error.stdout,
             stderr=error.stderr,
         )
-        raise RuntimeError(
-            f"LibreOffice convert timed out; diagnostics and temp files: {diagnostics}"
-        ) from error
+        raise RuntimeError("LibreOffice convert timed out; diagnostics logged.") from error
     except OSError as error:
-        diagnostics = _save_libreoffice_failure(
-            temp_path,
+        _log_libreoffice_failure(
+            soffice,
             command,
             return_code=None,
             stdout=None,
             stderr=str(error),
         )
-        raise RuntimeError(
-            f"LibreOffice could not start; diagnostics and temp files: {diagnostics}"
-        ) from error
+        raise RuntimeError("LibreOffice could not start; diagnostics logged.") from error
 
     if result.returncode != 0:
-        diagnostics = _save_libreoffice_failure(
-            temp_path,
+        _log_libreoffice_failure(
+            soffice,
             command,
             return_code=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
         )
-        raise RuntimeError(
-            f"LibreOffice convert failed; diagnostics and temp files: {diagnostics}"
-        )
+        raise RuntimeError("LibreOffice convert failed; diagnostics logged.")
     return result
 
 
 def _raise_missing_libreoffice_output(
-    temp_path: Path,
+    soffice: Path,
     result: subprocess.CompletedProcess[str],
     message: str,
 ) -> None:
-    diagnostics = _save_libreoffice_failure(
-        temp_path,
+    _log_libreoffice_failure(
+        soffice,
         list(result.args),
         return_code=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
     )
-    raise RuntimeError(f"{message}; diagnostics and temp files: {diagnostics}")
+    raise RuntimeError(f"{message}; diagnostics logged.")
 
 
 def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
@@ -743,7 +763,7 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
     """Отрендерить все страницы DOCX в PNG.
 
     Приоритет: Microsoft Word → PDF → PNG (пагинация как в Word).
-    Запасной путь: LibreOffice.
+    Запасной путь: LibreOffice → PDF, затем PyMuPDF → PNG.
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -772,7 +792,6 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
         raise RuntimeError("Ни Microsoft Word, ни LibreOffice недоступны для visual QA.")
 
     temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_qa_"))
-    succeeded = False
     try:
         docx_path = temp_path / "calendar.docx"
         docx_path.write_bytes(content)
@@ -794,70 +813,45 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
         pdfs = sorted(pdf_dir.glob("*.pdf"))
         if not pdfs:
             _raise_missing_libreoffice_output(
-                temp_path,
+                soffice,
                 pdf_result,
                 "LibreOffice не создал PDF для visual QA",
             )
-        page_count = _pdf_page_count(pdfs[0])
-        if page_count <= 0:
-            raise RuntimeError("Не удалось определить число страниц PDF.")
+        pdf_path = pdfs[0]
+        document = None
+        page_count: int | None = None
+        try:
+            import pymupdf
 
-        copied: list[Path] = []
-        for page_number in range(1, page_count + 1):
-            page_pdf_dir = temp_path / f"pdf_page_{page_number}"
-            page_png_dir = temp_path / f"png_page_{page_number}"
-            page_pdf_dir.mkdir()
-            page_png_dir.mkdir()
-            page_filter = (
-                "pdf:writer_pdf_Export:"
-                f'{{"PageRange":{{"type":"string","value":"{page_number}"}}}}'
-            )
-            page_pdf_result = _run_soffice(
+            document = pymupdf.open(stream=pdf_path.read_bytes(), filetype="pdf")
+            page_count = document.page_count
+            if page_count <= 0:
+                raise RuntimeError("PDF не содержит страниц.")
+
+            copied: list[Path] = []
+            for page_number, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                target = output_dir / f"page_{page_number:02d}.png"
+                pixmap.save(str(target))
+                copied.append(target)
+            return tuple(copied)
+        except Exception as error:
+            _log_libreoffice_failure(
                 soffice,
-                [
-                    "--convert-to",
-                    page_filter,
-                    "--outdir",
-                    str(page_pdf_dir),
-                    str(docx_path),
-                ],
-                temp_path,
+                list(pdf_result.args),
+                return_code=pdf_result.returncode,
+                stdout=pdf_result.stdout,
+                stderr=pdf_result.stderr,
+                pdf_path=pdf_path,
+                pdf_page_count=page_count,
+                pymupdf_error=error,
             )
-            single_pdfs = sorted(page_pdf_dir.glob("*.pdf"))
-            if not single_pdfs:
-                _raise_missing_libreoffice_output(
-                    temp_path,
-                    page_pdf_result,
-                    f"LibreOffice не создал PDF для страницы {page_number}",
-                )
-
-            page_png_result = _run_soffice(
-                soffice,
-                [
-                    "--convert-to",
-                    "png",
-                    "--outdir",
-                    str(page_png_dir),
-                    str(single_pdfs[0]),
-                ],
-                temp_path,
-            )
-            pngs = sorted(page_png_dir.glob("*.png"))
-            if not pngs:
-                _raise_missing_libreoffice_output(
-                    temp_path,
-                    page_png_result,
-                    f"LibreOffice не создал PNG для страницы {page_number}",
-                )
-            target = output_dir / f"page_{page_number:02d}.png"
-            shutil.copy2(pngs[0], target)
-            copied.append(target)
-
-        succeeded = True
-        return tuple(copied)
+            raise RuntimeError("PyMuPDF не отрендерил PDF; diagnostics logged.") from error
+        finally:
+            if document is not None:
+                document.close()
     finally:
-        if succeeded:
-            shutil.rmtree(temp_path, ignore_errors=True)
+        shutil.rmtree(temp_path, ignore_errors=True)
 
 
 def analyze_visual_pages(png_paths: tuple[Path, ...]) -> tuple[VisualPageReport, ...]:
