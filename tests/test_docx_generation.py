@@ -459,9 +459,6 @@ def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
     )
 
     expected_months = tuple(week.month for week in schedule.weeks)
-    rows_by_page = detect_data_row_indices_by_page(generated, total_rows=len(expected_months))
-    assert rows_by_page is not None
-
     issues = verify_month_labels_by_page(generated, months=expected_months)
     assert not issues, "; ".join(issues)
 

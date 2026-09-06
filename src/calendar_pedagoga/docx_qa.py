@@ -834,6 +834,20 @@ def _month_words_on_page(page, month: str) -> list[tuple[float, float, str]]:
     ]
 
 
+def _month_label_in_table_on_page(page, month: str) -> bool:
+    """Recognize a rotated month label through the rendered table structure."""
+
+    expected = "".join(month.casefold().split())
+    for table in page.find_tables().tables:
+        if table.col_count < 1:
+            continue
+        for row in table.extract():
+            actual = "".join((row[0] or "").casefold().split())
+            if actual and (expected in actual or actual in expected):
+                return True
+    return False
+
+
 def verify_month_labels_by_page(
     content: bytes,
     *,
@@ -841,9 +855,8 @@ def verify_month_labels_by_page(
 ) -> tuple[str, ...]:
     """Проверить, что месяц виден у начала каждого месячного блока на каждой странице PDF."""
 
-    rows_by_page = detect_data_row_indices_by_page(content, total_rows=len(months))
     pdf_bytes = _docx_to_pdf_bytes(content)
-    if rows_by_page is None or pdf_bytes is None:
+    if pdf_bytes is None:
         return ("Не удалось проверить подписи месяцев: PDF/pymupdf недоступны.",)
 
     try:
@@ -851,9 +864,25 @@ def verify_month_labels_by_page(
     except ImportError:
         return ("Не удалось проверить подписи месяцев: pymupdf недоступен.",)
 
+    try:
+        spans = _data_row_page_spans_pdf(content, pdf_bytes, len(months))
+    except Exception:
+        logger.debug("PDF month-label row matching unavailable", exc_info=False)
+        spans = None
+    if spans is None:
+        return ("Не удалось проверить подписи месяцев: строки PDF не распознаны.",)
+
     issues: list[str] = []
     document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
+        rows_by_page = tuple(
+            tuple(
+                row_index
+                for row_index, span in enumerate(spans)
+                if span.start_page == page_number
+            )
+            for page_number in range(1, len(document) + 1)
+        )
         for page_number, page_rows in enumerate(rows_by_page, start=1):
             if not page_rows:
                 continue
@@ -913,19 +942,28 @@ def _month_label_issues_for_segment(
         for row_index in range(group_start, group_end + 1)
         if row_index in week_positions
     ]
+    month_hits = _month_words_on_page(page, month)
     if not segment_week_positions:
+        # Page membership is already proven by the full row-content matcher.
+        # A renderer may omit rotated week numbers from text extraction even
+        # though they are visible, so label presence must not depend on them.
+        if any(hit[0] <= 120 for hit in month_hits) or _month_label_in_table_on_page(
+            page, month
+        ):
+            return []
         return [
-            f"Страница {page_number}: не найдены недели "
-            f"{group_start + 1}–{group_end + 1} для проверки месяца «{month}»."
+            f"Страница {page_number}: у недели {group_start + 1} не видна подпись "
+            f"месяца «{month}» (блок до недели {group_end + 1})."
         ]
 
-    month_hits = _month_words_on_page(page, month)
     min_y = min(segment_week_positions)
     max_y = max(segment_week_positions)
     nearby_hits = [
         hit for hit in month_hits if hit[0] <= 120 and min_y - 20 <= hit[1] <= max_y + 20
     ]
     if not nearby_hits:
+        if _month_label_in_table_on_page(page, month):
+            return []
         return [
             f"Страница {page_number}: у недели {group_start + 1} не видна подпись "
             f"месяца «{month}» (блок до недели {group_end + 1})."

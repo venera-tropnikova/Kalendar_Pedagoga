@@ -184,6 +184,61 @@ def test_pdf_refuses_missing_changed_or_duplicate_content(monkeypatch, fragments
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2) is None
 
 
+def test_month_label_verification_uses_one_consistent_render(monkeypatch):
+    word_calls = []
+    libreoffice_calls = []
+
+    def word_pdf(_content):
+        word_calls.append(True)
+        # A second export would reproduce the former Word-COM failure.
+        return b'word-pdf' if len(word_calls) == 1 else None
+
+    def libreoffice_pdf(_content):
+        libreoffice_calls.append(True)
+        return b'libreoffice-pdf-with-different-pagination'
+
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', word_pdf)
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', libreoffice_pdf)
+    monkeypatch.setattr(
+        qa,
+        'detect_data_row_indices_by_page',
+        lambda *args, **kwargs: pytest.fail('independent page mapping must not be used'),
+    )
+    monkeypatch.setattr(
+        qa,
+        '_data_row_page_spans_pdf',
+        lambda content, pdf, total_rows: (
+            qa.DataRowPageSpan(1, 2, True),
+        ) if pdf == b'word-pdf' and total_rows == 1 else None,
+    )
+
+    pages = tuple(
+        SimpleNamespace(
+            rect=SimpleNamespace(height=800),
+            # Rotated week identifiers may be absent from PDF text extraction.
+            get_text=lambda _kind: [],
+        )
+        for _ in range(2)
+    )
+
+    class Pdf:
+        def __len__(self): return len(pages)
+        def __getitem__(self, index): return pages[index]
+        def close(self): pass
+
+    import pymupdf
+    monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
+    monkeypatch.setattr(
+        qa,
+        '_month_words_on_page',
+        lambda page, month: [(20, 100, month)] if page is pages[0] else [],
+    )
+
+    assert qa.verify_month_labels_by_page(b'docx', months=('Сентябрь',)) == ()
+    assert len(word_calls) == 1
+    assert not libreoffice_calls
+
+
 def test_word_measurement_uses_all_cells_and_both_ends(monkeypatch):
     monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', lambda content: None)
     monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', lambda content: None)
