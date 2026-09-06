@@ -30,7 +30,7 @@ from calendar_pedagoga.program_parsing import infer_study_year_number
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
 STANDARD_TABLE_FONT_FAMILY = "Times New Roman"
-STANDARD_GROUP_SPACE_AFTER_PT = 6
+STANDARD_GROUP_SPACE_AFTER_PT = 8
 _MONTH_CELL_MARGIN_DXA = 40
 PRINT_TOP_MARGIN_CM = 1.0
 
