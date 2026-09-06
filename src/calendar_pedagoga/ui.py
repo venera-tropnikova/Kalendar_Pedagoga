@@ -7,6 +7,7 @@ import html
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from io import BytesIO
@@ -2738,11 +2739,33 @@ _INTERNAL_SLOT_WARNINGS = frozenset(
     }
 )
 
+_CE2_SAFE_WARNING_RE = re.compile(
+    r"^Безопасный шаблон CE2:\s*([a-z][a-z0-9_]*)\.$"
+)
+_CE2_SAFE_USER_MESSAGE = (
+    "Некоторые формулировки автоматически приведены "
+    "к безопасному нейтральному виду."
+)
+
 
 def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        warning for warning in warnings if warning not in _INTERNAL_SLOT_WARNINGS
-    )
+    visible: list[str] = []
+    safe_codes: list[str] = []
+    for warning in warnings:
+        if warning in _INTERNAL_SLOT_WARNINGS:
+            continue
+        match = _CE2_SAFE_WARNING_RE.fullmatch(warning)
+        if match:
+            safe_codes.append(match.group(1))
+            continue
+        visible.append(warning)
+    if safe_codes:
+        logging.getLogger(__name__).info(
+            "CE2 safe fallback diagnostics: %s",
+            ", ".join(dict.fromkeys(safe_codes)),
+        )
+        visible.append(_CE2_SAFE_USER_MESSAGE)
+    return tuple(visible)
 
 
 def _collect_analysis_warnings(

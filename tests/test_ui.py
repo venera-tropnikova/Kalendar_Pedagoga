@@ -707,13 +707,29 @@ def test_teacher_name_is_optional_and_invalidates_download() -> None:
     assert app.session_state["calendar_generation_succeeded"] is True
 
 
-def test_teacher_generation_warnings_hide_only_internal_slot_diagnostics() -> None:
+def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
+    caplog,
+) -> None:
     visible = "Неоднозначное соответствие для «Тема»: вариант А"
-    assert _teacher_generation_warnings(
-        (
-            "Ширина таблицы не задана явно; возможны переносы на новые страницы.",
-            SLOT_CONTINUE_WARNING,
-            SLOT_PACK_WARNING,
-            visible,
+    with caplog.at_level("INFO", logger="calendar_pedagoga.ui"):
+        shown = _teacher_generation_warnings(
+            (
+                "Ширина таблицы не задана явно; возможны переносы на новые страницы.",
+                SLOT_CONTINUE_WARNING,
+                "Безопасный шаблон CE2: broken_clause_join.",
+                "Безопасный шаблон CE2: unproven_object_case.",
+                "Безопасный шаблон CE2: broken_clause_join.",
+                SLOT_PACK_WARNING,
+                visible,
+            )
         )
-    ) == (visible,)
+    assert shown == (
+        visible,
+        "Некоторые формулировки автоматически приведены "
+        "к безопасному нейтральному виду.",
+    )
+    assert "broken_clause_join, unproven_object_case" in caplog.text
+    assert all(
+        code not in " ".join(shown)
+        for code in ("broken_clause_join", "unproven_object_case")
+    )
