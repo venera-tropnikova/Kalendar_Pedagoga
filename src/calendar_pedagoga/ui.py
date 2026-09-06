@@ -2246,9 +2246,9 @@ def _inject_landing_styles() -> None:
         }
         .kp-panel-title {
             color: #103f75;
-            font-size: 18px;
-            line-height: 1.5;
-            padding: 0.68rem 0.82rem;
+            font-size: 20px;
+            line-height: 1.33;
+            padding: 0.85rem 0.82rem;
             margin: 0 0 0.72rem;
             background: #dceeff;
         }
@@ -2312,7 +2312,92 @@ def _inject_landing_styles() -> None:
         }
         .kp-check-slot + [data-testid="stElementContainer"] {
             margin-top: 0.35rem;
-        }        </style>
+        }
+
+        /* Readability pass: explicit component hierarchy without scaling the calendar grid. */
+        .kp-badge {
+            font-size: 11.5px;
+            line-height: 1.35;
+        }
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] label,
+        .stTextInput label,
+        .stNumberInput label {
+            font-size: 15px !important;
+            font-weight: 600 !important;
+            line-height: 1.45 !important;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input {
+            min-height: 44px !important;
+            font-size: 15px !important;
+            line-height: 1.4 !important;
+        }
+        [data-testid="stFileUploaderDropzone"] {
+            min-height: 44px !important;
+        }
+        [data-testid="stFileUploaderDropzone"] button {
+            min-height: 36px !important;
+            font-size: 14.5px !important;
+            font-weight: 600 !important;
+        }
+        .kp-cal-card .kp-step-title {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .kp-cal-card-lead,
+        .kp-cal-card .kp-step-note {
+            font-size: 14px;
+        }
+        [data-testid="stMarkdown"] p.kp-status-title {
+            font-size: 24px !important;
+            font-weight: 700 !important;
+            line-height: 1.35 !important;
+            margin-bottom: 0.5rem !important;
+        }
+        [data-testid="stMarkdown"] p.kp-status-lead {
+            font-size: 16.5px !important;
+            line-height: 1.5 !important;
+        }
+        [data-testid="stMarkdown"] p.kp-program-name {
+            font-size: 19px !important;
+            font-weight: 600 !important;
+            line-height: 1.4 !important;
+        }
+        [data-testid="stMarkdown"] p.kp-status-meta,
+        [data-testid="stMarkdown"] p.kp-status-kpi,
+        [data-testid="stMarkdown"] p.kp-status-check {
+            font-size: 16.5px !important;
+            line-height: 1.5 !important;
+        }
+        [class*="st-key-kp_toggle_year_calendar_"] button,
+        [class*="st-key-regenerate_calendar"] button {
+            min-height: 44px !important;
+            font-size: 15px !important;
+            font-weight: 600 !important;
+        }
+        .kp-edit-slot button {
+            min-height: 42px !important;
+            font-size: 15px !important;
+        }
+        [data-testid="stElementContainer"]:has(.kp-check-slot)
+        + [data-testid="stElementContainer"] {
+            margin-top: 0.45rem;
+            margin-bottom: 0.7rem;
+        }
+        [class*="st-key-kp_toggle_year_calendar_inputs"] {
+            margin-bottom: 0.45rem;
+        }
+        .kp-cal-vacation-card strong {
+            font-size: 13.5px;
+        }
+        .kp-cal-vacation-card span,
+        .kp-cal-vacation-extra,
+        .kp-cal-source-note {
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
@@ -2464,9 +2549,6 @@ def _render_upload_fields() -> tuple[object | None, object | None, object | None
         academic_year = _render_academic_year_input(utp_file, program_file)
         group_number, class_name, teacher_name = _render_group_class_fields()
 
-    if not st.session_state.get("analysis_ready") or _form_is_open():
-        _render_year_calendar_card(academic_year, owner="inputs")
-
     return (
         utp_file,
         program_file,
@@ -2495,13 +2577,15 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         st.markdown("</div>", unsafe_allow_html=True)
         fields = _render_upload_fields()
         st.markdown('<div class="kp-form-actions"></div>', unsafe_allow_html=True)
-        _render_normative_panel()
         st.markdown('<div class="kp-check-slot"></div>', unsafe_allow_html=True)
         check_clicked = st.button(
             "Проверить документы",
             type="primary",
             use_container_width=True,
         )
+        if not st.session_state.get("analysis_ready") or form_open:
+            _render_year_calendar_card(str(fields[3]), owner="inputs")
+        _render_normative_panel()
     return (*fields, check_clicked)
 
 
