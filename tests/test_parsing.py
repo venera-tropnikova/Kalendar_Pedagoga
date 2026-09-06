@@ -99,6 +99,61 @@ def _five_column_utp_docx(*, extra_calendar: bool = False) -> bytes:
     return stream.getvalue()
 
 
+def _set_cell_paragraphs(cell, values: tuple[str, ...]) -> None:
+    cell.text = values[0]
+    for value in values[1:]:
+        cell.add_paragraph(value)
+
+
+def _compact_utp_docx(
+    *,
+    invalid_hours: bool = False,
+    ambiguous_rows: bool = False,
+) -> bytes:
+    document = Document()
+    document.add_paragraph("Учебно-тематический план")
+    table = document.add_table(rows=5, cols=4)
+    headers = ("Тема", "Всего", "Теория", "Практика")
+    for cell, value in zip(table.rows[0].cells, headers, strict=True):
+        cell.text = value
+    for cell, value in zip(table.rows[1].cells, headers, strict=True):
+        cell.text = value
+
+    _set_cell_paragraphs(
+        table.rows[2].cells[0],
+        (
+            "1. Введение",
+            "1.1 Туристско-краеведческая деятельность, ее значение",
+            "1.2 Знакомство с детьми",
+        ),
+    )
+    _set_cell_paragraphs(table.rows[2].cells[1], ("2", "1", "", "1"))
+    _set_cell_paragraphs(table.rows[2].cells[2], ("1", "1", "", "0"))
+    _set_cell_paragraphs(table.rows[2].cells[3], ("1", "", "", "1"))
+
+    _set_cell_paragraphs(
+        table.rows[3].cells[0],
+        ("2. Второй раздел", "2.1 Третья тема"),
+    )
+    _set_cell_paragraphs(
+        table.rows[3].cells[1],
+        ("2", "2", "1") if ambiguous_rows else ("2", "2"),
+    )
+    _set_cell_paragraphs(
+        table.rows[3].cells[2],
+        ("1", "2" if invalid_hours else "1"),
+    )
+    _set_cell_paragraphs(table.rows[3].cells[3], ("1", "1"))
+
+    table.rows[4].cells[0].text = "Всего часов:"
+    table.rows[4].cells[1].text = "4"
+    table.rows[4].cells[2].text = "2"
+    table.rows[4].cells[3].text = "2"
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
 def test_five_column_parser_reads_theory_practice() -> None:
     result = parse_utp(_five_column_utp_docx())
     assert result.table_totals == Hours(10, 4, 6)
@@ -114,6 +169,33 @@ def test_five_column_parser_reads_theory_practice() -> None:
     ]
     assert result.topics[0].hours == Hours(2, 2, 0)
     assert result.topics[-1].hours == Hours(4, 0, 4)
+
+
+def test_compact_parser_preserves_blank_hour_positions() -> None:
+    result = parse_utp(_compact_utp_docx())
+
+    assert result.table_totals == Hours(4, 2, 2)
+    assert [topic.hours for topic in result.topics] == [
+        Hours(1, 1, 0),
+        Hours(1, 0, 1),
+        Hours(2, 1, 1),
+    ]
+
+
+def test_compact_parser_rejects_invalid_position_hours() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"Третья тема.*total=2, theory=2, practice=1",
+    ):
+        parse_utp(_compact_utp_docx(invalid_hours=True))
+
+
+def test_compact_parser_rejects_ambiguous_row_alignment() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"Второй раздел.*названий=2, строк часов=3",
+    ):
+        parse_utp(_compact_utp_docx(ambiguous_rows=True))
 
 
 def test_selects_utp_table_among_calendar_and_other_tables() -> None:

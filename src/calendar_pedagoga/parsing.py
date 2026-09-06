@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from io import BytesIO
+from itertools import zip_longest
 from pathlib import Path
 import re
 from typing import BinaryIO
@@ -57,6 +58,10 @@ class UtpParseResult:
     topics: tuple[Topic, ...]
     table_totals: Hours | None
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+
+class CompactTableParseError(ValueError):
+    """Ошибка позиционного соответствия строк компактного УТП."""
 
 
 def _clean(value: str) -> str:
@@ -265,8 +270,13 @@ def _parse_compact_table(
         ]
         titles = [_clean(paragraph.text) for paragraph in title_paragraphs]
         columns = [
-            [_clean(line) for line in cells[i].splitlines() if _clean(line)]
-            for i in (1, 2, 3)
+            [_clean(paragraph.text) for paragraph in row.cells[index].paragraphs]
+            for index in (1, 2, 3)
+        ]
+        hour_rows = [
+            values
+            for values in zip_longest(*columns, fillvalue="")
+            if any(values)
         ]
         if not titles:
             continue
@@ -276,7 +286,36 @@ def _parse_compact_table(
             num_pr = title_paragraphs[0]._p.pPr.numPr
             if num_pr is not None and int(num_pr.ilvl.val) == 0:
                 section_number = str(section_order)
-        section_hours = Hours(*(_integer(col[0]) if col else 0 for col in columns))
+        section_label = " ".join(
+            part for part in (section_number, section_title) if part
+        )
+        if len(hour_rows) != len(titles):
+            raise CompactTableParseError(
+                "Неоднозначное соответствие строк компактного УТП для позиции "
+                f"«{section_label}»: названий={len(titles)}, "
+                f"строк часов={len(hour_rows)}."
+            )
+
+        def parse_position_hours(
+            number: str | None,
+            title: str,
+            raw_values: tuple[str, str, str],
+        ) -> Hours:
+            hours = Hours(*(_integer(value) for value in raw_values))
+            if hours.total != hours.theory + hours.practice:
+                position_label = " ".join(part for part in (number, title) if part)
+                raise CompactTableParseError(
+                    f"Некорректные часы позиции «{position_label}»: "
+                    f"total={hours.total}, theory={hours.theory}, "
+                    f"practice={hours.practice}."
+                )
+            return hours
+
+        section_hours = parse_position_hours(
+            section_number,
+            section_title,
+            hour_rows[0],
+        )
         sections.append(
             Section(
                 section_number,
@@ -289,15 +328,11 @@ def _parse_compact_table(
             continue
         for index, raw_topic in enumerate(titles[1:], start=1):
             number, title = _number_and_title(raw_topic)
-            values = [
-                _integer(column[index]) if index < len(column) else 0
-                for column in columns
-            ]
             topics.append(
                 Topic(
                     number,
                     title,
-                    Hours(*values),
+                    parse_position_hours(number, title, hour_rows[index]),
                     parent_section=section_title,
                 )
             )
@@ -389,6 +424,7 @@ def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
         reverse=True,
     )
     last_error: Exception | None = None
+    compact_error: CompactTableParseError | None = None
     for table in ranked:
         if _utp_table_score(table) < 0:
             continue
@@ -396,9 +432,13 @@ def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
             sections, topics, table_totals = _parse_table_structure(table)
         except (ValueError, IndexError) as error:
             last_error = error
+            if isinstance(error, CompactTableParseError):
+                compact_error = error
             continue
         if _looks_like_valid_utp(sections, topics, table_totals):
             return _finalize_utp_parse(document, sections, topics, table_totals)
+    if compact_error is not None:
+        raise compact_error
     if last_error is not None:
         raise ValueError("Не удалось распознать структуру таблицы УТП.") from last_error
     raise ValueError("В документе не найдена таблица УТП с темами и часами.")
