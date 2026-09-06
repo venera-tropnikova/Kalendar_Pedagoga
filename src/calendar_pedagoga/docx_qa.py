@@ -16,6 +16,7 @@ import tempfile
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 
 from calendar_pedagoga.program_parsing import find_libreoffice
 
@@ -228,6 +229,27 @@ def _month_cell_is_continuation(cell) -> bool:
     return merge.get(qn("w:val")) != "restart"
 
 
+def _header_paragraph_texts(document) -> tuple[str, ...]:
+    """Return body paragraphs before the calendar table, preserving template order."""
+
+    texts: list[str] = []
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:tbl"):
+            break
+        if child.tag == qn("w:p"):
+            text = Paragraph(child, document).text.strip()
+            if text:
+                texts.append(text)
+    return tuple(texts)
+
+
+def _has_calendar_plan_heading(texts: tuple[str, ...]) -> bool:
+    return any(
+        "календар" in text.casefold() and "план" in text.casefold()
+        for text in texts
+    )
+
+
 def validate_calendar_docx(
     content: bytes,
     *,
@@ -241,10 +263,16 @@ def validate_calendar_docx(
     except Exception as error:
         return (QAIssue(QASeverity.ERROR, f"DOCX не читается: {error}"),)
 
-    if not document.paragraphs or not document.paragraphs[0].text.strip():
+    header_paragraphs = _header_paragraph_texts(document)
+    if not header_paragraphs:
         issues.append(QAIssue(QASeverity.ERROR, "Отсутствует заголовок документа."))
-    elif "календар" not in document.paragraphs[0].text.casefold():
-        issues.append(QAIssue(QASeverity.ERROR, "Первый абзац не является заголовком календаря."))
+    elif not _has_calendar_plan_heading(header_paragraphs):
+        issues.append(
+            QAIssue(
+                QASeverity.ERROR,
+                "В шапке документа отсутствует заголовок календарного плана.",
+            )
+        )
 
     if len(document.paragraphs) < 3:
         issues.append(QAIssue(QASeverity.ERROR, "Недостаточно служебных абзацев шапки."))

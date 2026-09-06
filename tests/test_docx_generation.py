@@ -34,6 +34,7 @@ from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.lesson_content import build_lesson_content
 from calendar_pedagoga.scheduling import build_schedule
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
@@ -169,6 +170,47 @@ def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:
 def test_key_generation_passes_structural_qa() -> None:
     issues = validate_calendar_docx(_key_docx(), expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
+
+
+def _structural_qa_heading_fixture(title: str = "Календарный план") -> Document:
+    document = Document()
+    document.add_paragraph(title)
+    document.add_paragraph("Учебная программа")
+    document.add_paragraph("Группа № 1")
+    table = document.add_table(rows=38, cols=8)
+    table.rows[0].cells[0].text = (
+        "Месяц Неделя Теоретические занятия Практические занятия "
+        "Тип занятия Планируемый результат Вид контроля"
+    )
+    for number, row in enumerate(table.rows[2:], start=1):
+        row.cells[0].text = "Сентябрь"
+        row.cells[1].text = f"{number}\n01–07.09"
+        row.cells[2].text = "Тема"
+    return document
+
+
+def test_structural_qa_accepts_semantic_heading_after_blank_template_paragraph() -> None:
+    document = _structural_qa_heading_fixture()
+    document.paragraphs[0]._p.addprevious(OxmlElement("w:p"))
+    output = BytesIO()
+    document.save(output)
+
+    issues = validate_calendar_docx(output.getvalue(), expected_weeks=36)
+    assert not has_blocking_qa_issues(issues)
+
+
+def test_structural_qa_does_not_accept_calendar_heading_after_table() -> None:
+    document = _structural_qa_heading_fixture("Рабочий документ")
+    document.add_paragraph("Календарный план")
+    output = BytesIO()
+    document.save(output)
+
+    issues = validate_calendar_docx(output.getvalue(), expected_weeks=36)
+    assert any(
+        issue.severity is QASeverity.ERROR
+        and "заголовок календарного плана" in issue.message.casefold()
+        for issue in issues
+    )
 
 
 def _assert_print_safe_margins(document, source) -> None:
