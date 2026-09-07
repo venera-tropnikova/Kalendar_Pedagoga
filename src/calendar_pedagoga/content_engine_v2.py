@@ -2531,7 +2531,10 @@ def type_from_frame(
             return "практикум"
     lead = _leading_clause(frame)
     scores = _line_form_scores(lead)
-    if practice_hours and lead:
+    # A practice-hour allocation is not evidence of a practical activity form.
+    # Special TYPE inference is allowed only when this row has grounded
+    # practical source text.
+    if practice_hours and practice_text.strip() and lead:
         dominant = _dominant_label(scores, min_score=2)
         if dominant in {"игра", "викторина"} and not re.match(
             r"(?i)^(игр|викторин)", lead
@@ -3297,14 +3300,22 @@ def derive_fields_v2(
             return repaired
     result, control = _safe_topic_fields(topic_title, practical=practical)
     lesson_type = candidate.lesson_type
-    if lesson_type in _GENERIC_LESSON_TYPES:
+    # Fallback may reduce specificity, but must never widen the source scope.
+    # If TYPE needs one last grounded specialisation, use only the already
+    # selected activity frame, never the full topic/practice block.
+    if (
+        lesson_type in _GENERIC_LESSON_TYPES
+        and practical
+        and candidate.frame.clause.strip()
+    ):
+        selected_activity = _normalize_spaces(candidate.frame.clause)
         lesson_type = type_from_frame(
             candidate.frame,
             theory_hours=theory_hours,
             practice_hours=practice_hours,
-            theory_text=theory_text,
-            practice_text=practice_text,
-            program_content=context,
+            theory_text="",
+            practice_text=selected_activity,
+            program_content=selected_activity,
             planned_result=result,
         )
     return replace(

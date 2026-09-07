@@ -154,6 +154,49 @@ def test_missing_practical_source_never_invents_practical_scenario():
     assert not any(word in str(result).lower() for word in ("чек-лист", "защита", "маршрутное задание"))
 
 
+def test_mixed_hours_form_mentions_are_not_activity_without_practice_source():
+    source = (
+        "Профилактика заболеваний. Личная гигиена. Значение водных процедур. "
+        "Как правильно одеться на прогулку, экскурсию, в поход."
+    )
+    result = fill_from_source(
+        topic_title="Профилактика заболеваний",
+        program_content=source,
+        theory_hours=1,
+        practice_hours=1,
+    )
+    assert result.lesson_type == "теоретическое занятие"
+    assert "экскурс" not in result.lesson_type.casefold()
+    assert result.assessment_method.startswith("устный опрос")
+
+
+def test_safe_fallback_does_not_reopen_other_practice_slots():
+    from calendar_pedagoga.content_engine_v2 import derive_fields_v2
+
+    practice = (
+        "Экскурсия по улицам микрорайона. "
+        "Мой любимый уголок микрорайона. "
+        "Анализ ситуаций, игры-фантазии."
+    )
+    result = derive_fields_v2(
+        topic_title="Мой микрорайон",
+        theory_text="",
+        practice_text=practice,
+        program_content=practice,
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=1,
+        practice_appearance_count=2,
+    )
+    assert result.frame.clause == (
+        "Мой любимый уголок микрорайона. Анализ ситуаций, игры-фантазии"
+    )
+    assert result.lesson_type == "практическое занятие"
+    assert "экскурс" not in (
+        f"{result.lesson_type} {result.planned_result} {result.assessment_method}"
+    ).casefold()
+
+
 def test_parenthetical_details_do_not_add_extra_outcomes():
     assert _observable_result(
         "Оказывает первую помощь условно пострадавшему (определяет травму или ставит диагноз, практически оказывает помощь)."
