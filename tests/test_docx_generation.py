@@ -132,8 +132,31 @@ def _key_docx_for_year(academic_year: str) -> bytes:
 
 
 def _week_cells(content: bytes) -> list[str]:
-    table = Document(BytesIO(content)).tables[0]
-    return [row.cells[1].text for row in table.rows[2:]]
+    return [rows[0].cells[1].text for rows in _rows_by_logical_week(content)]
+
+
+def _rows_by_logical_week(content: bytes) -> list[list]:
+    rows = Document(BytesIO(content)).tables[0].rows[2:]
+    groups: list[list] = []
+    for row in rows:
+        week_number = int(row.cells[1].text.splitlines()[0])
+        if not groups or int(groups[-1][0].cells[1].text.splitlines()[0]) != week_number:
+            groups.append([row])
+        else:
+            groups[-1].append(row)
+    return groups
+
+
+def _logical_cells(content: bytes) -> list[list[str]]:
+    result: list[list[str]] = []
+    for rows in _rows_by_logical_week(content):
+        cells = [rows[0].cells[0].text, rows[0].cells[1].text]
+        cells.extend(
+            "".join(row.cells[column].text for row in rows)
+            for column in range(2, len(rows[0].cells))
+        )
+        result.append(cells)
+    return result
 
 
 def test_key_generation_produces_36_data_rows() -> None:
@@ -144,7 +167,8 @@ def test_key_generation_produces_36_data_rows() -> None:
     assert document.paragraphs[2].text == "2026–2027 учебный год"
     assert document.paragraphs[3].text == "Группа № ___________ (Класс _________)"
     table = document.tables[0]
-    assert len(table.rows) == 38
+    assert len(_rows_by_logical_week(_key_docx())) == 36
+    assert len(table.rows) >= 38
     assert len(table.columns) >= 8
 
 
@@ -326,7 +350,7 @@ def test_key_reference_calendar_matches_generated_structure() -> None:
     reference = Document(REFERENCES / "Календарный_план_КЛЮЧ_2026-2027_с_датами.docx")
     gen_table = generated.tables[0]
     ref_table = reference.tables[0]
-    assert len(gen_table.rows) == len(ref_table.rows)
+    assert len(_rows_by_logical_week(_key_docx())) == len(ref_table.rows) - 2
     assert len(gen_table.columns) >= 8
     assert generated.paragraphs[0].text == reference.paragraphs[0].text
 
@@ -350,20 +374,30 @@ def test_qa_detects_missing_weeks() -> None:
 def test_visual_qa_checks_all_data_rows_have_week_and_month() -> None:
     content = _key_docx()
     document = Document(BytesIO(content))
-    for index, row in enumerate(document.tables[0].rows[2:], start=1):
+    previous_week = 0
+    counts: dict[int, int] = {}
+    for row in document.tables[0].rows[2:]:
         month_cell = row.cells[0]
         if not month_cell.text.strip():
-            assert _month_cell_is_continuation(month_cell), f"month missing row {index}"
-        assert row.cells[1].text.strip(), f"week missing row {index}"
-        assert str(index) in row.cells[1].text.splitlines()[0]
+            assert _month_cell_is_continuation(month_cell)
+        assert row.cells[1].text.strip()
+        week = int(row.cells[1].text.splitlines()[0])
+        assert week in {previous_week, previous_week + 1}
+        counts[week] = counts.get(week, 0) + 1
+        previous_week = week
+    assert sorted(counts) == list(range(1, 37))
+    for rows in _rows_by_logical_week(content):
+        if len(rows) > 1:
+            assert all("".join(row._tr.tc_lst[0].xpath(".//w:t/text()")).strip() for row in rows)
+            assert all(row.cells[1].text.strip() for row in rows)
 
 
 def test_key_docx_does_not_truncate_source_with_ellipsis() -> None:
     document = Document(BytesIO(_key_docx()))
-    table = document.tables[0]
-    week3 = table.rows[4].cells[2].text  # week 3 theory
-    week7 = table.rows[8].cells[4].text  # week 7 practice
-    week16 = table.rows[17].cells[4].text  # week 16 practice
+    logical = _logical_cells(_key_docx())
+    week3 = logical[2][2]
+    week7 = logical[6][4]
+    week16 = logical[15][4]
     for text in (week3, week7, week16):
         assert "…" not in text
         assert "..." not in text
@@ -376,11 +410,10 @@ def test_key_docx_does_not_truncate_source_with_ellipsis() -> None:
 
 
 def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
-    document = Document(BytesIO(_key_docx()))
-    data_rows = document.tables[0].rows[2:]
-    assert len(data_rows) == 36
-    for index, row in enumerate(data_rows, start=1):
-        cells = [cell.text.strip() for cell in row.cells]
+    logical_rows = _logical_cells(_key_docx())
+    assert len(logical_rows) == 36
+    for index, cells in enumerate(logical_rows, start=1):
+        cells = [cell.strip() for cell in cells]
         assert cells[5], f"lesson type empty week {index}"
         assert cells[6], f"planned result empty week {index}"
         assert cells[7], f"assessment empty week {index}"
@@ -413,7 +446,9 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
     expected_months = tuple(week.month for week in schedule.weeks)
     active_month = None
     saw_restart = False
-    for index, row in enumerate(data_rows):
+    for row in data_rows:
+        week_number = int(row.cells[1].text.splitlines()[0])
+        expected_month = expected_months[week_number - 1]
         raw_cells = row._tr.tc_lst
         for column in (0, 1):
             direction = raw_cells[column].tcPr.find(qn("w:textDirection"))
@@ -426,15 +461,15 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
         month_merge = raw_cells[0].tcPr.find(qn("w:vMerge"))
         month_xml_text = "".join(raw_cells[0].xpath(".//w:t/text()")).strip()
         if month_merge is None:
-            assert month_xml_text == expected_months[index]
+            assert month_xml_text == expected_month
             active_month = None
         elif month_merge.get(qn("w:val")) == "restart":
-            assert month_xml_text == expected_months[index]
-            active_month = expected_months[index]
+            assert month_xml_text == expected_month
+            active_month = expected_month
             saw_restart = True
         else:
             assert month_xml_text == ""
-            assert active_month == expected_months[index]
+            assert active_month == expected_month
     assert saw_restart, "at least one page-safe month segment must be merged"
 
 

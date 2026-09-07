@@ -138,6 +138,12 @@ def test_pdf_measures_continuation_and_monthly_week_numbers(monkeypatch):
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2) == (
         qa.DataRowPageSpan(1, 2, True), qa.DataRowPageSpan(2, 2, True),
     )
+    layouts = qa._data_row_page_layout_pdf(_source(), b'pdf', 2)
+    assert layouts is not None
+    first = layouts[0].segments
+    assert [segment.page_number for segment in first] == [1, 2]
+    assert [segment.cells[:2] for segment in first] == [('Month', '19')] * 2
+    assert ''.join(segment.cells[2] for segment in first) == 'abcdef'
 
 
 @pytest.mark.parametrize('month,week', [('Mon', '19'), ('Month', '1'), ('', '')])
@@ -153,25 +159,51 @@ def test_identifiers_may_be_intact_on_continuation_page(monkeypatch):
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2)[0].split_safe
 
 
-@pytest.mark.parametrize('safe', [True, False])
-def test_generation_protects_only_unsafe_split_and_never_forces_break(monkeypatch, safe):
+def test_generation_materializes_exact_non_splitting_page_segments(monkeypatch):
     from calendar_pedagoga import docx_generation as gen
     def populate(document, *args, **kwargs):
         table = document.add_table(rows=4, cols=8)
         _repeat_table_header_rows(table)
-        for row in table.rows[2:]:
+        for row, week, body in zip(table.rows[2:], ('19\nDate 19', '20\nDate 20'), ('abcdef', 'gh')):
             row.cells[0].text = 'Month'
+            row.cells[1].text = week
+            row.cells[2].text = body
         return table, _columns_for_table(table), ('Month', 'Month')
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
-    initial = (qa.DataRowPageSpan(1, 1, True), qa.DataRowPageSpan(1, 2, safe))
-    final = initial if safe else (qa.DataRowPageSpan(1, 1, True), qa.DataRowPageSpan(2, 2, True))
-    calls = iter([initial, final, final])
-    monkeypatch.setattr(qa, 'detect_data_row_page_spans', lambda *args, **kwargs: next(calls))
+    layouts = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 2, True),
+            (
+                qa.DataRowPageSegment(1, ('Month', '19\nDate 19', 'abc', '', '', '', '', '')),
+                qa.DataRowPageSegment(2, ('Month', '19\nDate 19', 'def', '', '', '', '', '')),
+            ),
+        ),
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(2, 2, True),
+            (qa.DataRowPageSegment(2, ('Month', '20\nDate 20', 'gh', '', '', '', '', '')),),
+        ),
+    )
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layouts)
+    monkeypatch.setattr(
+        qa,
+        'detect_data_row_page_spans',
+        lambda *args, **kwargs: tuple(
+            qa.DataRowPageSpan(page, page, True) for page in (1, 2, 2)
+        ),
+    )
     doc = Document(BytesIO(gen.generate_calendar_docx(
         None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027')))
+    rows = doc.tables[0].rows[2:]
+    assert len(rows) == 3
+    assert [row.cells[0].text for row in rows] == ['Month'] * 3
+    assert [row.cells[1].text for row in rows] == ['19\nDate 19', '19\nDate 19', '20\nDate 20']
+    assert rows[0].cells[2].text + rows[1].cells[2].text == 'abcdef'
+    assert rows[2].cells[2].text == 'gh'
+    assert all(row._tr.xpath('./w:trPr/w:cantSplit') for row in rows)
+    assert not rows[0]._tr.xpath('.//w:vMerge')
+    assert not rows[1]._tr.xpath('.//w:vMerge')
     assert not doc._element.xpath('.//w:pageBreakBefore')
-    assert bool(doc.tables[0].rows[3]._tr.xpath('./w:trPr/w:cantSplit')) is not safe
 
 
 @pytest.mark.parametrize('fragments', [
@@ -217,6 +249,7 @@ def test_month_label_verification_uses_one_consistent_render(monkeypatch):
             rect=SimpleNamespace(height=800),
             # Rotated week identifiers may be absent from PDF text extraction.
             get_text=lambda _kind: [],
+            find_tables=lambda: SimpleNamespace(tables=[]),
         )
         for _ in range(2)
     )
@@ -234,7 +267,16 @@ def test_month_label_verification_uses_one_consistent_render(monkeypatch):
         lambda page, month: [(20, 100, month)] if page is pages[0] else [],
     )
 
-    assert qa.verify_month_labels_by_page(b'docx', months=('Сентябрь',)) == ()
+    source = Document()
+    table = source.add_table(rows=3, cols=3)
+    table.rows[2].cells[0].text = 'Сентябрь'
+    table.rows[2].cells[1].text = '1'
+    table.rows[2].cells[2].text = 'Content'
+    source_buffer = BytesIO()
+    source.save(source_buffer)
+    assert qa.verify_month_labels_by_page(
+        source_buffer.getvalue(), months=('Сентябрь',)
+    ) == ()
     assert len(word_calls) == 1
     assert not libreoffice_calls
 
@@ -304,7 +346,7 @@ def test_libreoffice_measurement_removes_vertical_direction_only_from_copy(monke
     ]
 
 
-def test_single_page_measurement_does_not_create_cant_split(monkeypatch):
+def test_single_page_segment_is_kept_together(monkeypatch):
     from calendar_pedagoga import docx_generation as gen
 
     def populate(document, *args, **kwargs):
@@ -315,13 +357,22 @@ def test_single_page_measurement_does_not_create_cant_split(monkeypatch):
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
-    spans = (qa.DataRowPageSpan(1, 1, True),)
-    monkeypatch.setattr(qa, 'detect_data_row_page_spans', lambda *args, **kwargs: spans)
+    layout = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(1, ('Month', '', '', '', '', '', '', '')),),
+        ),
+    )
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layout)
+    monkeypatch.setattr(
+        qa, 'detect_data_row_page_spans',
+        lambda *args, **kwargs: (qa.DataRowPageSpan(1, 1, True),),
+    )
     result = gen.generate_calendar_docx(
         None, (None,), SimpleNamespace(uses_organization_template=False), '2026–2027',
     )
     doc = Document(BytesIO(result))
-    assert not doc.tables[0].rows[2]._tr.xpath('./w:trPr/w:cantSplit')
+    assert doc.tables[0].rows[2]._tr.xpath('./w:trPr/w:cantSplit')
     assert not doc._element.xpath('.//w:pageBreakBefore')
 
 
@@ -337,7 +388,14 @@ def test_last_row_of_measured_page_is_not_in_vertical_merge(monkeypatch):
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
+    layouts = tuple(
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(1, ('Month', '', '', '', '', '', '', '')),),
+        ) for _ in range(3)
+    )
     spans = tuple(qa.DataRowPageSpan(1, 1, True) for _ in range(3))
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layouts)
     monkeypatch.setattr(qa, 'detect_data_row_page_spans', lambda *args, **kwargs: spans)
     result = gen.generate_calendar_docx(
         None, (None,) * 3, SimpleNamespace(uses_organization_template=False), '2026–2027',
@@ -348,7 +406,7 @@ def test_last_row_of_measured_page_is_not_in_vertical_merge(monkeypatch):
     assert not rows[2]._tr.xpath('.//w:vMerge')
 
 
-def test_unmerged_reflow_adds_only_confirmed_unsafe_rows(monkeypatch):
+def test_generation_fails_closed_when_physical_segment_still_splits(monkeypatch):
     from calendar_pedagoga import docx_generation as gen
 
     def populate(document, *args, **kwargs):
@@ -360,28 +418,58 @@ def test_unmerged_reflow_adds_only_confirmed_unsafe_rows(monkeypatch):
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
-    first = (
-        qa.DataRowPageSpan(1, 2, False),
-        qa.DataRowPageSpan(2, 2, True),
+    layouts = tuple(
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(1, ('Month', '', '', '', '', '', '', '')),),
+        ) for _ in range(2)
     )
-    second = (
-        qa.DataRowPageSpan(1, 1, True),
-        qa.DataRowPageSpan(1, 2, False),
-    )
-    final = (
-        qa.DataRowPageSpan(1, 1, True),
-        qa.DataRowPageSpan(2, 2, True),
-    )
-    calls = iter((first, second, final))
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layouts)
     monkeypatch.setattr(
-        qa, 'detect_data_row_page_spans', lambda *args, **kwargs: next(calls),
+        qa, 'detect_data_row_page_spans',
+        lambda *args, **kwargs: (
+            qa.DataRowPageSpan(1, 2, False), qa.DataRowPageSpan(2, 2, True),
+        ),
     )
-    result = gen.generate_calendar_docx(
-        None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
+    with pytest.raises(ValueError, match='page-segment'):
+        gen.generate_calendar_docx(
+            None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
+        )
+
+
+def test_generation_fails_closed_when_final_merge_reflows_segment(monkeypatch):
+    from calendar_pedagoga import docx_generation as gen
+
+    def populate(document, *args, **kwargs):
+        table = document.add_table(rows=3, cols=8)
+        _repeat_table_header_rows(table)
+        table.rows[2].cells[0].text = 'Month'
+        table.rows[2].cells[1].text = '1\nDate 1'
+        table.rows[2].cells[2].text = 'Content'
+        return table, _columns_for_table(table), ('Month',)
+
+    monkeypatch.setattr(gen, '_load_template', lambda template: Document())
+    monkeypatch.setattr(gen, '_populate_calendar_table', populate)
+    layout = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(
+                1, ('Month', '1\nDate 1', 'Content', '', '', '', '', '')
+            ),),
+        ),
     )
-    doc = Document(BytesIO(result))
-    assert len(doc._element.xpath('.//w:cantSplit')) == 2
-    assert not doc._element.xpath('.//w:pageBreakBefore')
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layout)
+    measurements = iter((
+        (qa.DataRowPageSpan(1, 1, True),),
+        (qa.DataRowPageSpan(1, 2, False),),
+    ))
+    monkeypatch.setattr(
+        qa, 'detect_data_row_page_spans', lambda *args, **kwargs: next(measurements)
+    )
+    with pytest.raises(ValueError, match='финальная merge-структура'):
+        gen.generate_calendar_docx(
+            None, (None,), SimpleNamespace(uses_organization_template=False), '2026–2027',
+        )
 
 
 @pytest.mark.parametrize('measurement_available', [True, False])
@@ -397,6 +485,7 @@ def test_monthly_restores_deleted_merge_anchor_and_respects_new_pages(monkeypatc
         row.cells[2].text = f'Topic {week}'
         row.cells[4].text = f'Practice {week}'
     _merge_month_cell_group(table.rows[2:], _columns_for_table(table), 'Октябрь')
+    source_xml = doc._element.xml
     annual = _save_document(doc)
     header = [row._tr.xml for row in table.rows[:2]]
     spans = tuple(qa.DataRowPageSpan(page, page, True) for page in (1, 1, 2, 2))
@@ -411,7 +500,7 @@ def test_monthly_restores_deleted_merge_anchor_and_respects_new_pages(monkeypatc
     assert not monthly._element.xpath('.//w:pageBreakBefore')
     # Row 8 starts page 2: its physical month cell must contain its own label.
     assert rows[2]._tr.tc_lst[0].xpath('.//w:t/text()') == ['Октябрь']
-    assert _save_document(doc) == annual
+    assert doc._element.xml == source_xml
 
 
 def test_monthly_restores_week_merge_without_losing_multiple_parts(monkeypatch):

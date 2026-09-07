@@ -685,6 +685,7 @@ def _monthly_plan_docx(
         for row in table.rows[2:]
     ]
     months = []
+    week_numbers = []
     for row, month_cell, week_cell in original_rows:
         first_line = _Cell(week_cell, row).text.splitlines()[:1]
         try:
@@ -696,7 +697,8 @@ def _monthly_plan_docx(
                 _remove_vmerge(_Cell(restored, row))
                 row._tr.replace(row._tr.tc_lst[column], restored)
             months.append(row.cells[columns.month].text)
-            _allow_row_split(row)
+            week_numbers.append(week_number)
+            _prevent_row_split(row)
             kept_rows += 1
             continue
         table._tbl.remove(row._tr)
@@ -712,13 +714,17 @@ def _monthly_plan_docx(
         return _save_document(document)
 
     spans = detect_data_row_page_spans(unmerged, total_rows=kept_rows)
+    repeated_segments = {
+        index for index, week_number in enumerate(week_numbers)
+        if week_numbers.count(week_number) > 1
+    }
     keep_together = set()
     for _ in range(kept_rows + 2):
         if not spans:
             return fallback()
         pages = {}
         for index, span in enumerate(spans):
-            if span.start_page == span.end_page:
+            if span.start_page == span.end_page and index not in repeated_segments:
                 pages.setdefault(span.start_page, []).append(index)
             elif not span.split_safe:
                 keep_together.add(index)

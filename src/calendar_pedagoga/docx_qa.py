@@ -303,11 +303,12 @@ def validate_calendar_docx(
         )
 
     data_rows = table.rows[2:]
-    if len(data_rows) != expected_weeks:
+    if len(data_rows) < expected_weeks:
         issues.append(
             QAIssue(
                 QASeverity.ERROR,
-                f"Ожидалось {expected_weeks} строк данных, найдено {len(data_rows)}.",
+                f"Ожидалось не менее {expected_weeks} строк-сегментов, "
+                f"найдено {len(data_rows)}.",
             )
         )
 
@@ -397,11 +398,19 @@ def validate_calendar_docx(
                     )
                 )
 
-    if week_numbers and week_numbers != list(range(1, len(week_numbers) + 1)):
+    logical_week_numbers = list(dict.fromkeys(week_numbers))
+    invalid_segment_order = any(
+        current not in {previous, previous + 1}
+        for previous, current in zip(week_numbers, week_numbers[1:])
+    )
+    if invalid_segment_order or (
+        logical_week_numbers
+        and logical_week_numbers != list(range(1, expected_weeks + 1))
+    ):
         issues.append(
             QAIssue(
                 QASeverity.ERROR,
-                "Нумерация недель в таблице не непрерывна.",
+                "Нумерация логических недель в таблице не непрерывна.",
             )
         )
 
@@ -649,10 +658,43 @@ class DataRowPageSpan:
     split_safe: bool = False
 
 
-def _data_row_page_spans_pdf(
+@dataclass(frozen=True)
+class DataRowPageSegment:
+    """Exact source-cell slices rendered as one visual row segment."""
+
+    page_number: int
+    cells: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DataRowPageLayout:
+    """One logical row and its exact, page-aligned visual segments."""
+
+    span: DataRowPageSpan
+    segments: tuple[DataRowPageSegment, ...]
+
+
+def _slice_by_normalized_lengths(text: str, lengths: list[int]) -> tuple[str, ...] | None:
+    """Partition *text* exactly at alphanumeric PDF-match boundaries."""
+
+    positions = [index for index, char in enumerate(text) if char.isalnum()]
+    if sum(lengths) != len(positions):
+        return None
+    cuts = [0]
+    consumed = 0
+    for length in lengths[:-1]:
+        consumed += length
+        cuts.append(positions[consumed] if consumed < len(positions) else len(text))
+    cuts.append(len(text))
+    pieces = tuple(text[start:end] for start, end in zip(cuts, cuts[1:]))
+    return pieces if "".join(pieces) == text else None
+
+
+def _data_row_page_layout_pdf(
     content: bytes, pdf: bytes, total_rows: int,
-) -> tuple[DataRowPageSpan, ...] | None:
-    """Match complete cell contents across PDF table fragments, never week numbers alone."""
+) -> tuple[DataRowPageLayout, ...] | None:
+    """Match and exactly partition every logical row by rendered PDF pages."""
+
     import pymupdf
 
     source = Document(BytesIO(content)).tables[0]
@@ -661,21 +703,22 @@ def _data_row_page_spans_pdf(
         return "".join(char for char in (text or "").casefold() if char.isalnum())
 
     def identifier(text):
-        # Punctuation belongs to dates/identifiers and must not disappear.
         return re.sub(r"\s+", "", text or "")
 
-    expected = []
-    identifiers = []
-    protected_columns = []
-    merged_rows = []
+    source_cells: list[list[str]] = []
+    expected: list[list[str]] = []
+    identifiers: list[list[str]] = []
+    protected_columns: list[set[int]] = []
+    merged_rows: list[bool] = []
     for row in source.rows[2:]:
         seen = set()
-        cells = []
+        texts = []
         for cell in row.cells:
-            cells.append("" if cell._tc in seen else normalized(cell.text))
+            texts.append("" if cell._tc in seen else cell.text)
             seen.add(cell._tc)
-        expected.append(cells)
-        identifiers.append([identifier(cell.text) for cell in row.cells])
+        source_cells.append(texts)
+        expected.append([normalized(text) for text in texts])
+        identifiers.append([identifier(text) for text in texts])
         protected_columns.append({0, 1} | {
             index for index, cell in enumerate(row.cells)
             if cell._tc.xpath('./w:tcPr/w:textDirection | ./w:tcPr/w:vMerge')
@@ -683,10 +726,12 @@ def _data_row_page_spans_pdf(
         merged_rows.append(bool(row._tr.xpath('.//w:vMerge')))
     if len(expected) != total_rows:
         return None
-    spans = []
+
+    layouts: list[DataRowPageLayout] = []
     accumulated = [""] * len(source.columns)
     start_page = None
-    complete_identifiers = set()
+    complete_identifiers: set[int] = set()
+    fragments: list[tuple[int, list[str]]] = []
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
             tables = [table for table in page.find_tables().tables
@@ -694,30 +739,84 @@ def _data_row_page_spans_pdf(
             if len(tables) != 1:
                 return None
             for fragment in tables[0].extract()[2:]:
-                if len(spans) >= total_rows:
+                if len(layouts) >= total_rows:
                     return None
-                target = expected[len(spans)]
-                protected = protected_columns[len(spans)]
+                row_index = len(layouts)
+                target = expected[row_index]
+                protected = protected_columns[row_index]
                 start_page = start_page or page_number
-                # Rotated cells can be clipped or attached to the next PDF row.
-                # Match row identity by the unchanged narrative cells instead.
                 for column in protected:
-                    if identifier(fragment[column]) == identifiers[len(spans)][column]:
+                    if identifier(fragment[column]) == identifiers[row_index][column]:
                         complete_identifiers.add(column)
                 body_columns = set(range(len(target))) - protected
-                if not any(target[column] for column in body_columns):
-                    return None
+                normalized_fragment = [""] * len(target)
                 for column in body_columns:
-                    accumulated[column] += normalized(fragment[column])
+                    normalized_fragment[column] = normalized(fragment[column])
+                    accumulated[column] += normalized_fragment[column]
                     if not target[column].startswith(accumulated[column]):
                         return None
-                if all(accumulated[column] == target[column] for column in body_columns):
-                    safe = (protected <= complete_identifiers and not merged_rows[len(spans)])
-                    spans.append(DataRowPageSpan(start_page, page_number, safe))
-                    accumulated = [""] * len(target)
-                    start_page = None
-                    complete_identifiers = set()
-    return tuple(spans) if len(spans) == total_rows and start_page is None else None
+                fragments.append((page_number, normalized_fragment))
+                if not all(accumulated[column] == target[column] for column in body_columns):
+                    continue
+
+                exact_by_column: dict[int, tuple[str, ...]] = {}
+                for column in body_columns:
+                    pieces = _slice_by_normalized_lengths(
+                        source_cells[row_index][column],
+                        [len(item[column]) for _page, item in fragments],
+                    )
+                    if pieces is None:
+                        return None
+                    exact_by_column[column] = pieces
+                segments = []
+                for segment_index, (segment_page, _fragment) in enumerate(fragments):
+                    cells = []
+                    for column, source_text in enumerate(source_cells[row_index]):
+                        if column in {0, 1}:
+                            cells.append(source_text)
+                        elif column in exact_by_column:
+                            cells.append(exact_by_column[column][segment_index])
+                        else:
+                            cells.append(source_text if segment_index == 0 else "")
+                    segments.append(DataRowPageSegment(segment_page, tuple(cells)))
+                safe = protected <= complete_identifiers and not merged_rows[row_index]
+                layouts.append(DataRowPageLayout(
+                    DataRowPageSpan(start_page, page_number, safe), tuple(segments)
+                ))
+                accumulated = [""] * len(target)
+                start_page = None
+                complete_identifiers = set()
+                fragments = []
+    if len(layouts) != total_rows or start_page is not None:
+        return None
+    return tuple(layouts)
+
+
+def _data_row_page_spans_pdf(
+    content: bytes, pdf: bytes, total_rows: int,
+) -> tuple[DataRowPageSpan, ...] | None:
+    """Match complete cell contents across PDF table fragments, never week numbers alone."""
+    layouts = _data_row_page_layout_pdf(content, pdf, total_rows)
+    return tuple(layout.span for layout in layouts) if layouts is not None else None
+
+
+def detect_data_row_page_layout(
+    content: bytes, *, total_rows: int,
+) -> tuple[DataRowPageLayout, ...] | None:
+    """Return exact page segments from one renderer, or fail closed."""
+
+    if total_rows == 0:
+        return ()
+    pdf = _docx_to_pdf_bytes_word(content)
+    if pdf is None:
+        pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
+    if pdf is None:
+        return None
+    try:
+        return _data_row_page_layout_pdf(content, pdf, total_rows)
+    except Exception:
+        logger.debug("PDF row-segment measurement unavailable", exc_info=False)
+        return None
 
 
 def detect_data_row_page_spans(
@@ -864,8 +963,22 @@ def verify_month_labels_by_page(
     except ImportError:
         return ("Не удалось проверить подписи месяцев: pymupdf недоступен.",)
 
+    source = Document(BytesIO(content))
+    if not source.tables:
+        return ("Не удалось проверить подписи месяцев: таблица не найдена.",)
+    physical_weeks: list[int] = []
+    for row in source.tables[0].rows[2:]:
+        match = re.search(r"\d{1,2}", row.cells[1].text)
+        if match is None:
+            return ("Не удалось проверить подписи месяцев: номер недели не найден.",)
+        week_number = int(match.group())
+        if not 1 <= week_number <= len(months):
+            return ("Не удалось проверить подписи месяцев: номер недели вне диапазона.",)
+        physical_weeks.append(week_number)
+    physical_months = tuple(months[week_number - 1] for week_number in physical_weeks)
+
     try:
-        spans = _data_row_page_spans_pdf(content, pdf_bytes, len(months))
+        spans = _data_row_page_spans_pdf(content, pdf_bytes, len(physical_months))
     except Exception:
         logger.debug("PDF month-label row matching unavailable", exc_info=False)
         spans = None
@@ -894,18 +1007,23 @@ def verify_month_labels_by_page(
                     continue
                 if re.fullmatch(r"\d{1,2}", text):
                     week_number = int(text)
-                    if week_number - 1 in page_rows:
-                        week_positions.setdefault(week_number - 1, y0)
+                    for row_index in page_rows:
+                        if (
+                            row_index not in week_positions
+                            and physical_weeks[row_index] == week_number
+                        ):
+                            week_positions[row_index] = y0
+                            break
 
             group_start = page_rows[0]
             for index in range(1, len(page_rows)):
                 row_index = page_rows[index]
-                if months[row_index] != months[group_start]:
+                if physical_months[row_index] != physical_months[group_start]:
                     issues.extend(
                         _month_label_issues_for_segment(
                             page_number=page_number,
                             page=page,
-                            months=months,
+                            months=physical_months,
                             group_start=group_start,
                             group_end=page_rows[index - 1],
                             week_positions=week_positions,
@@ -916,7 +1034,7 @@ def verify_month_labels_by_page(
                 _month_label_issues_for_segment(
                     page_number=page_number,
                     page=page,
-                    months=months,
+                    months=physical_months,
                     group_start=group_start,
                     group_end=page_rows[-1],
                     week_positions=week_positions,
@@ -937,6 +1055,11 @@ def _month_label_issues_for_segment(
     week_positions: dict[int, float],
 ) -> list[str]:
     month = months[group_start]
+    # Exact table extraction is stronger evidence than rotated-word geometry.
+    # A physical page segment may intentionally repeat an unmerged month label;
+    # in that case it need not be centered across the whole logical month block.
+    if _month_label_in_table_on_page(page, month):
+        return []
     segment_week_positions = [
         week_positions[row_index]
         for row_index in range(group_start, group_end + 1)

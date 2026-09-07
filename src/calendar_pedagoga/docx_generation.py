@@ -1127,6 +1127,100 @@ def _save_document(document) -> bytes:
     return buffer.getvalue()
 
 
+def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset[int]]:
+    """Project logical rows into exact, non-splitting physical page segments."""
+
+    from docx.table import _Cell
+
+    logical_rows = [deepcopy(row._tr) for row in table.rows[2:]]
+    logical_texts = [[cell.text for cell in row.cells] for row in table.rows[2:]]
+    if len(logical_rows) != len(layouts):
+        raise ValueError("Не удалось сопоставить строки календаря с page-segments.")
+    for row in list(table.rows[2:]):
+        table._tbl.remove(row._tr)
+
+    months: list[str] = []
+    continuation_rows: set[int] = set()
+    physical_index = 0
+    for logical_row, source_cells, layout in zip(logical_rows, logical_texts, layouts):
+        if not layout.segments:
+            raise ValueError("Получена пустая сегментация строки календаря.")
+        for column in range(2, len(source_cells)):
+            restored = "".join(segment.cells[column] for segment in layout.segments)
+            if restored != source_cells[column]:
+                raise ValueError(
+                    "Page-segmentation не восстанавливает исходное содержимое строки."
+                )
+        split = len(layout.segments) > 1
+        for segment_index, segment in enumerate(layout.segments):
+            if len(segment.cells) != len(logical_row.tc_lst):
+                raise ValueError("Page-segment содержит неполный набор ячеек.")
+            table._tbl.append(deepcopy(logical_row))
+            row = table.rows[-1]
+            for column, text in enumerate(segment.cells):
+                cell = _Cell(row._tr.tc_lst[column], row)
+                _remove_vmerge(cell)
+                _set_cell_text(cell, text)
+            _prevent_row_split(row)
+            months.append(segment.cells[0])
+            if split:
+                continuation_rows.add(physical_index)
+            physical_index += 1
+    _protect_vertical_cell_height(table)
+    return tuple(months), frozenset(continuation_rows)
+
+
+def _build_segmented_document(
+    document,
+    utp: UtpParseResult,
+    rows: tuple[ResolvedLessonRow, ...],
+    layouts,
+    **header,
+) -> bytes:
+    """Build physical rows whose identifiers travel with every page segment."""
+
+    from calendar_pedagoga.docx_qa import detect_data_row_page_spans
+
+    table, columns, _months = _populate_calendar_table(
+        document, utp, rows, **header
+    )
+    months, continuation_rows = _apply_page_row_segments(table, layouts)
+    unmerged = _save_document(document)
+    spans = detect_data_row_page_spans(unmerged, total_rows=len(months))
+    if spans is None or any(
+        span.start_page != span.end_page
+        or (index in continuation_rows and not span.split_safe)
+        for index, span in enumerate(spans)
+    ):
+        raise ValueError(
+            "DOCX не прошёл QA: page-segment не помещается на одной странице "
+            "или его идентификаторы не подтверждены render-проверкой."
+        )
+
+    pages: dict[int, list[int]] = {}
+    for index, span in enumerate(spans):
+        if index not in continuation_rows:
+            pages.setdefault(span.start_page, []).append(index)
+    # Preserve the cross-renderer boundary guard: a page-edge row is never
+    # placed inside a vertical merge. Split logical rows are excluded entirely.
+    rows_by_page = tuple(
+        tuple(indices[:-1]) for indices in pages.values() if len(indices) > 1
+    )
+    _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
+    output = _save_document(document)
+    final_spans = detect_data_row_page_spans(output, total_rows=len(months))
+    if final_spans is None or any(
+        span.start_page != span.end_page
+        or (index in continuation_rows and not span.split_safe)
+        for index, span in enumerate(final_spans)
+    ):
+        raise ValueError(
+            "DOCX не прошёл QA: финальная merge-структура нарушила "
+            "целостность page-segment или его идентификаторов."
+        )
+    return output
+
+
 def _merge_month_cells_for_pages(
     document,
     utp: UtpParseResult,
@@ -1193,76 +1287,18 @@ def generate_calendar_docx(
         "uses_organization_template": template.uses_organization_template,
     }
 
-    # Первый проход: без merge. Он нужен, чтобы получить фактическую пагинацию
-    # Microsoft Word для текущего шаблона и объёма текста.
+    # The unmerged preview is the semantic source for exact page segmentation.
     preview_document = _load_template(template)
     preview_table, _, _ = _populate_calendar_table(preview_document, utp, rows, **header)
     preview = _save_document(preview_document)
+    from calendar_pedagoga.docx_qa import detect_data_row_page_layout
 
-    def unmerged_fallback(unsafe_rows: frozenset[int] = frozenset()):
-        # A missing measurement is not evidence that every row needs
-        # cantSplit. Keep identifiers self-contained by avoiding merges and
-        # protect only rows whose split was positively measured as unsafe.
-        document = _load_template(template)
-        table, _, _ = _populate_calendar_table(document, utp, rows, **header)
-        for index in unsafe_rows:
-            _prevent_row_split(table.rows[index + 2])
-        return _save_document(document)
-
-    from calendar_pedagoga.docx_qa import detect_data_row_page_spans
-
-    spans = detect_data_row_page_spans(preview, total_rows=len(rows))
-    if not spans:
-        # Без надёжной пагинации оставить месяц в каждой строке и не вводить
-        # неподтверждённые ограничения разбиения.
-        return unmerged_fallback()
-
-    # Stabilize only the unmerged measurement layout. This prevents vMerge
-    # geometry from manufacturing new cantSplit constraints. Every potentially
-    # split row is excluded from the later merge groups by its measured span.
-    keep_together: set[int] = set()
-    for _ in range(len(rows) + 1):
-        newly_confirmed = {
-            index for index, span in enumerate(spans)
-            if span.start_page != span.end_page
-            and not span.split_safe
-            and index not in keep_together
-        }
-        if not newly_confirmed:
-            break
-        keep_together.update(newly_confirmed)
-        protected_preview = unmerged_fallback(frozenset(keep_together))
-        detected = detect_data_row_page_spans(
-            protected_preview, total_rows=len(rows)
+    layouts = detect_data_row_page_layout(preview, total_rows=len(rows))
+    if layouts is None:
+        raise ValueError(
+            "DOCX не прошёл QA: не удалось надёжно определить границы текста "
+            "для page-segmentation."
         )
-        if not detected:
-            # Retain the last complete unmerged measurement. The newly
-            # protected rows were already excluded from merge groups by their
-            # measured cross-page spans; a renderer failing to re-identify the
-            # protected preview is not a reason to discard all safe merges.
-            break
-        spans = detected
-    else:
-        return unmerged_fallback(frozenset(keep_together))
-
-    pages: dict[int, list[int]] = {}
-    for index, span in enumerate(spans):
-        if span.start_page == span.end_page:
-            pages.setdefault(span.start_page, []).append(index)
-    # The last row measured on a page is boundary-adjacent: another renderer
-    # may split it even when the measurement renderer kept it whole. Keep its
-    # Month/Week/Date cells self-contained instead of placing it in vMerge.
-    rows_by_page = tuple(
-        tuple(indices[:-1])
-        for indices in pages.values()
-        if len(indices) > 1
-    )
-    document = _load_template(template)
-    return _merge_month_cells_for_pages(
-        document,
-        utp,
-        rows,
-        rows_by_page,
-        keep_together=frozenset(keep_together),
-        **header,
+    return _build_segmented_document(
+        _load_template(template), utp, rows, layouts, **header
     )
