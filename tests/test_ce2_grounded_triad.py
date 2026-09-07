@@ -1452,3 +1452,38 @@ def test_theory_oral_does_not_copy_nominative_object_after_po():
         assert control.startswith("устный опрос по ")
         assert f"по {object_head.casefold()} " not in control
         assert not control.endswith(f"по {object_head.casefold()}")
+
+
+def test_theory_oral_dative_from_feminine_acc_and_masculine_soft_sign():
+    control = _theory_oral("Характеризует одежду, зимний инвентарь.")
+    assert control == "устный опрос по одежде, зимнему инвентарю"
+
+
+def test_theory_oral_dative_keeps_neuter_plural_and_last_conjunct():
+    control = _theory_oral(
+        "Характеризует назначение, правила обращения, "
+        "градусное значение основных и дополнительных направлений."
+    )
+    low = control.casefold()
+    assert low.startswith("устный опрос по назначению, правилам обращения")
+    assert "правиле " not in low
+    assert "градусному значению" in low
+    assert "направлен" in low
+
+
+def test_theory_oral_dative_from_coordinated_acc_and_neuter():
+    control = _theory_oral(
+        "Характеризует подготовку и участие в туристско-краеведческих "
+        "массовых мероприятиях."
+    )
+    assert control.startswith(
+        "устный опрос по подготовке и участию в туристско-краеведческих"
+    )
+    assert "по подготовку" not in control.casefold()
+
+
+def test_clothing_inventory_theory_keeps_result_and_fixes_oral_control():
+    derived = _theory_fields("Одежда, зимний инвентарь.")
+    assert derived.planned_result.casefold().startswith("характеризует одежду")
+    assert derived.lesson_type == "теоретическое занятие"
+    assert derived.assessment_method == "устный опрос по одежде, зимнему инвентарю"

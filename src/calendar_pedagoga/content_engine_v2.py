@@ -2321,6 +2321,15 @@ def _result_control_segments(result: str) -> list[tuple[str, str]]:
     return segments
 
 
+def _oral_object_for_control(obj: str) -> str:
+    """Dative of a proven RESULT object. Do not drop sibling knowledge conjuncts."""
+
+    dative = _phrase_to_dative(obj)
+    if len(_split_direct_case_commas(obj)) > 1:
+        return dative
+    return _shorten_clause(dative, max_len=80)
+
+
 def _oral_from_knowledge_objects(objects: list[str]) -> str:
     cleaned = [
         _normalize_spaces(item).strip(" ,.;")
@@ -2330,10 +2339,8 @@ def _oral_from_knowledge_objects(objects: list[str]) -> str:
     if not cleaned:
         return ""
     if len(cleaned) == 1:
-        return "устный опрос по " + _shorten_clause(
-            _phrase_to_dative(cleaned[0]), max_len=80
-        )
-    parts = [_phrase_to_dative(_shorten_clause(item, max_len=80)) for item in cleaned]
+        return "устный опрос по " + _oral_object_for_control(cleaned[0])
+    parts = [_oral_object_for_control(item) for item in cleaned]
     return "устный опрос по " + _join_and(parts)
 
 
@@ -2451,9 +2458,7 @@ def _align_control_to_result(control: str, result: str) -> str:
                 result_text.rstrip("."),
             ).strip()
             if core:
-                return "устный опрос по " + _shorten_clause(
-                    _phrase_to_dative(core), max_len=80
-                )
+                return "устный опрос по " + _oral_object_for_control(core)
     if "самострахов" in result_low and "самострахов" not in control_low:
         if "препятств" in control_low:
             return control_text.rstrip(".") + " и самостраховкой"
@@ -2702,6 +2707,11 @@ def _split_first_coord_and(text: str) -> tuple[str, str] | None:
         if not left or not right:
             return None
         if _has_noun_token(left.split()) and not _is_preposition(right.split()[0]):
+            last_left = left.split()[-1]
+            first_right = right.split()[0]
+            if _is_adjective(last_left) and _is_adjective(first_right):
+                start = index + 3
+                continue
             return left, right
         start = index + 3
 
@@ -2711,6 +2721,12 @@ def _detach_trailing_parens(text: str) -> tuple[str, str]:
     if match:
         return match.group(1).strip(), match.group(2)
     return text, ""
+
+
+def _regular_feminine_a_noun(low: str) -> bool:
+    """Suffixal feminine -а, not the unmarked neuter/inanimate plural -а."""
+
+    return bool(re.search(r"(?i)(?:[кгхжшщч]а|ота|ета|ина|ица)$", low))
 
 
 def _adj_to_dative(word: str) -> str:
@@ -2747,6 +2763,10 @@ def _noun_to_dative(word: str) -> str:
     low = core.casefold()
     if low in {"меню", "кофе"}:
         changed = core
+    elif re.search(r"(?i)(?:ам|ям|ами|ями|ах|ях|ов|ев|ём)$", low):
+        changed = core
+    elif low.endswith(("ений", "аний", "яний", "тий")):
+        changed = core
     elif low.endswith(("ение", "ание", "яние", "тие")):
         changed = core[:-1] + "ю"
     elif low.endswith(("ения", "ания", "яния")):
@@ -2757,6 +2777,8 @@ def _noun_to_dative(word: str) -> str:
         changed = core[:-2] + "ии" if low[-2] == "и" else core[:-1] + "е"
     elif low.endswith("ия") and len(core) > 3:
         changed = core[:-2] + "ии"
+    elif low.endswith("у") and len(core) > 3:
+        changed = core[:-1] + "е"
     elif low.endswith("о") and len(core) > 2:
         changed = core[:-1] + "у"
     elif low.endswith("ы") and len(core) > 3:
@@ -2766,11 +2788,17 @@ def _noun_to_dative(word: str) -> str:
     elif low.endswith("и") and len(core) > 3:
         changed = core[:-1] + "ам"
     elif low.endswith("а") and len(core) > 3:
-        changed = core[:-1] + "е"
+        if _regular_feminine_a_noun(low):
+            changed = core[:-1] + "е"
+        else:
+            changed = core[:-1] + "ам"
     elif low.endswith("я") and len(core) > 3:
         changed = core[:-1] + "е"
     elif low.endswith("ь") and len(core) > 2:
-        changed = core[:-1] + "и"
+        if low.endswith(("арь", "ырь", "тель")):
+            changed = core[:-1] + "ю"
+        else:
+            changed = core[:-1] + "и"
     elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
         changed = core + "у"
     else:
@@ -2803,7 +2831,7 @@ def _dative_np(phrase: str) -> str:
             elif _is_adjective(word):
                 mids.append(_adj_to_dative(word))
             else:
-                mids.append(word)
+                mids.append(_noun_to_dative(word))
         head = [*mids, noun]
     else:
         head = [_noun_to_dative(head[0]), *head[1:]]
