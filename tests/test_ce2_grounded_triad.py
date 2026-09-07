@@ -1284,3 +1284,171 @@ def test_quality_rejects_ungrounded_acc_inside_governed_pp():
         "Ухаживает за ногами, обувью, одежную.",
         "устный опрос по теме „Личная гигиена“",
     ) == "unproven_verb_valency"
+
+
+def test_theory_oral_control_uses_result_object_not_topic_title():
+    derived = derive_fields_v2(
+        topic_title="Введение",
+        theory_text="Рассказы об интересных походах, экскурсиях.",
+        practice_text="",
+        program_content="Рассказы об интересных походах, экскурсиях.",
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert derived.lesson_type == "теоретическое занятие"
+    assert derived.planned_result.casefold().startswith("характеризует рассказы")
+    control = derived.assessment_method.casefold()
+    assert control.startswith("устный опрос по ")
+    assert "по теме" not in control
+    assert "по рассказам" in control
+    assert "по рассказы" not in control
+    assert "поход" in control
+
+
+def test_theory_oral_control_keeps_all_characterized_objects():
+    source = (
+        "Народное мастерство (национальная одежда, башкирский орнамент). "
+        "Башкирские легенды и предания – памятники народного творчества."
+    )
+    derived = derive_fields_v2(
+        topic_title="История родного края",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert derived.planned_result.casefold().startswith("характеризует")
+    assert "мастерств" in derived.planned_result.casefold()
+    assert "легенд" in derived.planned_result.casefold()
+    control = derived.assessment_method.casefold()
+    assert control.startswith("устный опрос по ")
+    assert "по теме" not in control
+    assert "мастерств" in control
+    assert "легенд" in control
+    assert "по народному мастерству" in control
+    assert "по народное" not in control
+    assert "башкирскию" not in control
+    assert "башкирским легендам" in control
+    assert "башкирские легенды" not in control
+
+
+def test_selects_rest_spot_control_comes_from_result_not_slot_neighbours():
+    practice = (
+        "Техника движения в походе: темп, режим. "
+        "Преодоление препятствий: залесенная местность, крутые склоны. "
+        "Выбор места привала. "
+        "Занятия на скалодроме. "
+        "Установка палатки. "
+        "Вязка туристских узлов."
+    )
+    derived = derive_fields_v2(
+        topic_title="Пеший туризм",
+        theory_text="",
+        practice_text=practice,
+        program_content=practice,
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=0,
+        practice_appearance_count=2,
+    )
+    assert derived.planned_result == "Выбирает места привала."
+    control = derived.assessment_method.casefold()
+    assert "выбор" in control
+    assert "привал" in control
+    assert "устный опрос" not in control
+    assert "по теме" not in control
+    assert "техник" not in control
+    assert "скалодром" not in control
+    assert "палатк" not in control
+
+
+def test_mixed_result_control_keeps_care_action_off_topic_title():
+    source = (
+        "Соблюдение правил личной гигиены, утренний и вечерний туалет, "
+        "уход за ногами, обувью, одеждой."
+    )
+    derived = derive_fields_v2(
+        topic_title="Личная гигиена",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=1,
+        practice_hours=1,
+    )
+    result = derived.planned_result.casefold()
+    assert "характеризует" in result
+    assert "ухаживает за" in result
+    control = derived.assessment_method.casefold()
+    assert "по теме" not in control
+    assert "гигиен" in control or "соблюден" in control
+    assert "по соблюдению" in control
+    assert "по соблюдение " not in control
+    assert "туалету" in control
+    assert "уход" in control or "ногам" in control or "обув" in control
+
+
+def test_characterizing_first_aid_kit_stays_oral_not_product_check():
+    derived = derive_fields_v2(
+        topic_title="Аптечка",
+        theory_text="Назначение лекарственных препаратов. Комплектование аптечки.",
+        practice_text="",
+        program_content="Назначение лекарственных препаратов. Комплектование аптечки.",
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert derived.planned_result == "Характеризует комплектование аптечки."
+    control = derived.assessment_method.casefold()
+    assert control.startswith("устный опрос по ")
+    assert "комплектован" in control
+    assert "по комплектованию" in control
+    assert "по комплектование " not in control
+    assert "по теме" not in control
+    assert "проверка состава" not in control
+
+
+def _theory_oral(result: str) -> str:
+    return control_from_frame(
+        ActionFrame(result, "характеризует", "", ""),
+        planned_result=result,
+        lesson_type="теоретическое занятие",
+        theory_hours=2,
+        practice_hours=0,
+    )
+
+
+def test_theory_oral_dative_for_plural_stories():
+    control = _theory_oral(
+        "Характеризует рассказы об интересных походах, экскурсиях."
+    )
+    assert control == (
+        "устный опрос по рассказам об интересных походах, экскурсиях"
+    )
+
+
+def test_theory_oral_dative_for_adjective_noun_craft():
+    control = _theory_oral("Характеризует народное мастерство.")
+    assert control == "устный опрос по народному мастерству"
+    assert "по народное" not in control.casefold()
+
+
+def test_theory_oral_dative_for_verbal_noun_kit():
+    control = _theory_oral("Характеризует комплектование аптечки.")
+    assert control == "устный опрос по комплектованию аптечки"
+
+
+def test_theory_oral_does_not_copy_nominative_object_after_po():
+    samples = (
+        "Характеризует рассказы об интересных походах.",
+        "Характеризует народное мастерство.",
+        "Характеризует комплектование аптечки.",
+        "Характеризует соблюдение правил личной гигиены.",
+    )
+    for result in samples:
+        object_head = re.sub(
+            r"(?i)^характеризует\s+", "", result
+        ).rstrip(".").split()[0]
+        control = _theory_oral(result).casefold()
+        assert control.startswith("устный опрос по ")
+        assert f"по {object_head.casefold()} " not in control
+        assert not control.endswith(f"по {object_head.casefold()}")

@@ -2284,31 +2284,126 @@ def _drop_leading_verb(text: str) -> str:
     )
 
 
-def _first_word_prepositional(text: str) -> str:
-    words = _normalize_spaces(text).split()
-    if not words:
-        return text
-    first = words[0]
-    low = first.casefold()
-    if low.endswith("ия") and len(first) > 3:
-        words[0] = first[:-2] + "ии"
-    elif low.endswith("ию") and len(first) > 3:
-        words[0] = first[:-2] + "ии"
-    elif low.endswith("ие") and len(first) > 3:
-        words[0] = first[:-1] + "ю"
-    elif low.endswith("а") and len(first) > 3:
-        words[0] = first[:-1] + "е"
-    elif low.endswith("ь") and len(first) > 3:
-        words[0] = first[:-1] + "и"
-    else:
-        words[0] = low
-    if words[0][:1].isupper():
-        words[0] = words[0][:1].lower() + words[0][1:]
-    return " ".join(words)
+_KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет"})
+_CONTROL_RESULT_VERB_RE = re.compile(
+    r"(?i)\b("
+    + "|".join(
+        sorted(
+            {
+                *_KNOWLEDGE_RESULT_VERBS,
+                "выбирает",
+                "осваивает",
+                "участвует",
+                *_FINITE_TO_NOUN,
+            },
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")\b"
+)
+
+
+def _result_control_segments(result: str) -> list[tuple[str, str]]:
+    """Split a finished RESULT into proven (verb, object) pairs."""
+
+    text = _normalize_spaces(result).rstrip(".")
+    matches = list(_CONTROL_RESULT_VERB_RE.finditer(text))
+    if not matches:
+        return []
+    segments: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        obj = text[match.end() : end].strip(" ,.;")
+        obj = re.sub(r"^(и|а|но)\s+", "", obj, flags=re.IGNORECASE)
+        obj = re.sub(r"\s+(и|а|но)$", "", obj, flags=re.IGNORECASE)
+        segments.append((match.group(1).casefold(), obj))
+    return segments
+
+
+def _oral_from_knowledge_objects(objects: list[str]) -> str:
+    cleaned = [
+        _normalize_spaces(item).strip(" ,.;")
+        for item in objects
+        if _normalize_spaces(item).strip(" ,.;")
+    ]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return "устный опрос по " + _shorten_clause(
+            _phrase_to_dative(cleaned[0]), max_len=80
+        )
+    parts = [_phrase_to_dative(_shorten_clause(item, max_len=80)) for item in cleaned]
+    return "устный опрос по " + _join_and(parts)
+
+
+def _rebuild_skill_result(segments: list[tuple[str, str]]) -> str:
+    parts = [
+        _normalize_spaces(f"{verb} {obj}").strip(" ,")
+        for verb, obj in segments
+        if verb not in _KNOWLEDGE_RESULT_VERBS
+    ]
+    if not parts:
+        return ""
+    return _cap_sentence(", ".join(parts).rstrip("."))
+
+
+def _control_from_proven_result(result: str, *, lesson_type: str = "") -> str:
+    """CONTROL from already-proven RESULT actions only; never from title/source."""
+
+    segments = _result_control_segments(result)
+    knowledge = [
+        obj
+        for verb, obj in segments
+        if verb in _KNOWLEDGE_RESULT_VERBS and obj
+    ]
+    oral = _oral_from_knowledge_objects(knowledge)
+    skill_result = _rebuild_skill_result(segments)
+    observed = ""
+    if skill_result:
+        observed = (
+            _skill_control(skill_result)
+            or _slot_control_from_result(skill_result)
+            or _process_control(skill_result, lesson_type)
+        )
+    if oral and observed:
+        return f"{oral}; {observed}"
+    return oral or observed
+
+
+def _oral_object_grounded_in_result(control: str, result: str) -> bool:
+    """Accept oral CONTROL whose object is already in RESULT, not a head whitelist."""
+
+    oral = control.split(";")[0].strip()
+    if not oral.startswith("устный опрос по ") or oral.startswith("устный опрос по теме"):
+        return False
+    complement = oral[len("устный опрос по ") :]
+    result_tokens = re.findall(r"[а-яё]{4,}", result.casefold())
+    if not result_tokens:
+        return False
+    result_stems = {token[:5] if len(token) >= 5 else token for token in result_tokens}
+
+    def _stem(token: str) -> str:
+        return token[:5] if len(token) >= 5 else token
+
+    extra = [
+        token
+        for token in re.findall(r"[а-яё]{4,}", complement.casefold())
+        if not any(
+            _stem(token)[:4] == stem[:4]
+            or _stem(token).startswith(stem[:4])
+            or stem.startswith(_stem(token)[:4])
+            for stem in result_stems
+        )
+    ]
+    return not extra
 
 
 def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
-    blob = _normalize_spaces(f"{planned_result} {frame.clause} {frame.object}").casefold()
+    proven = _control_from_proven_result(planned_result)
+    if proven:
+        return proven
+    blob = _normalize_spaces(planned_result or "").casefold()
     kinds = re.search(r"виды\s+([а-яё]+)", blob)
     if kinds:
         return f"устный опрос по видам {kinds.group(1)}"
@@ -2330,7 +2425,7 @@ def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
         return "устный опрос"
     if source and first and not _is_adjective(first):
         return "устный опрос по " + _shorten_clause(
-            _first_word_prepositional(source), max_len=48
+            _phrase_to_dative(source), max_len=48
         )
     return "устный опрос"
 
@@ -2345,15 +2440,20 @@ def _align_control_to_result(control: str, result: str) -> str:
     result_low = result_text.casefold()
     control_low = control_text.casefold()
     if control_low.startswith("устный опрос"):
-        core = re.sub(
-            r"(?i)^(характеризует|называет)\s+",
-            "",
-            result_text.rstrip("."),
-        ).strip()
-        if core:
-            return "устный опрос по " + _shorten_clause(
-                _first_word_prepositional(core), max_len=80
-            )
+        rebuilt = _control_from_proven_result(result_text)
+        if rebuilt:
+            control_text = rebuilt
+            control_low = rebuilt.casefold()
+        else:
+            core = re.sub(
+                r"(?i)^(характеризует|называет)\s+",
+                "",
+                result_text.rstrip("."),
+            ).strip()
+            if core:
+                return "устный опрос по " + _shorten_clause(
+                    _phrase_to_dative(core), max_len=80
+                )
     if "самострахов" in result_low and "самострахов" not in control_low:
         if "препятств" in control_low:
             return control_text.rstrip(".") + " и самостраховкой"
@@ -2511,6 +2611,232 @@ def _phrase_to_dative_noun(noun: str) -> str:
     if low.endswith("а"):
         return noun[:-1] + "е"
     return noun
+
+
+def _looks_like_direct_case_start(word: str) -> bool:
+    """True when a chunk after a comma still looks like a nominative/accusative NP."""
+
+    _, core, _ = _strip_punct_word(word)
+    low = core.casefold()
+    if not low or _is_preposition(low) or low in {"и", "а", "но", "да"}:
+        return False
+    if _is_adjective(word):
+        return bool(
+            re.search(r"(?i)(?:ое|ее|ая|яя|ые|ие|ый|ой|ий|ую|юю)$", low)
+        )
+    if low.endswith("ию") and len(low) > 3:
+        return True
+    if re.search(
+        r"(?i)(?:ах|ях|ами|ями|ам|ям|ов|ев|ёй|ей|ою|ею|ом|ем|ии)$",
+        low,
+    ):
+        return False
+    return True
+
+
+def _split_top_level_commas(text: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+            buf.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            buf.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(char)
+    if buf:
+        parts.append("".join(buf).strip())
+    return [item for item in parts if item]
+
+
+def _split_direct_case_commas(text: str) -> list[str]:
+    raw = _split_top_level_commas(text)
+    if len(raw) < 2:
+        return raw
+    merged = [raw[0]]
+    for part in raw[1:]:
+        first = part.split()[0] if part.split() else ""
+        if _looks_like_direct_case_start(first):
+            merged.append(part)
+        else:
+            merged[-1] = f"{merged[-1]}, {part}"
+    return merged
+
+
+def _has_noun_token(words: list[str]) -> bool:
+    return any(
+        word.casefold() not in {"и", "а", "но", "да"}
+        and not _is_preposition(word)
+        and not _is_adjective(word)
+        for word in words
+        if word
+    )
+
+
+def _split_first_coord_and(text: str) -> tuple[str, str] | None:
+    """Split the first NP-level «и» whose left side already contains a noun."""
+
+    lower = text.casefold()
+    start = 0
+    while True:
+        index = lower.find(" и ", start)
+        if index < 0:
+            return None
+        depth = 0
+        for char in text[:index]:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(0, depth - 1)
+        if depth:
+            start = index + 3
+            continue
+        left = text[:index].strip()
+        right = text[index + 3 :].strip()
+        if not left or not right:
+            return None
+        if _has_noun_token(left.split()) and not _is_preposition(right.split()[0]):
+            return left, right
+        start = index + 3
+
+
+def _detach_trailing_parens(text: str) -> tuple[str, str]:
+    match = re.match(r"^(.*?)(\s*\([^()]+\))\s*$", text)
+    if match:
+        return match.group(1).strip(), match.group(2)
+    return text, ""
+
+
+def _adj_to_dative(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ую"):
+        changed = core[:-2] + "ой"
+    elif low.endswith("юю"):
+        changed = core[:-2] + "ей"
+    elif low.endswith("ые"):
+        changed = core[:-2] + "ым"
+    elif low.endswith("ие") and not low.endswith(("ние", "тие", "ание", "яние")):
+        changed = core[:-2] + "им"
+    elif low.endswith("ая"):
+        changed = core[:-2] + "ой"
+    elif low.endswith("ое"):
+        changed = core[:-2] + "ому"
+    elif low.endswith("ее") and len(core) > 3:
+        changed = core[:-2] + "ему"
+    elif low.endswith("ий") and len(core) > 3:
+        if low.endswith(("ский", "цкий", "ной", "ный")) or core[-3].casefold() in "кгхжшщч":
+            changed = core[:-2] + "ому"
+        else:
+            changed = core[:-2] + "ему"
+    elif low.endswith("ый") and len(core) > 3:
+        changed = core[:-2] + "ому"
+    else:
+        changed = core
+    return f"{prefix}{_match_caps(core, changed)}{suffix}"
+
+
+def _noun_to_dative(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low in {"меню", "кофе"}:
+        changed = core
+    elif low.endswith(("ение", "ание", "яние", "тие")):
+        changed = core[:-1] + "ю"
+    elif low.endswith(("ения", "ания", "яния")):
+        changed = core[:-1] + "ям"
+    elif low.endswith("ию") and len(core) > 3:
+        changed = core[:-2] + "ии"
+    elif low.endswith("ю") and len(core) > 3:
+        changed = core[:-2] + "ии" if low[-2] == "и" else core[:-1] + "е"
+    elif low.endswith("ия") and len(core) > 3:
+        changed = core[:-2] + "ии"
+    elif low.endswith("о") and len(core) > 2:
+        changed = core[:-1] + "у"
+    elif low.endswith("ы") and len(core) > 3:
+        changed = core[:-1] + "ам"
+    elif low.endswith("ии"):
+        changed = core
+    elif low.endswith("и") and len(core) > 3:
+        changed = core[:-1] + "ам"
+    elif low.endswith("а") and len(core) > 3:
+        changed = core[:-1] + "е"
+    elif low.endswith("я") and len(core) > 3:
+        changed = core[:-1] + "е"
+    elif low.endswith("ь") and len(core) > 2:
+        changed = core[:-1] + "и"
+    elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
+        changed = core + "у"
+    else:
+        changed = core
+    return f"{prefix}{_match_caps(core, changed)}{suffix}"
+
+
+def _dative_np(phrase: str) -> str:
+    words = _normalize_spaces(phrase).split()
+    if not words:
+        return phrase
+    head, tail = _split_prep_tail(words)
+    if not head:
+        return _normalize_spaces(phrase)
+    if len(head) >= 2 and all(
+        _is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая"))
+        for word in head[:-1]
+    ):
+        head = [_adj_to_dative(word) for word in head[:-1]] + [_noun_to_dative(head[-1])]
+    elif (
+        len(head) >= 3
+        and _is_adjective(head[0])
+        and any(word.casefold() == "и" for word in head[:-1])
+    ):
+        noun = _noun_to_dative(head[-1])
+        mids = []
+        for word in head[:-1]:
+            if word.casefold() == "и":
+                mids.append(word.casefold())
+            elif _is_adjective(word):
+                mids.append(_adj_to_dative(word))
+            else:
+                mids.append(word)
+        head = [*mids, noun]
+    else:
+        head = [_noun_to_dative(head[0]), *head[1:]]
+    text = _normalize_spaces(" ".join((*head, *tail)))
+    if text[:1].isupper():
+        text = text[:1].lower() + text[1:]
+    return text
+
+
+def _phrase_to_dative(text: str) -> str:
+    """Put a RESULT knowledge-object into the dative required by «опрос по»."""
+
+    phrase = _normalize_spaces(text).strip(" .")
+    if not phrase:
+        return text
+    body, parens = _detach_trailing_parens(phrase)
+    comma_parts = _split_direct_case_commas(body)
+    if len(comma_parts) > 1:
+        converted = ", ".join(_phrase_to_dative(part) for part in comma_parts)
+        return converted + parens
+    dash_parts = re.split(r"\s+[–—]\s+", body, maxsplit=1)
+    if len(dash_parts) == 2:
+        converted = (
+            _phrase_to_dative(dash_parts[0])
+            + " – "
+            + _phrase_to_dative(dash_parts[1])
+        )
+        return converted + parens
+    coord = _split_first_coord_and(body)
+    if coord:
+        converted = _phrase_to_dative(coord[0]) + " и " + _phrase_to_dative(coord[1])
+        return converted + parens
+    return _dative_np(body) + parens
 
 
 def _title_part_to_acc(part: str) -> str:
@@ -2702,6 +3028,8 @@ def _result_actions(result: str) -> list[tuple[str, str]]:
 def _product_control(result: str) -> str:
     text = result.rstrip(".")
     low = text.casefold()
+    if re.match(r"(?i)^(характеризует|называет)\b", text):
+        return ""
     report = re.fullmatch(r"(?i)составляет отч[её]т (.+)", text)
     if report:
         return f"проверка отчёта {report.group(1)}"
@@ -3022,6 +3350,11 @@ def control_from_frame(
     if "теоретическ" in type_low or "беседа" in type_low or (
         theory_hours and not practice_hours
     ):
+        proven = _control_from_proven_result(
+            planned_result, lesson_type=lesson_type
+        )
+        if proven:
+            return proven
         return _oral_quiz_control(frame, planned_result)
     named = _named_form_control(planned_result, frame, lesson_type)
     if named:
@@ -3697,7 +4030,7 @@ def _slot_control_from_result(result: str) -> str:
     text = _normalize_spaces(result).rstrip(".")
     matches = list(
         re.finditer(
-            r"(?i)\b(выполняет|осваивает|участвует\s+в)\b",
+            r"(?i)\b(выполняет|осваивает|участвует\s+в|выбирает)\b",
             text,
         )
     )
@@ -3731,6 +4064,8 @@ def _slot_control_from_result(result: str) -> str:
                 parts.append("выполнением " + _phrase_to_genitive(body))
         elif verb.startswith("участвует"):
             parts.append("участием в " + body)
+        elif verb == "выбирает":
+            parts.append("выбором " + _phrase_to_genitive(body))
         else:
             obj = re.sub(r"(?i)^один\b", "одного", body)
             parts.append("освоением " + obj)
@@ -3986,13 +4321,16 @@ def _quality_issue(
     if re.search(r"(?i)\b(?:подготовки|выполнения)\s+[а-яё]+(?:ое|ая|ые)\b", control):
         return "unsafe_control_case"
     if control.startswith("устный опрос") and not control.startswith("устный опрос по теме „"):
+        oral_part = control.split(";")[0].strip()
+        if _oral_object_grounded_in_result(oral_part, result):
+            return ""
         # Closed, already-supported knowledge heads; no arbitrary tail gets
         # certified solely because the generator put 'по' in front of it.
-        if not re.match(r"устный опрос по (?:истории|биографии|роли|строению|видам|значению|понятию)\b", control):
+        if not re.match(r"устный опрос по (?:истории|биографии|роли|строению|видам|значению|понятию)\b", oral_part):
             return "unsafe_oral_control"
         # A valid first head does not certify a raw object appended after a
         # comma (for example, nominative instead of the case required by 'по').
-        for tail in control.split(",")[1:]:
+        for tail in oral_part.split(",")[1:]:
             if not re.match(r"\s*(?:истории|биографии|роли|строению|видам|значению|понятию)\b", tail):
                 return "unsafe_oral_control"
     return ""
@@ -4114,7 +4452,15 @@ def _closed_candidate(
     candidate: ContentEngineV2Result, *, issue: str, topic_title: str, practical: bool,
 ) -> ContentEngineV2Result | None:
     """Small source-backed repairs, never a second unrestricted generator."""
-    if issue in {"unsafe_oral_control", "unsafe_control_case"}:
+    if issue == "unsafe_oral_control":
+        rebuilt = _control_from_proven_result(
+            candidate.planned_result, lesson_type=candidate.lesson_type
+        )
+        if rebuilt:
+            return replace(candidate, assessment_method=rebuilt)
+        _, control = _safe_topic_fields(topic_title, practical=practical)
+        return replace(candidate, assessment_method=control)
+    if issue == "unsafe_control_case":
         _, control = _safe_topic_fields(topic_title, practical=practical)
         return replace(candidate, assessment_method=control)
     if issue == "unproven_predicate" and re.match(r"(?i)^работа\s+(?:в|на|с)\s", candidate.frame.clause):

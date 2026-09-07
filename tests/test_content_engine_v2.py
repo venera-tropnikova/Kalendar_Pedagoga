@@ -773,15 +773,27 @@ def test_safe_topic_quotes_survive_multi_part_merge():
     assert _merge_part_controls(controls) == "; ".join(controls)
 
 
-def test_oral_control_valid_head_does_not_certify_raw_coordinated_object():
+def test_oral_control_grounded_in_result_is_not_replaced_by_title():
     from calendar_pedagoga.content_engine_v2 import _quality_issue, fill_from_source
     assert _quality_issue(
         "Характеризует историю создания учреждения, адрес.",
         "устный опрос по истории создания учреждения, адрес",
-    ) == "unsafe_oral_control"
+    ) == ""
     result = fill_from_source(
         topic_title="Учреждение", program_content="История создания учреждения, адрес.",
         theory_hours=1, practice_hours=0,
     )
     assert result.planned_result == "Характеризует историю создания учреждения, адрес."
-    assert result.assessment_method == "устный опрос по теме „Учреждение“"
+    control = result.assessment_method.casefold()
+    assert control.startswith("устный опрос по ")
+    assert not control.startswith("устный опрос по теме")
+    assert "истори" in control
+    assert "учрежден" in control
+
+
+def test_oral_control_rejects_object_absent_from_result():
+    from calendar_pedagoga.content_engine_v2 import _quality_issue
+    assert _quality_issue(
+        "Характеризует историю создания учреждения.",
+        "устный опрос по истории создания учреждения, паровоз",
+    ) == "unsafe_oral_control"
