@@ -684,7 +684,7 @@ def test_uncertain_phrase_uses_exact_grounded_safe_template(source, practical):
     elif source == "Проведение дидактических и ролевых игр.":
         expected_result = "Проводит дидактических и ролевых игр."
     elif practical and source == "Подготовка и участие в мероприятиях.":
-        expected_result = "Подготавливает в мероприятиях."
+        expected_result = "Участвует в мероприятиях."
     else:
         expected_result = (
             "Выполняет практическое задание по теме „Учебная тема“." if practical
