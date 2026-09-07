@@ -70,9 +70,9 @@ def test_real_key1_all_36_weeks_keep_sources_and_hours():
         for title in re.findall("„([^“]+)“", lesson.planned_result):
             assert title in titles
     assert generated[16].planned_result == "Выполняет практическое задание по теме „Животный мир Башкортостана“."
-    assert generated[0].lesson_type == "комбинированное занятие"
-    assert generated[21].lesson_type == "комбинированное занятие"
-    assert generated[25].lesson_type == "комбинированное занятие"
+    assert generated[0].lesson_type == "теоретическое + практическое занятие"
+    assert generated[21].lesson_type == "теоретическое + практическое занятие"
+    assert generated[25].lesson_type == "теоретическое + практическое занятие"
 
 
 @pytest.mark.parametrize(
@@ -384,7 +384,7 @@ def test_multi_topic_week_merges_both_grounded_triads():
                 ("A.1", "Теория", "Основные понятия.", 1, 0),
                 ("A.2", "Практика", "Выполнение упражнения.", 0, 1),
             ),
-            "комбинированное занятие",
+            "теоретическое занятие + практикум",
         ),
         (
             (
@@ -432,14 +432,14 @@ def _type_result(lesson_type):
     )
 
 
-def test_single_mixed_part_uses_combined_type_when_both_sources_are_present():
+def test_single_mixed_part_uses_explicit_generic_composition():
     actual = _aggregate_week_lesson_type(
         (_type_part(1, 1),),
         [_type_result("практическое занятие")],
         theory_text="Основные понятия.",
         practice_text="Выполнение упражнения.",
     )
-    assert actual == "комбинированное занятие"
+    assert actual == "теоретическое + практическое занятие"
 
 
 def test_mixed_part_with_missing_row_local_source_preserves_candidate(caplog):
@@ -452,3 +452,60 @@ def test_mixed_part_with_missing_row_local_source_preserves_candidate(caplog):
         )
     assert actual == "практическое занятие"
     assert "CE2 type ambiguity" in caplog.text
+
+
+def test_legacy_combined_candidate_never_becomes_final_type(caplog):
+    with caplog.at_level("INFO"):
+        actual = _aggregate_week_lesson_type(
+            (_type_part(1, 1),),
+            [_type_result("комбинированное занятие")],
+            theory_text="Основные понятия.",
+            practice_text="",
+        )
+    assert actual == "теоретико-практическое занятие"
+    assert "CE2 type ambiguity" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("practice_type", "expected"),
+    [
+        ("тестирование", "теоретическое занятие + тестирование"),
+        ("практикум", "теоретическое занятие + практикум"),
+        (
+            "практикум по ориентированию",
+            "теоретическое занятие + практикум по ориентированию",
+        ),
+    ],
+)
+def test_mixed_parts_compose_confirmed_practice_type(practice_type, expected):
+    actual = _aggregate_week_lesson_type(
+        (_type_part(1, 0), _type_part(0, 1)),
+        [_type_result("теоретическое занятие"), _type_result(practice_type)],
+        theory_text="Основные понятия.",
+        practice_text="Выполнение задания.",
+    )
+    assert actual == expected
+
+
+def test_mixed_week_preserves_one_confirmed_special_form():
+    actual = _aggregate_week_lesson_type(
+        (_type_part(1, 0), _type_part(0, 1)),
+        [_type_result("экскурсия"), _type_result("экскурсия")],
+        theory_text="Подготовка к экскурсии.",
+        practice_text="Проведение экскурсии.",
+    )
+    assert actual == "экскурсия"
+
+
+def test_mixed_week_with_conflicting_practice_types_uses_safe_fallback():
+    actual = _aggregate_week_lesson_type(
+        (_type_part(1, 0), _type_part(0, 1), _type_part(0, 1)),
+        [
+            _type_result("теоретическое занятие"),
+            _type_result("тестирование"),
+            _type_result("практикум"),
+        ],
+        theory_text="Основные понятия.",
+        practice_text="Тестирование и практическая работа.",
+    )
+    assert actual == "теоретико-практическое занятие"

@@ -3478,6 +3478,37 @@ _GENERIC_LESSON_TYPES = {
 }
 
 
+def _mixed_week_lesson_type(
+    parts: tuple[WeekTopicPart, ...],
+    derived_parts: list[ContentEngineV2Result],
+) -> str:
+    """Compose a mixed-week TYPE from aligned, already grounded part types."""
+
+    part_types = [item.lesson_type for item in derived_parts if item.lesson_type]
+    unique_types = list(dict.fromkeys(part_types))
+
+    # A single evidenced special form can describe the whole integrated week.
+    if len(unique_types) == 1 and unique_types[0] not in _GENERIC_LESSON_TYPES:
+        return unique_types[0]
+
+    practice_types = list(
+        dict.fromkeys(
+            item.lesson_type
+            for part, item in zip(parts, derived_parts)
+            if part.practice_hours and item.lesson_type
+        )
+    )
+    if len(practice_types) != 1:
+        return "теоретико-практическое занятие"
+
+    practice_type = practice_types[0]
+    if practice_type == "практическое занятие":
+        return "теоретическое + практическое занятие"
+    if practice_type in {"теоретическое занятие", "комбинированное занятие"}:
+        return "теоретико-практическое занятие"
+    return f"теоретическое занятие + {practice_type}"
+
+
 def _aggregate_week_lesson_type(
     parts: tuple[WeekTopicPart, ...],
     derived_parts: list[ContentEngineV2Result],
@@ -3503,20 +3534,17 @@ def _aggregate_week_lesson_type(
         return "практическое занятие"
 
     if theory_hours and practice_hours:
-        # One evidenced special form may describe an integrated lesson. For a
-        # multipart week it must be independently selected for every part.
-        if candidate and candidate not in _GENERIC_LESSON_TYPES:
-            return candidate
-        if theory_text.strip() and practice_text.strip():
-            return "комбинированное занятие"
-        logger.info(
-            "CE2 type ambiguity: mixed hours without both row-local sources"
-        )
-        if len(derived_parts) == 1:
-            return derived_parts[0].lesson_type
-        # Positional selection (types[0]) is forbidden for a composite week.
-        # The hour allocation itself proves that both modes are present.
-        return "комбинированное занятие"
+        if not (theory_text.strip() and practice_text.strip()):
+            logger.info(
+                "CE2 type ambiguity: mixed hours without both row-local sources"
+            )
+            if (
+                len(derived_parts) == 1
+                and derived_parts[0].lesson_type != "комбинированное занятие"
+            ):
+                return derived_parts[0].lesson_type
+            return "теоретико-практическое занятие"
+        return _mixed_week_lesson_type(parts, derived_parts)
 
     return candidate or (derived_parts[0].lesson_type if derived_parts else "")
 
