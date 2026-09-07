@@ -21,6 +21,7 @@ from calendar_pedagoga.content_engine_v2 import (
     fill_from_source,
     type_from_frame,
     derive_fields_v2,
+    select_source_clause,
 )
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
@@ -1180,6 +1181,77 @@ def test_event_name_and_lone_process_stay_generic_fallback():
     assert family.planned_result.startswith("Выполняет практическое задание")
     braking = _slot_fields("Торможение.", index=0, weeks=2)
     assert braking.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_stronger_form_is_not_replaced_by_quoted_event_title_overlap():
+    derived = derive_fields_v2(
+        topic_title="Дружба",
+        theory_text="",
+        practice_text="Экскурсии в парк. Мероприятие «Праздник дружбы».",
+        program_content="Экскурсии в парк. Мероприятие «Праздник дружбы».",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("совершает экскурсии")
+    assert "парк" in low
+    assert "мероприятие" not in low
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_topic_overlap_breaks_ties_inside_same_action_class():
+    clause, theory_only, _pool = select_source_clause(
+        topic_title="Краеведение",
+        theory_text="",
+        practice_text="Экскурсии в музей. Экскурсии по краеведению.",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert not theory_only
+    assert clause.casefold().startswith("экскурсии по краеведению")
+
+
+def test_family_week_keeps_grounded_walk_not_quoted_event():
+    derived = derive_fields_v2(
+        topic_title="Моя семья",
+        theory_text="Профессии родителей. Кем я буду, когда стану взрослым?",
+        practice_text=(
+            "Экскурсии на места работы родителей. "
+            "Мероприятие «Мама, папа, я – дружная семья»."
+        ),
+        program_content=(
+            "Экскурсии на места работы родителей. "
+            "Мероприятие «Мама, папа, я – дружная семья»."
+        ),
+        theory_hours=1,
+        practice_hours=1,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("совершает экскурсии")
+    assert "родител" in low
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert "по теме" not in derived.assessment_method.casefold()
+
+
+def test_ski_technique_list_stays_generic_fallback():
+    derived = derive_fields_v2(
+        topic_title="Лыжный туризм",
+        theory_text="",
+        practice_text=(
+            "Способы передвижения на лыжах. "
+            "Подъем «лесенкой», «ёлочкой». "
+            "Спуск с горы, способы поворота. "
+            "Торможение. "
+            "Преодоление препятствий на лыжах."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert derived.planned_result.startswith("Выполняет практическое задание")
+    assert "тормозит" not in derived.planned_result.casefold()
+    assert "преодолевает" not in derived.planned_result.casefold()
 
 
 @pytest.mark.parametrize(

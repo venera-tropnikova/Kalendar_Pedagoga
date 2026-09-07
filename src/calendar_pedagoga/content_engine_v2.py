@@ -2214,6 +2214,23 @@ def _enrich_with_neighbors(
     return ". ".join(item for _, item in parts), extra_texts
 
 
+def _clause_yields_proven_finite(clause: str, *, theory_only: bool) -> bool:
+    """True when the clause already converts to a proven finite RESULT."""
+
+    phrase, _frame = transform_clause_to_result(
+        clause,
+        theory_only=theory_only,
+        full_source=clause,
+        topic_title="",
+    )
+    phrase = _observable_result(phrase) if phrase else ""
+    if not phrase or not _is_finite_result_phrase(phrase):
+        return False
+    if not theory_only and phrase.casefold().startswith(("характеризует", "называет")):
+        return False
+    return True
+
+
 def select_source_clause(
     *,
     topic_title: str,
@@ -2286,7 +2303,13 @@ def select_source_clause(
         best_class = max(item[2] for item in classed)
         top = [item for item in classed if item[2] == best_class]
         if top and max(item[3] for item in top) == 0:
-            aligned = [item for item in classed if item[2] >= 2 and item[3] > 0]
+            aligned = [
+                item
+                for item in classed
+                if item[2] >= 2
+                and item[3] > 0
+                and _clause_yields_proven_finite(item[1], theory_only=as_theory)
+            ]
             if aligned:
                 top = aligned
         top.sort(key=lambda item: rank_key(item[1], as_theory, item[0]))
