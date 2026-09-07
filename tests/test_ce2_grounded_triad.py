@@ -10,9 +10,11 @@ from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
     ContentEngineV2Result,
     _aggregate_week_lesson_type,
+    _noun_gen_to_acc,
     _noun_nom_to_acc,
     _observable_result,
     _phrase_to_genitive,
+    _salvage_proven_finite_result,
     build_lesson_content_v2,
     control_from_frame,
     fill_from_source,
@@ -258,8 +260,11 @@ def test_partial_coordination_keeps_proven_finite_result():
         practice_hours=2,
     )
     low = result.planned_result.casefold()
-    assert low.startswith("подготавливает")
+    assert "подготавливает в" not in low
+    assert not re.search(r"(?i)^подготавливает\s+(?:в|во|на|по|при)\b", low)
     assert "участие" not in low
+    assert low.startswith("участвует в")
+    assert "мероприятиях" in low
     assert not result.planned_result.startswith("Выполняет практическое задание")
     assert result.assessment_method
 
@@ -968,3 +973,156 @@ def test_aid_methods_keep_proven_first_aid_action():
     assert derived.assessment_method.casefold().startswith(
         "педагогическое наблюдение за оказанием первой помощи"
     )
+
+
+def _slot_fields(practice: str, *, index: int, weeks: int) -> ContentEngineV2Result:
+    return derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=practice,
+        program_content=practice,
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=index,
+        practice_appearance_count=weeks,
+    )
+
+
+def test_packed_raw_np_does_not_wipe_later_finite_activity():
+    practice = (
+        "Краткие сведения о районе движения. "
+        "Выбор места привала. "
+        "Установка палатки. "
+        "Вязка туристских узлов."
+    )
+    first = _slot_fields(practice, index=0, weeks=2)
+    assert not first.planned_result.startswith("Выполняет практическое задание")
+    assert first.planned_result.casefold().startswith("выбирает")
+    assert re.search(r"\bмест\b", first.planned_result.casefold()) is None
+    assert "сведения" not in first.planned_result.casefold()
+    assert first.assessment_method
+    assert not first.assessment_method.startswith("устный опрос по теме")
+
+
+def test_packed_others_keep_only_convertible_activity():
+    practice = (
+        "Техника движения в походе: темп, режим. "
+        "Преодоление препятствий: крутые склоны. "
+        "Выбор места привала. "
+        "Установка палатки. "
+        "Вязка туристских узлов. "
+        "Занятия на скалодроме."
+    )
+    first = _slot_fields(practice, index=0, weeks=2)
+    assert first.planned_result.casefold().startswith("выбирает")
+    assert re.search(r"\bмест\b", first.planned_result.casefold()) is None
+    assert not first.planned_result.casefold().startswith("техника")
+    assert "преодоление препятствий" not in first.planned_result.casefold()
+
+
+def test_activity_plus_catalog_stretches_activity_when_w_equals_2():
+    practice = (
+        "Подготовка и участие в массовых мероприятиях. "
+        "Фестиваль, «Зимние старты», «Лесными тропами»."
+    )
+    first = _slot_fields(practice, index=0, weeks=2)
+    second = _slot_fields(practice, index=1, weeks=2)
+    low = first.planned_result.casefold()
+    assert not first.planned_result.startswith("Выполняет практическое задание")
+    assert "подготавливает в" not in low
+    assert not low.startswith("фестиваль")
+    assert first.planned_result == second.planned_result
+    assert first.lesson_type == second.lesson_type
+    assert first.assessment_method == second.assessment_method
+    assert any("продолжение" in item.casefold() for item in second.warnings)
+
+
+def test_activity_plus_catalog_stretches_activity_when_w_equals_4():
+    practice = (
+        "Подготовка и участие в массовых мероприятиях. "
+        "Фестиваль, «Зимние старты», «Лесными тропами»."
+    )
+    weeks = [_slot_fields(practice, index=index, weeks=4) for index in range(4)]
+    assert len({item.planned_result for item in weeks}) == 1
+    assert len({item.lesson_type for item in weeks}) == 1
+    assert "подготавливает в" not in weeks[0].planned_result.casefold()
+    assert not weeks[0].planned_result.startswith("Выполняет практическое задание")
+    assert not weeks[-1].planned_result.casefold().startswith("фестиваль")
+    assert all(
+        any("продолжение" in item.casefold() for item in week.warnings)
+        for week in weeks[1:]
+    )
+
+
+def test_slot_continuation_keeps_the_same_triad():
+    practice = "Выбор места привала."
+    first = _slot_fields(practice, index=0, weeks=2)
+    second = _slot_fields(practice, index=1, weeks=2)
+    assert first.planned_result == second.planned_result
+    assert first.lesson_type == second.lesson_type
+    assert first.assessment_method == second.assessment_method
+    assert first.planned_result.casefold().startswith("выбирает")
+    assert re.search(r"\bмест\b", first.planned_result.casefold()) is None
+    assert any("продолжение" in item.casefold() for item in second.warnings)
+
+
+def test_ambiguous_genitive_object_is_not_damaged():
+    assert _noun_gen_to_acc("места") == "места"
+    assert _noun_gen_to_acc("поля") == "поля"
+    assert _noun_gen_to_acc("рюкзака") == "рюкзак"
+    assert _noun_gen_to_acc("стола") == "стол"
+    assert _noun_gen_to_acc("снаряжения") == "снаряжение"
+    assert _noun_gen_to_acc("мест") == "места"
+
+    for source in ("Выбор места привала.", "Выбор поля."):
+        derived = derive_fields_v2(
+            topic_title="Тема занятия",
+            theory_text="",
+            practice_text=source,
+            program_content=source,
+            theory_hours=0,
+            practice_hours=2,
+        )
+        low = derived.planned_result.casefold()
+        assert low.startswith("выбирает")
+        assert re.search(r"\bмест\b", low) is None
+        assert "поль" not in low
+        assert not derived.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_salvage_drops_dependent_pp_with_unproven_conjunct():
+    assert _salvage_proven_finite_result(
+        "Подготавливает и участие в мероприятиях"
+    ) is None
+    assert _salvage_proven_finite_result(
+        "Подготавливает и участие на местности"
+    ) is None
+    salvaged = _salvage_proven_finite_result("Подготавливает и участие снаряжение")
+    assert salvaged is not None
+    assert salvaged.casefold().startswith("подготавливает снаряжение")
+    assert not re.search(r"(?i)\s(?:в|во|на|по|при)\s", salvaged)
+
+    derived = derive_fields_v2(
+        topic_title="Праздник",
+        theory_text="",
+        practice_text="Подготовка и участие в массовых мероприятиях.",
+        program_content="Подготовка и участие в массовых мероприятиях.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert "подготавливает в мероприятиях" not in low
+    assert not re.search(r"(?i)^подготавливает\s+(?:в|во|на|по|при)\b", low)
+    assert re.search(r"\bмест\b", low) is None
+    assert low.startswith("участвует")
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_catalog_alone_is_not_an_activity_slot():
+    practice = "Фестиваль, «Зимние старты», «Лесными тропами»."
+    first = _slot_fields(practice, index=0, weeks=2)
+    second = _slot_fields(practice, index=1, weeks=2)
+    assert first.planned_result.startswith("Выполняет практическое задание")
+    assert second.planned_result.startswith("Выполняет практическое задание")
+    assert first.lesson_type == "практическое занятие"
+    assert "фестиваль" not in first.lesson_type.casefold()

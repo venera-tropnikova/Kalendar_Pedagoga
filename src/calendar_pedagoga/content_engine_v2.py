@@ -110,6 +110,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "укладка": "укладывает",
     "упаковка": "упаковывает",
     "уход": "ухаживает",
+    "участие": "участвует",
     "отыскание": "находит",
     "фасовка": "фасует",
     "чтение": "читает",
@@ -328,9 +329,19 @@ def _noun_gen_to_acc(word: str) -> str:
             before_k = stem[-2].casefold()
             if before_k not in "аеёиоуыэюя":
                 return stem[:-1] + "ок"
+        # Neuter gen.sg / nom.pl «места» is 2 syllables; stripping -а yields
+        # gen.pl «мест». Masc. gen.sg «стола» / «натюрморта» stay convertible.
+        vowels = re.findall(r"(?i)[аеёиоуыэюя]", low)
+        if len(vowels) == 2 and re.search(r"(?i)[^аеёиоуыэюя][^аеёиоуыэюя]$", stem):
+            return word
         return stem
     if low.endswith("я") and len(word) > 3:
-        return word[:-1] + "ь"
+        stem = word[:-1]
+        # Short neuter gen.sg «поля» / «моря» would become «поль»; do not guess.
+        # Longer masc. ь-stems «лагеря» → «лагерь» remain regular.
+        if len(stem) <= 3:
+            return word
+        return stem + "ь"
     if low.endswith("ы") and len(word) > 3:
         return word[:-1] + "у"
     if low.endswith("и") and len(word) > 3:
@@ -3166,6 +3177,89 @@ def _slot_group_kind(kind: str) -> str:
     return kind
 
 
+def _unit_has_action_head(clause: str) -> bool:
+    """True when the clause names its own action or lesson form."""
+
+    text = _normalize_spaces(clause)
+    if not text:
+        return False
+    if _practice_unit_kind(text) != "other":
+        return True
+    if _is_auxiliary_practice_unit(text):
+        return True
+    head = _leading_activity_token(text)
+    if _is_action_head(head) or _is_leading_form_activity(head):
+        return True
+    if head and _CREATIVE_HEAD_RE.match(head):
+        return True
+    if _participation_lemma(head):
+        return True
+    return _action_class(text, theory_only=False) >= 2
+
+
+def _is_dependent_catalog_unit(clause: str) -> bool:
+    """Name-list / gloss with no action head: context, not a new activity."""
+
+    if _unit_has_action_head(clause):
+        return False
+    text = _normalize_spaces(clause)
+    if re.search(r"[«»\"„“]", text):
+        return True
+    parts = [part.strip() for part in re.split(r",\s+", text) if part.strip()]
+    return len(parts) >= 2 and not any(_unit_has_action_head(part) for part in parts)
+
+
+def _coalesce_activity_units(units: list[str]) -> list[str]:
+    """Attach dependent catalogs to the previous activity before slot packing."""
+
+    coalesced: list[str] = []
+    for unit in units:
+        if coalesced and _is_dependent_catalog_unit(unit):
+            prev = coalesced[-1].rstrip(" .")
+            coalesced[-1] = _normalize_spaces(f"{prev}: {unit}")
+            continue
+        coalesced.append(unit)
+    return coalesced
+
+
+def _finite_other_slot_result(clause: str) -> str:
+    phrase, _frame = transform_clause_to_result(
+        clause,
+        theory_only=False,
+        full_source=clause,
+        topic_title="",
+    )
+    phrase = _observable_result(phrase) if phrase else ""
+    if phrase and _is_finite_result_phrase(phrase):
+        return phrase
+    return ""
+
+
+def _strongest_finite_phrase(phrases: list[str]) -> str:
+    if not phrases:
+        return ""
+    if len(phrases) == 1:
+        return phrases[0]
+
+    def score(item: str) -> tuple[int, int]:
+        low = item.casefold()
+        strength = 0
+        if low.startswith("выполняет упражнения"):
+            strength = 3
+        elif _has_stem(low, _PRODUCE_STEMS + _PERFORM_STEMS):
+            strength = 2
+        elif _is_finite_result_phrase(item):
+            strength = 1
+        return (strength, -len(item))
+
+    return max(phrases, key=score)
+
+
+def _slot_has_named_practice_kind(slot: tuple[str, ...]) -> bool:
+    kinds = {_practice_unit_kind(item) for item in slot}
+    return bool(kinds & {"exercise", "element", "sport", "master", "game"})
+
+
 def _adj_to_locative(word: str) -> str:
     prefix, core, suffix = _strip_punct_word(word)
     low = core.casefold()
@@ -3409,14 +3503,33 @@ def _aggregate_slot_result(slot: tuple[str, ...]) -> str:
         elif group == "master":
             predicates.append(_master_result(units[0][1]))
         else:
-            phrase, _frame = transform_clause_to_result(
-                units[0][1],
-                theory_only=False,
-                full_source=units[0][1],
-                topic_title="",
-            )
-            predicates.append(_observable_result(phrase) if phrase else _lower_lead(units[0][1]))
-    return _cap_sentence(", ".join(predicates))
+            for _kind, clause in units:
+                phrase = _finite_other_slot_result(clause)
+                if phrase:
+                    predicates.append(phrase)
+    finite = [item for item in predicates if item and _is_finite_result_phrase(item)]
+    if not finite:
+        return ""
+    if not _slot_has_named_practice_kind(slot):
+        return _cap_sentence(_strongest_finite_phrase(finite))
+    return _cap_sentence(", ".join(finite))
+
+
+def _slot_selected_activity(slot: tuple[str, ...]) -> tuple[str, str]:
+    """One grounded activity frame for the slot: (clause, RESULT)."""
+
+    joined = _normalize_spaces(". ".join(slot))
+    result = _aggregate_slot_result(slot)
+    if not result:
+        return joined, ""
+    if _slot_has_named_practice_kind(slot):
+        return joined, result
+    target = result.rstrip(".")
+    for clause in slot:
+        phrase = _finite_other_slot_result(clause)
+        if phrase and _cap_sentence(phrase).rstrip(".") == target:
+            return clause, result
+    return (slot[0] if slot else ""), result
 
 
 def _slot_control_from_result(result: str) -> str:
@@ -3477,7 +3590,7 @@ def _derive_fields_candidate(
     """Цепочка: source → action/object/conditions → RESULT → CONTROL → TYPE."""
 
     warnings: list[str] = []
-    units = practice_units_from_text(practice_text)
+    units = _coalesce_activity_units(practice_units_from_text(practice_text))
     if (
         practice_hours
         and practice_appearance_count > 1
@@ -3491,9 +3604,11 @@ def _derive_fields_candidate(
             warnings.append(SLOT_PACK_WARNING)
         if continuation:
             warnings.append(SLOT_CONTINUE_WARNING)
-        planned_result = _aggregate_slot_result(slot)
-        frame = ActionFrame(
-            clause=". ".join(slot),
+        selected_clause, planned_result = _slot_selected_activity(slot)
+        assigned_clause = _normalize_spaces(". ".join(slot))
+        type_clause = selected_clause if planned_result else assigned_clause
+        selected_frame = ActionFrame(
+            clause=type_clause,
             action="",
             object="",
             conditions="",
@@ -3503,18 +3618,18 @@ def _derive_fields_candidate(
             lesson_type = "учебно-тренировочное занятие"
         else:
             lesson_type = type_from_frame(
-                frame,
+                selected_frame,
                 theory_hours=theory_hours,
                 practice_hours=practice_hours,
                 theory_text=theory_text,
-                practice_text=" ".join(slot),
-                program_content=program_content,
+                practice_text=type_clause,
+                program_content=type_clause,
                 planned_result=planned_result,
             )
         assessment = _slot_control_from_result(planned_result)
         if not assessment:
             assessment = control_from_frame(
-                frame,
+                selected_frame,
                 lesson_type=lesson_type,
                 theory_hours=theory_hours,
                 practice_hours=practice_hours,
@@ -3522,7 +3637,12 @@ def _derive_fields_candidate(
             )
         assessment = _align_control_to_result(assessment, planned_result)
         return ContentEngineV2Result(
-            frame=frame,
+            frame=ActionFrame(
+                clause=assigned_clause,
+                action="",
+                object="",
+                conditions="",
+            ),
             lesson_type=lesson_type,
             planned_result=planned_result,
             assessment_method=assessment,
@@ -3656,6 +3776,9 @@ def _quality_issue(
         while words and _is_adjective(words[0]):
             words.pop(0)
         if not words or words[0] not in _PARTICIPATION_CASES:
+            loc_np = match.group(1).casefold()
+            if clause and loc_np in clause.casefold():
+                continue
             return "unproven_participation_case"
     if re.search(r"(?i)\bориентирует\s+(?:на|по|в)\b", result):
         return "unproven_verb_valency"
@@ -3722,6 +3845,28 @@ def _unproven_raw_colon_subject(object_head: str, clause: str) -> bool:
     return bool(source_head and source_head.group(1).casefold() == object_head.casefold())
 
 
+def _salvage_drop_dependent_pp(rest: str) -> str:
+    """A PP after the dropped conjunct is its complement, not the left verb's."""
+
+    text = _normalize_spaces(rest)
+    if not text:
+        return ""
+    first = text.split()[0]
+    if _is_preposition(first):
+        return ""
+    return rest
+
+
+def _salvage_left_is_complete(left: str, remainder: str) -> bool:
+    """Bare finite verb without an object/complement is not a finished RESULT."""
+
+    body = _normalize_spaces(remainder)
+    if not body:
+        return False
+    first = body.split()[0]
+    return not _is_preposition(first)
+
+
 def _salvage_proven_finite_result(result: str) -> str | None:
     """Keep a proven finite predicate; drop one unproven coordinated neighbour."""
 
@@ -3733,7 +3878,26 @@ def _salvage_proven_finite_result(result: str) -> str | None:
     left, right, rest = match.group(1), match.group(2), match.group(3) or ""
     if left.casefold() not in allowed or right.casefold() in allowed:
         return None
-    return _cap_sentence(_normalize_spaces(f"{left}{rest}"))
+    kept_rest = _salvage_drop_dependent_pp(rest)
+    if not _salvage_left_is_complete(left, kept_rest):
+        return None
+    return _cap_sentence(_normalize_spaces(f"{left} {kept_rest}"))
+
+
+def _participatory_result_from_clause(clause: str) -> str | None:
+    """Finite RESULT from a source «участие + PP», without guessing locative."""
+
+    text = _normalize_spaces(clause).rstrip(".")
+    match = re.search(r"(?i)\bучастие\s+((?:в|во|на|по|при)\s+.+)$", text)
+    if not match:
+        return None
+    body = match.group(1).strip()
+    if not body or not _is_preposition(body.split()[0]):
+        return None
+    phrase = _normalize_spaces(f"участвует {body}")
+    if not _is_finite_result_phrase(phrase):
+        return None
+    return _cap_sentence(phrase)
 
 
 def _triad_from_selected_frame(
@@ -3788,6 +3952,9 @@ def _closed_candidate(
         salvaged = _salvage_proven_finite_result(candidate.planned_result)
         if salvaged:
             return replace(candidate, planned_result=salvaged)
+        participatory = _participatory_result_from_clause(candidate.frame.clause)
+        if participatory:
+            return replace(candidate, planned_result=participatory)
     return None
 
 
