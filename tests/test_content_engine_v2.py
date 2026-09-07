@@ -711,6 +711,7 @@ def test_uncertain_phrase_uses_exact_grounded_safe_template(source, practical):
     ("Подготавливает и участие в празднике.", "unproven_coordinated_predicate"),
     ("Совершает прогулки., Походы.", "broken_clause_join"),
     ("Характеризует материал (первая часть.", "unbalanced_delimiters"),
+    ("Ухаживает за ногами, обувью, одежную.", "unproven_verb_valency"),
 ])
 def test_quality_gate_rejects_unproven_candidates(result, reason):
     from calendar_pedagoga.content_engine_v2 import _quality_issue

@@ -200,10 +200,15 @@ _PREPOSITIONS = {
     "у",
     "о",
     "об",
+    "обо",
     "между",
     "перед",
     "над",
     "под",
+    "без",
+    "до",
+    "за",
+    "про",
 }
 
 _PERFORM_STEMS = (
@@ -487,6 +492,7 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
     seen_noun = False
     has_post_head = False
     colon_list = False
+    in_pp = False
     pending: list[str] = []
 
     def pending_cores() -> list[tuple[int, str, str, str]]:
@@ -512,6 +518,13 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
             (pending if (pending or not out) and not seen_noun else out).append(token)
             continue
         prefix, core, suffix = _strip_punct_word(token)
+        if _is_preposition(core):
+            in_pp = True
+        if in_pp and case == "acc":
+            if pending:
+                apply_pending(False, "m")
+            out.append(token)
+            continue
         if not core or _is_preposition(core) or core.casefold() in {"и", "или", "г"}:
             if core.casefold() in {"и", "или"} and not has_post_head and not colon_list:
                 seen_noun = False
@@ -592,6 +605,20 @@ def _split_object_and_conditions(remainder: str) -> tuple[str, str]:
         else:
             object_parts.append(raw)
     return _normalize_spaces(" ".join(object_parts)), _normalize_spaces(" ".join(condition_parts))
+
+
+def _complements_after_finite(remainder: str) -> tuple[str, str]:
+    """Direct object may be inflected; a leading governed PP is copied as-is."""
+
+    text = _normalize_spaces(remainder)
+    if not text:
+        return "", ""
+    first = _strip_punct_word(text.split()[0])[1]
+    if _is_preposition(first):
+        return "", text
+    obj, cond = _split_object_and_conditions(text)
+    obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
+    return obj_acc, cond
 
 
 def _verbal_noun_lemma(word: str) -> str:
@@ -1085,13 +1112,13 @@ def _creative_activity_result(text: str) -> tuple[str, str, str, str] | None:
     verb = _conjugate_verbal_noun(head)
     remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
     if verb:
-        obj, cond = _split_object_and_conditions(remainder)
-        obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
+        obj_acc, cond = _complements_after_finite(remainder)
         phrase = verb
         if obj_acc:
             phrase += f" {obj_acc}"
         if cond:
             phrase += f" {cond}"
+        obj, _cond = _split_object_and_conditions(remainder)
         return _normalize_spaces(phrase), head.casefold(), obj, cond
     np_words = [_decap_lexical(mod) for mod in mods] + [_decap_lexical(_noun_nom_to_acc(head))]
     phrase = _append_remainder("выполняет " + " ".join(np_words), remainder)
@@ -1151,13 +1178,13 @@ def _shared_object_after_paired_verbs(segment: str) -> tuple[str, str, str] | No
     verb2 = _conjugate_verbal_noun(second)
     if not verb1 or not verb2:
         return None
-    obj, cond = _split_object_and_conditions(remainder)
-    obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
+    obj_acc, cond = _complements_after_finite(remainder)
     phrase = f"{verb1} и {verb2}"
     if obj_acc:
         phrase += f" {obj_acc}"
     if cond:
         phrase += f" {cond}"
+    obj, _split_cond = _split_object_and_conditions(remainder)
     return _normalize_spaces(phrase), f"{first} и {second}", _normalize_spaces(f"{obj} {cond}")
 
 
@@ -1254,13 +1281,13 @@ def _transform_segment(
             remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
             if mods and mods[0].casefold().endswith("ое"):
                 verb = "практически " + verb
-            obj, cond = _split_object_and_conditions(remainder)
-            obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
+            obj_acc, cond = _complements_after_finite(remainder)
             phrase = verb
             if obj_acc:
                 phrase += f" {obj_acc}"
             if cond:
                 phrase += f" {cond}"
+            obj, _split_cond = _split_object_and_conditions(remainder)
             return _normalize_spaces(phrase), head.casefold(), obj, cond
 
     if not theory_only:
@@ -1445,32 +1472,7 @@ def _paren_has_actions(inner: str) -> bool:
     return any(_looks_like_verbal_noun(token) for token in re.findall(r"[А-Яа-яЁё]+", inner))
 
 
-_CAPACITY_PREPOSITIONS = {
-    "в",
-    "во",
-    "на",
-    "по",
-    "с",
-    "со",
-    "для",
-    "к",
-    "ко",
-    "от",
-    "из",
-    "у",
-    "о",
-    "об",
-    "обо",
-    "при",
-    "над",
-    "под",
-    "между",
-    "без",
-    "до",
-    "за",
-    "через",
-    "про",
-}
+_CAPACITY_PREPOSITIONS = _PREPOSITIONS
 
 
 def _role_noun_gen_pl_to_sg(word: str) -> tuple[str, str]:
@@ -3272,9 +3274,11 @@ def _observable_result_candidate(result: str) -> str:
                 locative = re.match(r"(?i)^((?:на|по|в)\s+\S+)\s+(.+)$", conditions)
                 if locative:
                     obj, conditions = locative.group(2), ""
+                elif _is_preposition(conditions.split()[0]):
+                    pass
                 else:
                     obj, conditions = conditions, ""
-            phrase = f"{verbs[operation]} {_inflect_object_phrase(obj, case='acc')}".strip()
+            phrase = f"{verbs[operation]} {_inflect_object_phrase(obj, case='acc') if obj else ''}".strip()
             if operation == "глазомерную оценку":
                 phrase += " глазомерно"
             if conditions:
@@ -3938,6 +3942,22 @@ def _quality_issue(
                 continue
             return "unproven_participation_case"
     if re.search(r"(?i)\bориентирует\s+(?:на|по|в)\b", result):
+        return "unproven_verb_valency"
+    prep_alt = "|".join(sorted((re.escape(item) for item in _PREPOSITIONS), key=len, reverse=True))
+    finite_alt = "|".join(
+        sorted((re.escape(item) for item in _proven_finite_predicates()), key=len, reverse=True)
+    )
+    for match in re.finditer(
+        rf"(?i)\b({finite_alt})\s+({prep_alt})\s+([^.]*)",
+        result.rstrip("."),
+    ):
+        complement = match.group(3)
+        if not re.search(r"(?i)[а-яё-]*(?:ую|юю)\b", complement):
+            continue
+        pp = _normalize_spaces(f"{match.group(2)} {complement}").casefold()
+        grounded = f"{clause} {source}".casefold()
+        if pp.rstrip(" .,") in grounded:
+            continue
         return "unproven_verb_valency"
     for text in (result, control):
         if text.count("(") != text.count(")") or text.count("«") != text.count("»") or text.count("„") != text.count("“"):

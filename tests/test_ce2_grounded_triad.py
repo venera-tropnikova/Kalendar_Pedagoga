@@ -14,6 +14,7 @@ from calendar_pedagoga.content_engine_v2 import (
     _noun_nom_to_acc,
     _observable_result,
     _phrase_to_genitive,
+    _quality_issue,
     _salvage_proven_finite_result,
     build_lesson_content_v2,
     control_from_frame,
@@ -1226,3 +1227,60 @@ def test_mixed_hours_empty_practice_still_conjugates_care_segment():
         practice_hours=1,
     )
     assert "ухаживает" in derived.planned_result.casefold()
+    assert "одеждой" in derived.planned_result.casefold()
+    assert "одежную" not in derived.planned_result.casefold()
+
+
+def _finite_fields(source: str, *, title: str = "Тема занятия") -> ContentEngineV2Result:
+    return derive_fields_v2(
+        topic_title=title,
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+
+def test_care_pp_keeps_instrumental_list():
+    derived = _finite_fields("Уход за ногами, обувью, одеждой.")
+    low = derived.planned_result.casefold()
+    assert "ухаживает за" in low
+    assert "одеждой" in low
+    assert "одежную" not in low
+
+
+def test_care_pp_keeps_tent_and_dishware():
+    derived = _finite_fields("Уход за палаткой, посудой.")
+    low = derived.planned_result.casefold()
+    assert "ухаживает за" in low
+    assert "посудой" in low
+    assert "посущую" not in low
+
+
+def test_observation_pp_keeps_instrumental_list():
+    derived = _finite_fields("Наблюдение за погодой, одеждой.")
+    low = derived.planned_result.casefold()
+    assert "наблюдает за" in low
+    assert "одеждой" in low
+    assert "одежную" not in low
+
+
+def test_work_with_keeps_source_pp():
+    derived = _finite_fields("Работа с картой.")
+    low = derived.planned_result.casefold()
+    assert "с картой" in low
+
+
+def test_participation_in_keeps_source_pp():
+    derived = _finite_fields("Участие в мероприятиях.")
+    low = derived.planned_result.casefold()
+    assert "участвует в" in low
+    assert "мероприятиях" in low
+
+
+def test_quality_rejects_ungrounded_acc_inside_governed_pp():
+    assert _quality_issue(
+        "Ухаживает за ногами, обувью, одежную.",
+        "устный опрос по теме „Личная гигиена“",
+    ) == "unproven_verb_valency"
