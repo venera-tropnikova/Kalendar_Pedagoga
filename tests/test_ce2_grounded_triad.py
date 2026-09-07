@@ -1126,3 +1126,103 @@ def test_catalog_alone_is_not_an_activity_slot():
     assert second.planned_result.startswith("Выполняет практическое задание")
     assert first.lesson_type == "практическое занятие"
     assert "фестиваль" not in first.lesson_type.casefold()
+
+
+def _theory_fields(source: str, *, title: str = "Тема занятия") -> ContentEngineV2Result:
+    return derive_fields_v2(
+        topic_title=title,
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+        practice_hours=0,
+    )
+
+
+def test_theory_characterizes_clothing_inventory():
+    derived = _theory_fields("Одежда, зимний инвентарь.")
+    low = derived.planned_result.casefold()
+    assert low.startswith("характеризует одежду")
+    assert "инвентарь" in low
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert derived.lesson_type == "теоретическое занятие"
+
+
+def test_theory_characterizes_compass_knowledge_head():
+    derived = _theory_fields(
+        "Компас, его устройство и назначение, правила обращения."
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("характеризует")
+    assert "устройство" in low or "назначение" in low
+    assert not low.startswith("характеризует компас")
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+
+
+def test_theory_characterizes_colon_heading_not_catalogue():
+    derived = _theory_fields(
+        "Памятники природы: Стерлитамакские шиханы, Капова пещера и другие."
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("характеризует памятники природы")
+    assert "шиханы" not in low
+    assert ":" not in derived.planned_result
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+
+
+def test_theory_characterizes_trip_heading_not_catalogue():
+    derived = _theory_fields(
+        "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие."
+    )
+    low = derived.planned_result.casefold()
+    assert "характеризует экскурсионные поездки" in low
+    assert "шиханы" not in low
+    assert ":" not in derived.planned_result
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+
+
+def test_theory_skips_interrogative_clause_with_parentheses():
+    question = "Что послужило началом строительства города (место, предприятие)?"
+    lone = _theory_fields(question, title="Мой город")
+    assert lone.planned_result.count("(") == lone.planned_result.count(")")
+    assert "(место." not in lone.planned_result
+    mixed = _theory_fields(
+        question + " Предприятия и учреждения города.",
+        title="Мой город",
+    )
+    low = mixed.planned_result.casefold()
+    assert mixed.planned_result.count("(") == mixed.planned_result.count(")")
+    assert "(место." not in mixed.planned_result
+    assert "что послужило" not in low
+    assert "предприятию" not in low
+    if not mixed.planned_result.startswith("Характеризует материал по теме"):
+        assert "предприятия" in low or "учреждения" in low or "памятник" in low
+
+
+def test_theory_only_does_not_conjugate_coordinated_activity():
+    derived = _theory_fields(
+        "Подготовка и участие в туристско-краеведческих массовых мероприятиях."
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("характеризует подготовку и участие")
+    assert not low.startswith("подготавливает")
+    assert "подготавливает и участие" not in low
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+
+
+def test_mixed_hours_empty_practice_still_conjugates_care_segment():
+    derived = derive_fields_v2(
+        topic_title="Личная гигиена",
+        theory_text=(
+            "Соблюдение правил личной гигиены, утренний и вечерний туалет, "
+            "уход за ногами, обувью, одеждой."
+        ),
+        practice_text="",
+        program_content=(
+            "Соблюдение правил личной гигиены, утренний и вечерний туалет, "
+            "уход за ногами, обувью, одеждой."
+        ),
+        theory_hours=1,
+        practice_hours=1,
+    )
+    assert "ухаживает" in derived.planned_result.casefold()

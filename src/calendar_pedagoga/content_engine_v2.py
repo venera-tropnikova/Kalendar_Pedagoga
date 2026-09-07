@@ -136,6 +136,22 @@ _KNOWLEDGE_NOUNS = {
     "биография",
 }
 
+# Knowledge heads that already satisfy the characterize-object case heuristic
+# or name a closed pedagogical object, never a topic/programme label.
+_THEORY_KNOWLEDGE_HEADS = _KNOWLEDGE_NOUNS | {
+    "устройство",
+    "назначение",
+    "требования",
+    "правила",
+    "применение",
+    "строение",
+}
+
+_INTERROGATIVE_START_RE = re.compile(
+    r"(?i)^(что|кто|как|почему|зачем|когда|где|куда|откуда|"
+    r"какой|какая|какое|какие|чем)\b"
+)
+
 # Состояние/знание, не действие учащегося (морфология, не предмет).
 _STATE_OR_KNOWLEDGE_LEMMAS = _KNOWLEDGE_NOUNS | {
     "значение",
@@ -1164,11 +1180,12 @@ def _transform_segment(
         phrase, action, obj = care
         return phrase, action, obj, ""
 
-    paired = _shared_object_after_paired_verbs(text)
-    if paired:
-        phrase, action, rest = paired
-        obj, cond = _split_object_and_conditions(rest)
-        return phrase, action, obj, cond
+    if not theory_only:
+        paired = _shared_object_after_paired_verbs(text)
+        if paired:
+            phrase, action, rest = paired
+            obj, cond = _split_object_and_conditions(rest)
+            return phrase, action, obj, cond
 
     tokens = text.split()
     mods, rest = _leading_modifiers(tokens)
@@ -1225,7 +1242,12 @@ def _transform_segment(
         return _normalize_spaces(phrase), " ".join(walk_words), obj, cond
 
     if _looks_like_verbal_noun(head):
-        if theory_only and head.casefold() in _KNOWLEDGE_NOUNS:
+        if theory_only and (
+            head.casefold() in _KNOWLEDGE_NOUNS or _coordinated_theory_activity(text)
+        ):
+            named = _name_kinds(text)
+            if named:
+                return named
             return _characterize(text)
         verb = _conjugate_verbal_noun(head)
         if verb:
@@ -1268,19 +1290,134 @@ def _name_kinds(text: str) -> tuple[str, str, str, str] | None:
     return phrase, "называет", f"виды {obj}", ""
 
 
-def _characterize(text: str) -> tuple[str, str, str, str]:
-    tokens = _normalize_spaces(text).split()
+def _is_interrogative_clause(text: str) -> bool:
+    cleaned = _normalize_spaces(text).strip(" .")
+    if not cleaned:
+        return False
+    if "?" in cleaned:
+        return True
+    return bool(_INTERROGATIVE_START_RE.match(cleaned))
+
+
+def _coordinated_theory_activity(text: str) -> bool:
+    match = re.match(
+        r"(?i)^([А-Яа-яЁё-]+)\s+и\s+([А-Яа-яЁё-]+)\b",
+        _normalize_spaces(text),
+    )
+    if not match:
+        return False
+    return _looks_like_verbal_noun(match.group(1)) and _looks_like_verbal_noun(match.group(2))
+
+
+def _heading_without_catalogue(text: str) -> str:
+    heading, _sep, _tail = _normalize_spaces(text).partition(":")
+    return heading.strip(" .")
+
+
+def _characterize_head_ok(word: str) -> bool:
+    core = _strip_punct_word(word)[1].casefold()
+    return bool(core and re.search(r"[ыиуюеь]$", core))
+
+
+def _is_theory_knowledge_token(word: str) -> bool:
+    core = _strip_punct_word(word)[1].casefold()
+    if not core:
+        return False
+    lemma = _verbal_noun_lemma(core).casefold()
+    return core in _THEORY_KNOWLEDGE_HEADS or lemma in _THEORY_KNOWLEDGE_HEADS
+
+
+def _proven_feminine_acc(core: str) -> str | None:
+    """Regular feminine accusative only when the nominative type is unambiguous."""
+
+    low = core.casefold()
+    lemma = _verbal_noun_lemma(core).casefold()
+    if low.endswith("ция"):
+        return _noun_nom_to_acc(core)
+    if low in _KNOWLEDGE_NOUNS or lemma in _KNOWLEDGE_NOUNS:
+        if low.endswith(("а", "я")):
+            return _noun_nom_to_acc(core)
+        return None
+    if low.endswith("ия"):
+        return None
+    if low.endswith(("ения", "ания", "яния", "ена", "ёна")):
+        return None
+    if low.endswith(("а", "я")):
+        return _noun_nom_to_acc(core)
+    return None
+
+
+def _theory_object_token(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    if not core:
+        return word
+    if _characterize_head_ok(core):
+        changed = _decap_lexical(core)
+    else:
+        proven = _proven_feminine_acc(core)
+        changed = _decap_lexical(proven if proven is not None else core)
+    return f"{prefix}{changed}{suffix}"
+
+
+def _theory_object_span_ok(tokens: list[str]) -> bool:
+    if not tokens or not _characterize_head_ok(tokens[0]):
+        return False
+    first_core = _strip_punct_word(tokens[0])[1].casefold()
+    if first_core.endswith(("ые", "ие")) and len(tokens) > 1 and _is_adjective(tokens[0]):
+        raw_next = _strip_punct_word(tokens[1])[1]
+        if not _characterize_head_ok(raw_next) and not _is_theory_knowledge_token(raw_next):
+            return False
+    return True
+
+
+def _proven_theory_object(heading: str) -> str | None:
+    """Object NP whose first word already satisfies the characterize case gate."""
+
+    text = _heading_without_catalogue(heading)
+    if not text or _is_interrogative_clause(text):
+        return None
+    tokens = text.split()
     if not tokens:
+        return None
+    for index, token in enumerate(tokens):
+        core = _strip_punct_word(token)[1].casefold()
+        if core in {"его", "ее", "её", "их", "этот", "эта", "это", "эти"}:
+            continue
+        nxt = (
+            _strip_punct_word(tokens[index + 1])[1].casefold()
+            if index + 1 < len(tokens)
+            else ""
+        )
+        if core in {"сведения", "сведение"} and nxt in {"о", "об", "обо"}:
+            if index + 2 >= len(tokens):
+                continue
+            after = list(tokens[index + 2 :])
+            after[0] = _theory_object_token(_prep_noun_to_nom(after[0]))
+            if _theory_object_span_ok(after):
+                return _normalize_spaces(" ".join(after))
+            continue
+        if _is_theory_knowledge_token(token):
+            rest = list(tokens[index:])
+            rest[0] = _theory_object_token(rest[0])
+            if _theory_object_span_ok(rest):
+                return _normalize_spaces(" ".join(rest))
+            if index > 0:
+                led = [_theory_object_token(tokens[0]), *tokens[1:index], *rest]
+                if _theory_object_span_ok(led):
+                    return _normalize_spaces(" ".join(led))
+            continue
+    led = [_theory_object_token(tokens[0]), *tokens[1:]]
+    if not _theory_object_span_ok(led):
+        return None
+    return _normalize_spaces(" ".join(led))
+
+
+def _characterize(text: str) -> tuple[str, str, str, str]:
+    obj = _proven_theory_object(text)
+    if not obj:
         return "", "", "", ""
-    first = tokens[0]
-    prefix, core, suffix = _strip_punct_word(first)
-    # Unknown nominal number is not inferred from its final letter.
-    acc = _noun_nom_to_acc(core) if core.casefold() in _KNOWLEDGE_NOUNS else core
-    if acc and not re.match(r"^[А-ЯЁ]{2,}$", acc):
-        acc = acc[:1].lower() + acc[1:]
-    tokens[0] = f"{prefix}{acc}{suffix}"
-    obj, cond = _split_object_and_conditions(" ".join(tokens))
-    phrase = _normalize_spaces("характеризует " + " ".join(tokens))
+    obj, cond = _split_object_and_conditions(obj)
+    phrase = _normalize_spaces("характеризует " + " ".join(part for part in (obj, cond) if part))
     return phrase, "характеризует", obj, cond
 
 
@@ -1634,6 +1771,8 @@ def _transform_clause_candidate(
     objects: list[str] = []
     conditions: list[str] = []
     for unit in _clause_units(source_clause) or [source_clause]:
+        if theory_only and _is_interrogative_clause(unit):
+            continue
         main = re.sub(r"\(([^()]*)\)", _paren, unit)
         for segment in _split_action_segments(_normalize_spaces(main)):
             phrase, action, obj, cond = _transform_segment(
@@ -1663,8 +1802,18 @@ def _transform_clause_candidate(
     result = _drop_knowledge_wrappers(result)
     result = _agree_capacity_role(result)
     result = _cap_sentence(_shorten_clause(result))
+    frame_clause = source_clause
+    if theory_only:
+        headings = [
+            _heading_without_catalogue(unit)
+            for unit in (_clause_units(source_clause) or [source_clause])
+            if unit and not _is_interrogative_clause(unit)
+        ]
+        headings = [item for item in headings if item]
+        if headings:
+            frame_clause = ". ".join(headings)
     frame = ActionFrame(
-        clause=source_clause,
+        clause=frame_clause,
         action=", ".join(actions),
         object=", ".join(objects),
         conditions=", ".join(conditions),
@@ -2019,6 +2168,14 @@ def select_source_clause(
     def pick(candidates: list[str], as_theory: bool) -> tuple[str, int] | None:
         if not candidates:
             return None
+        pool = candidates
+        if as_theory:
+            declarative = [unit for unit in candidates if not _is_interrogative_clause(unit)]
+            if declarative:
+                pool = declarative
+            grounded = [unit for unit in pool if _proven_theory_object(unit)]
+            if grounded:
+                pool = grounded
         classed = [
             (
                 idx,
@@ -2026,7 +2183,7 @@ def select_source_clause(
                 _action_class(unit, theory_only=as_theory),
                 topic_score(unit),
             )
-            for idx, unit in enumerate(candidates)
+            for idx, unit in enumerate(pool)
         ]
         best_class = max(item[2] for item in classed)
         top = [item for item in classed if item[2] == best_class]
