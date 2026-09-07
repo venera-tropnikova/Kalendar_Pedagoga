@@ -23,6 +23,7 @@ from calendar_pedagoga.lesson_content import (
     _split_explicit_practice,
     _week_result_source,
     derive_lesson_type,
+    finalize_lesson_type,
 )
 from calendar_pedagoga.practice_slots import (
     SLOT_CONTINUE_WARNING,
@@ -2474,6 +2475,27 @@ def type_from_frame(
         event_type = _activity_event_type(planned_result, frame.clause)
         if event_type:
             return event_type
+        if result.startswith("выполняет практическое задание по теме"):
+            # The generic safe RESULT intentionally carries no activity form.
+            # Recover TYPE only from the row-local practical source and
+            # only when the existing taxonomy has one unambiguous strong cue.
+            special_scores = {
+                label: score
+                for label, score in _line_form_scores(practice_text).items()
+                if label
+                not in {
+                    "практическое занятие",
+                    "беседа",
+                    "исследовательское занятие",
+                    "ситуационное занятие",
+                }
+            }
+            grounded = _dominant_label(
+                special_scores, min_score=2
+            )
+            if grounded:
+                return grounded
+            return "практическое занятие"
         if "составляет" in result and "план" in result and "план-график" in result:
             return "проектно-практическое занятие"
         if result.startswith(("проводит наблюдения", "проводит краеведческие наблюдения", "наблюдает")):
@@ -3274,9 +3296,20 @@ def derive_fields_v2(
         if not repair_issue:
             return repaired
     result, control = _safe_topic_fields(topic_title, practical=practical)
+    lesson_type = candidate.lesson_type
+    if lesson_type in _GENERIC_LESSON_TYPES:
+        lesson_type = type_from_frame(
+            candidate.frame,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+            theory_text=theory_text,
+            practice_text=practice_text,
+            program_content=context,
+            planned_result=result,
+        )
     return replace(
         candidate, frame=ActionFrame(candidate.frame.clause, "", "", ""),
-        planned_result=result, assessment_method=control,
+        lesson_type=lesson_type, planned_result=result, assessment_method=control,
         warnings=(*candidate.warnings, f"Безопасный шаблон CE2: {issue}."),
     )
 
@@ -3503,10 +3536,12 @@ def _mixed_week_lesson_type(
 
     practice_type = practice_types[0]
     if practice_type == "практическое занятие":
-        return "теоретическое + практическое занятие"
+        return "теоретико-практическое занятие"
     if practice_type in {"теоретическое занятие", "комбинированное занятие"}:
         return "теоретико-практическое занятие"
-    return f"теоретическое занятие + {practice_type}"
+    # A confirmed practical/special form is more useful than an artificial
+    # compound label and still describes the integrated mixed-hours lesson.
+    return practice_type
 
 
 def _aggregate_week_lesson_type(
@@ -3526,14 +3561,15 @@ def _aggregate_week_lesson_type(
     practice_hours = sum(part.practice_hours for part in parts)
 
     if theory_hours and not practice_hours:
-        return "теоретическое занятие"
+        candidate = "теоретическое занятие"
 
-    if practice_hours and not theory_hours:
+    elif practice_hours and not theory_hours:
         if candidate and candidate not in _GENERIC_LESSON_TYPES:
-            return candidate
-        return "практическое занятие"
+            pass
+        else:
+            candidate = "практическое занятие"
 
-    if theory_hours and practice_hours:
+    elif theory_hours and practice_hours:
         if not (theory_text.strip() and practice_text.strip()):
             logger.info(
                 "CE2 type ambiguity: mixed hours without both row-local sources"
@@ -3542,11 +3578,20 @@ def _aggregate_week_lesson_type(
                 len(derived_parts) == 1
                 and derived_parts[0].lesson_type != "комбинированное занятие"
             ):
-                return derived_parts[0].lesson_type
-            return "теоретико-практическое занятие"
-        return _mixed_week_lesson_type(parts, derived_parts)
+                candidate = derived_parts[0].lesson_type
+            else:
+                candidate = "теоретико-практическое занятие"
+        else:
+            candidate = _mixed_week_lesson_type(parts, derived_parts)
 
-    return candidate or (derived_parts[0].lesson_type if derived_parts else "")
+    else:
+        candidate = candidate or (derived_parts[0].lesson_type if derived_parts else "")
+
+    return finalize_lesson_type(
+        candidate,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
 
 
 def _merge_week_part_fields(

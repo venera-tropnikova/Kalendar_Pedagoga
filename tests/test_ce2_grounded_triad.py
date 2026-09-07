@@ -18,6 +18,7 @@ from calendar_pedagoga.content_engine_v2 import (
 )
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
+from calendar_pedagoga.lesson_content import is_single_pedagogical_lesson_type
 
 
 def test_row_local_practice_cannot_be_replaced_by_whole_program_theory():
@@ -70,9 +71,10 @@ def test_real_key1_all_36_weeks_keep_sources_and_hours():
         for title in re.findall("„([^“]+)“", lesson.planned_result):
             assert title in titles
     assert generated[16].planned_result == "Выполняет практическое задание по теме „Животный мир Башкортостана“."
-    assert generated[0].lesson_type == "теоретическое + практическое занятие"
-    assert generated[21].lesson_type == "теоретическое + практическое занятие"
-    assert generated[25].lesson_type == "теоретическое + практическое занятие"
+    assert all(is_single_pedagogical_lesson_type(row.lesson_type) for row in generated)
+    assert generated[0].lesson_type == "теоретико-практическое занятие"
+    assert generated[21].lesson_type == "теоретико-практическое занятие"
+    assert generated[25].lesson_type == "теоретико-практическое занятие"
 
 
 @pytest.mark.parametrize(
@@ -248,6 +250,8 @@ def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
         assert lesson.source is original
         assert original.topic_number == number
         assert lesson.lesson_type == lesson_type
+        assert is_single_pedagogical_lesson_type(lesson.lesson_type)
+        assert "+" not in lesson.lesson_type
         assert lesson.planned_result == result
         assert lesson.assessment_method == control
         assert clone.search(lesson.assessment_method) is None
@@ -384,7 +388,7 @@ def test_multi_topic_week_merges_both_grounded_triads():
                 ("A.1", "Теория", "Основные понятия.", 1, 0),
                 ("A.2", "Практика", "Выполнение упражнения.", 0, 1),
             ),
-            "теоретическое занятие + практикум",
+            "практикум",
         ),
         (
             (
@@ -432,14 +436,14 @@ def _type_result(lesson_type):
     )
 
 
-def test_single_mixed_part_uses_explicit_generic_composition():
+def test_single_mixed_part_uses_safe_theory_practice_fallback():
     actual = _aggregate_week_lesson_type(
         (_type_part(1, 1),),
         [_type_result("практическое занятие")],
         theory_text="Основные понятия.",
         practice_text="Выполнение упражнения.",
     )
-    assert actual == "теоретическое + практическое занятие"
+    assert actual == "теоретико-практическое занятие"
 
 
 def test_mixed_part_with_missing_row_local_source_preserves_candidate(caplog):
@@ -467,14 +471,26 @@ def test_legacy_combined_candidate_never_becomes_final_type(caplog):
 
 
 @pytest.mark.parametrize(
+    "invalid_type",
+    [
+        "теоретическое занятие + практикум",
+        "теория / практика",
+        "теоретическое и практическое занятие",
+        "лекция и практикум",
+        "экскурсия, практикум",
+        "комбинированное занятие",
+    ],
+)
+def test_final_type_invariant_rejects_composed_or_technical_labels(invalid_type):
+    assert not is_single_pedagogical_lesson_type(invalid_type)
+
+
+@pytest.mark.parametrize(
     ("practice_type", "expected"),
     [
-        ("тестирование", "теоретическое занятие + тестирование"),
-        ("практикум", "теоретическое занятие + практикум"),
-        (
-            "практикум по ориентированию",
-            "теоретическое занятие + практикум по ориентированию",
-        ),
+        ("тестирование", "тестирование"),
+        ("практикум", "практикум"),
+        ("практикум по ориентированию", "практикум по ориентированию"),
     ],
 )
 def test_mixed_parts_compose_confirmed_practice_type(practice_type, expected):
@@ -485,6 +501,42 @@ def test_mixed_parts_compose_confirmed_practice_type(practice_type, expected):
         practice_text="Выполнение задания.",
     )
     assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("Диагностика освоенных навыков.", "тестирование"),
+        ("Ролевая игра по теме занятия.", "игра"),
+        ("Экскурсионная поездка по родному краю.", "экскурсия"),
+        ("Практикум по оказанию первой помощи.", "практикум"),
+        ("Тренинг командного взаимодействия.", "тренинг"),
+        ("Творческая работа по материалам занятия.", "творческая работа"),
+        ("Соревнования туристских команд.", "соревнования"),
+        ("Наблюдения за сезонными изменениями.", "занятие-наблюдение"),
+        ("Поход выходного дня.", "поход"),
+        ("Прогулка по экологической тропе.", "прогулка"),
+    ],
+)
+def test_type_from_frame_recovers_only_grounded_strong_activity_cues(source, expected):
+    frame = ActionFrame(
+        clause=source,
+        action="",
+        object="",
+        conditions="",
+    )
+    assert (
+        type_from_frame(
+            frame,
+            planned_result="Выполняет практическое задание по теме «Раздел».",
+            theory_hours=0,
+            practice_hours=2,
+            theory_text="",
+            practice_text=source,
+            program_content=source,
+        )
+        == expected
+    )
 
 
 def test_mixed_week_preserves_one_confirmed_special_form():

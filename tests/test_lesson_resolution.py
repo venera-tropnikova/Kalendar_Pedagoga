@@ -52,3 +52,24 @@ def test_resolve_prefers_ai_values_when_present() -> None:
     assert first.theory_text == "AI теория"
     assert first.lesson_type == "Беседа"
     assert first.filled_by_ai
+
+
+def test_resolve_rejects_composed_ai_type_and_keeps_grounded_rule_type() -> None:
+    rows, program = _key_rows()
+    variant = AIWeekVariant(
+        request_id="week-01",
+        week_number=1,
+        theory_text=SourcedAIValue("", ()),
+        practice_text=SourcedAIValue("", ()),
+        lesson_type=SourcedAIValue(
+            "теоретическое занятие + практикум",
+            ("program_lesson_forms",),
+        ),
+        planned_result=SourcedAIValue("", ()),
+        assessment_method=SourcedAIValue("", ()),
+        warnings=(),
+    )
+    ai_result = AIBatchResult("test", (variant,), AIUsage(1, 1, 2, 0.0))
+    resolved = resolve_lesson_content(rows, ai_result)
+    assert resolved[0].lesson_type == rows[0].lesson_type
+    assert "+" not in resolved[0].lesson_type

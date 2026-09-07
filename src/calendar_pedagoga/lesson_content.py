@@ -46,6 +46,73 @@ def _normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+_PEDAGOGICAL_TYPE_MARKER_RE = re.compile(
+    r"(?i)(?:"
+    r"заняти|практикум|экскурси|игр|тестирован|диагностик|тренинг|"
+    r"тренировк|творческ\w*\s+работ|соревнован|поход|прогул|бесед|"
+    r"викторин|конкурс|сл[её]т|семинар|лекци|мастер-класс|квест"
+    r")"
+)
+_TYPE_COMPOSITION_RE = re.compile(
+    r"(?i)(?:теори\w*|теоретическ\w*)\s*(?:и|/|\+)\s*"
+    r"(?:практик\w*|практическ\w*)"
+)
+
+
+def is_single_pedagogical_lesson_type(value: str) -> bool:
+    """True только для одного пользовательского педагогического TYPE."""
+
+    normalized = _normalize_spaces(value)
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    if lowered == "комбинированное занятие":
+        return False
+    if any(separator in normalized for separator in ("+", ";", "|", "/", ",", "\n")):
+        return False
+    if _TYPE_COMPOSITION_RE.search(lowered):
+        return False
+    coordinated = re.split(r"\s+и\s+", lowered)
+    if len(coordinated) > 1 and sum(
+        _PEDAGOGICAL_TYPE_MARKER_RE.search(part) is not None
+        for part in coordinated
+    ) > 1:
+        return False
+    return _PEDAGOGICAL_TYPE_MARKER_RE.search(lowered) is not None
+
+
+def safe_lesson_type_fallback(*, theory_hours: int, practice_hours: int) -> str:
+    """Единый педагогический fallback без описания технического состава строки."""
+
+    if theory_hours and practice_hours:
+        return "теоретико-практическое занятие"
+    if practice_hours:
+        return "практическое занятие"
+    return "теоретическое занятие"
+
+
+def finalize_lesson_type(
+    candidate: str,
+    *,
+    theory_hours: int,
+    practice_hours: int,
+    grounded_fallback: str = "",
+) -> str:
+    """Сохранить grounded special form либо вернуть один безопасный TYPE."""
+
+    for value in (candidate, grounded_fallback):
+        normalized = _normalize_spaces(value)
+        if is_single_pedagogical_lesson_type(normalized):
+            return normalized
+    fallback = safe_lesson_type_fallback(
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    if not is_single_pedagogical_lesson_type(fallback):  # pragma: no cover
+        raise ValueError(f"Некорректный итоговый TYPE: {fallback!r}")
+    return fallback
+
+
 def _normalize_loose(text: str) -> str:
     return _normalize_spaces(text).casefold()
 
@@ -123,12 +190,13 @@ def _line_form_scores(text: str) -> dict[str, int]:
     for unit in _clause_units(text):
         low = unit.casefold()
         # Одна фраза — одна ведущая форма (иначе «игры на местности» даёт ничью).
-        if re.match(r"(?:дидактическ\w*\s+)?игр(?:а|ы)\b", low) or low.startswith(
-            "дидактические игры"
+        if re.match(
+            r"(?:(?:дидактическ|ролев|подвижн)\w*\s+)?игр(?:а|ы)\b",
+            low,
         ):
             add("игра", 2)
             continue
-        if re.match(r"экскурси(?:я|и|ю|ей)\b", low):
+        if re.match(r"экскурси(?:я|и|ю|ей|онн\w*)\b", low):
             add("экскурсия", 2)
             continue
         if re.match(r"прогул\w*\s+и\s+экскурси", low) or (
@@ -141,6 +209,33 @@ def _line_form_scores(text: str) -> dict[str, int]:
             continue
         if "практикум" in low:
             add("практикум", 2)
+            continue
+        if re.search(r"\b(?:тестирован|диагностик)\w*\b", low):
+            add("тестирование", 2)
+            continue
+        if re.search(r"\bтренинг\w*\b", low):
+            add("тренинг", 2)
+            continue
+        if "творческая работа" in low or re.match(
+            r"(?:аппликаци|конструирован|рисован)\w*\b", low
+        ):
+            add("творческая работа", 2)
+            continue
+        if re.match(r"наблюден\w*\b", low):
+            add("занятие-наблюдение", 2)
+            continue
+        if re.match(r"соревнован\w*\b", low) or re.search(
+            r"\bучасти\w*\s+в\s+[^.;]{0,40}соревнован", low
+        ):
+            add("соревнования", 2)
+            continue
+        if re.match(r"поход\w*\b", low) or re.search(
+            r"\bучасти\w*\s+в\s+поход", low
+        ):
+            add("поход", 2)
+            continue
+        if re.match(r"прогул\w*\b", low):
+            add("прогулка", 2)
             continue
         if "ситуационн" in low:
             add("ситуационное занятие", 2)

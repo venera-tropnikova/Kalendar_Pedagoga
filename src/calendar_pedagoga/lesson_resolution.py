@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from calendar_pedagoga.ai_provider import AIBatchResult, AI_FIELDS
-from calendar_pedagoga.lesson_content import LessonContentRow
+from calendar_pedagoga.lesson_content import LessonContentRow, finalize_lesson_type
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,12 @@ def resolve_lesson_content(
         if variant:
             theory = variant.theory_text.value or row.theory_text
             practice = variant.practice_text.value or row.practice_text
-            lesson_type = variant.lesson_type.value or row.lesson_type
+            lesson_type = finalize_lesson_type(
+                variant.lesson_type.value,
+                theory_hours=row.source.theory_hours,
+                practice_hours=row.source.practice_hours,
+                grounded_fallback=row.lesson_type,
+            )
             planned_result = variant.planned_result.value or row.planned_result
             assessment = variant.assessment_method.value or row.assessment_method
             warnings.extend(variant.warnings)
@@ -53,7 +58,11 @@ def resolve_lesson_content(
         else:
             theory = row.theory_text
             practice = row.practice_text
-            lesson_type = row.lesson_type
+            lesson_type = finalize_lesson_type(
+                row.lesson_type,
+                theory_hours=row.source.theory_hours,
+                practice_hours=row.source.practice_hours,
+            )
             planned_result = row.planned_result
             assessment = row.assessment_method
             filled_by_ai = False
