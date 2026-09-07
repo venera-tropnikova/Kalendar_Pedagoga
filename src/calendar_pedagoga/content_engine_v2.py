@@ -867,6 +867,231 @@ def _nominal_activity_result(text: str) -> tuple[str, str, str, str] | None:
     return None
 
 
+# Closed form-nouns that TYPE already recognizes. RESULT must emit the same
+# locative nouns that the quality gate accepts after «участвует в».
+_PARTICIPATION_CASES = frozenset({
+    "играх",
+    "игре",
+    "эстафетах",
+    "эстафете",
+    "занятиях",
+    "занятии",
+    "викторине",
+    "викторинах",
+    "конкурсе",
+    "конкурсах",
+    "соревнованиях",
+    "соревновании",
+    "походе",
+    "походах",
+})
+_CREATIVE_HEAD_RE = re.compile(
+    r"(?i)^(аппликаци|конструирован|рисован|рисунк|лепк)"
+)
+
+
+def _participation_lemma(token: str) -> str | None:
+    core = re.sub(r"[^\wёЁ]", "", token, flags=re.IGNORECASE).casefold()
+    if re.fullmatch(r"игр(?:а|ы|у|е|ами|ах)", core):
+        return "игра"
+    if core.startswith("эстафет"):
+        return "эстафета"
+    if core.startswith("викторин"):
+        return "викторина"
+    if core == "поход":
+        return "поход"
+    if re.fullmatch(r"походы|походов|походам|походами|походах", core):
+        return "походы"
+    return None
+
+
+def _participation_locative(lemma: str) -> str:
+    return {
+        "игра": "играх",
+        "эстафета": "эстафетах",
+        "викторина": "викторине",
+        "поход": "походе",
+        "походы": "походах",
+    }[lemma]
+
+
+def _adj_to_participation_locative(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith(("ых", "их")):
+        changed = core
+    elif low.endswith(("ые", "ая", "ое", "ый", "ой")):
+        changed = core[:-2] + "ых"
+    elif low.endswith(("ие", "яя", "ее", "ий")) and not low.endswith(("ние", "тие")):
+        changed = core[:-2] + "их"
+    else:
+        changed = core
+    return f"{prefix}{changed}{suffix}"
+
+
+def _one_participation_object(part: str) -> str | None:
+    tokens = _normalize_spaces(part).split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    lemma = _participation_lemma(head)
+    if lemma is None:
+        return None
+    loc = _participation_locative(lemma)
+    adjs = [_decap_lexical(_adj_to_participation_locative(mod)) for mod in mods]
+    remainder = " ".join(rest[1:]).strip()
+    words = [*adjs, loc]
+    if remainder:
+        words.append(remainder)
+    return _normalize_spaces(" ".join(words))
+
+
+def _participation_object_parts(clause: str) -> tuple[list[str], str]:
+    text = _normalize_spaces(clause)
+    head, _colon, tail = text.partition(":")
+    pieces = [
+        part.strip()
+        for part in re.split(r"(?:,\s+|\s+и\s+)", head)
+        if part.strip()
+    ]
+    objects = []
+    for part in pieces:
+        built = _one_participation_object(part)
+        if built:
+            objects.append(built)
+    return objects, tail.strip()
+
+
+def _participation_object_phrase(clause: str) -> str | None:
+    objects, tail = _participation_object_parts(clause)
+    if not objects:
+        return None
+    body = ", ".join(objects)
+    if tail:
+        return f"{body}: {tail}"
+    return body
+
+
+def _embedded_aid_result(text: str) -> tuple[str, str, str, str] | None:
+    """Proven «оказание помощи» even when wrapped in приёмы/способы."""
+
+    match = re.search(
+        r"(?i)\bоказан\w*\s+((?:[а-яё-]+\s+)*)(помощ[ьи])\b(.*)$",
+        _normalize_spaces(text),
+    )
+    if match is None:
+        return None
+    adj_span, _help, tail = match.group(1), match.group(2), match.group(3)
+    mods = [token for token in adj_span.split() if token]
+    if not _aid_activity_evidence(mods, tail):
+        if not any(mod.casefold().startswith(("перв", "доврачебн")) for mod in mods):
+            return None
+    acc_mods = [
+        _decap_lexical(_adj_to_acc(mod, plural=False, gender="f"))
+        for mod in mods
+    ]
+    phrase = _append_remainder(
+        "оказывает " + " ".join([*acc_mods, "помощь"]).strip(),
+        tail.strip(),
+    )
+    obj, cond = _split_object_and_conditions(
+        _normalize_spaces(" ".join([*acc_mods, "помощь", tail]))
+    )
+    return _normalize_spaces(phrase), "помощь", obj, cond
+
+
+def _is_foreign_activity_np(part: str) -> bool:
+    """Comma-part names a different form-activity, not a complement of this verb."""
+
+    tokens = _normalize_spaces(part).split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return False
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    if not head or _is_preposition(head):
+        return False
+    if _CREATIVE_HEAD_RE.match(head):
+        return True
+    return _participation_lemma(head) is not None
+
+
+def _keep_proven_action_complements(remainder: str) -> str:
+    """Keep only proven objects/PPs of this action; drop foreign NP conjuncts."""
+
+    text = _normalize_spaces(remainder)
+    if not text:
+        return ""
+    parts = re.split(r",\s+", text)
+    kept: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _is_foreign_activity_np(part):
+            break
+        kept.append(part)
+    return ", ".join(kept)
+
+
+def _creative_activity_result(text: str) -> tuple[str, str, str, str] | None:
+    cleaned = re.sub(
+        r"(?i)\s*\(\s*творческая работа\s*\)\s*",
+        " ",
+        _normalize_spaces(text),
+    ).strip(" ,")
+    if not cleaned:
+        return None
+    tokens = cleaned.split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    if head.casefold() == "работа" and any(
+        mod.casefold().startswith("творческ") for mod in mods
+    ):
+        return None
+    if not (
+        _CREATIVE_HEAD_RE.match(head)
+        or _line_form_scores(cleaned).get("творческая работа", 0) >= 2
+    ):
+        return None
+    verb = _conjugate_verbal_noun(head)
+    remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
+    if verb:
+        obj, cond = _split_object_and_conditions(remainder)
+        obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
+        phrase = verb
+        if obj_acc:
+            phrase += f" {obj_acc}"
+        if cond:
+            phrase += f" {cond}"
+        return _normalize_spaces(phrase), head.casefold(), obj, cond
+    np_words = [_decap_lexical(mod) for mod in mods] + [_decap_lexical(_noun_nom_to_acc(head))]
+    phrase = _append_remainder("выполняет " + " ".join(np_words), remainder)
+    obj, cond = _split_object_and_conditions(remainder)
+    return phrase, "творческая работа", obj, cond
+
+
+def _closed_form_activity_result(text: str) -> tuple[str, str, str, str] | None:
+    """Form-noun that TYPE can label → proven finite RESULT, or None."""
+
+    aid = _embedded_aid_result(text)
+    if aid:
+        return aid
+    objects, tail = _participation_object_parts(text)
+    if objects:
+        body = ", ".join(objects)
+        if tail:
+            body = f"{body}: {tail}"
+        lemma = _participation_lemma(
+            _leading_activity_token(text)
+        ) or _participation_lemma(objects[0].split()[-1])
+        phrase = "участвует в " + body
+        obj, cond = _split_object_and_conditions(body)
+        return _normalize_spaces(phrase), lemma or "участие", obj, cond
+    return _creative_activity_result(text)
+
+
 def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
     """«уход за X и ремонт» — два действия, без перечня видов ремонта."""
 
@@ -993,7 +1218,7 @@ def _transform_segment(
             return _characterize(text)
         verb = _conjugate_verbal_noun(head)
         if verb:
-            remainder = " ".join(rest[1:]).strip()
+            remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
             if mods and mods[0].casefold().endswith("ое"):
                 verb = "практически " + verb
             obj, cond = _split_object_and_conditions(remainder)
@@ -1009,6 +1234,9 @@ def _transform_segment(
         nominal = _nominal_activity_result(text)
         if nominal:
             return nominal
+        formed = _closed_form_activity_result(text)
+        if formed:
+            return formed
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
         named = _name_kinds(text)
@@ -1061,7 +1289,10 @@ def _transform_inner(text: str, *, theory_only: bool, full_source: str) -> str:
 
 
 def _paren_has_actions(inner: str) -> bool:
-    if _ACTIVITY_START_RE.search(inner.strip()):
+    text = (inner or "").strip()
+    if re.fullmatch(r"(?i)творческая работа", text):
+        return False
+    if _ACTIVITY_START_RE.search(text):
         return True
     return any(_looks_like_verbal_noun(token) for token in re.findall(r"[А-Яа-яЁё]+", inner))
 
@@ -2044,6 +2275,12 @@ def _head_noun_to_genitive(word: str) -> str:
         changed = core[:-1] + "ей"
     elif low.endswith("ции"):
         changed = core[:-1] + "й"
+    elif low.endswith("ию") and len(core) > 3:
+        # Inverse of _noun_nom_to_acc «-ия» → «-ию»: accusative → genitive «-ии».
+        changed = core[:-2] + "ии"
+    elif low.endswith("ю") and len(core) > 3:
+        # Inverse of _noun_nom_to_acc «-я» → «-ю»: accusative → genitive «-и».
+        changed = core[:-1] + "и"
     elif low.endswith("ь"):
         changed = core[:-1] + "и"
     elif low.endswith("й") and len(core) > 2 and core[-2].casefold() in "аеёиоуыэюя":
@@ -2413,6 +2650,35 @@ def _process_control(result: str, lesson_type: str) -> str:
         if len(cycle) == 1:
             return "педагогическое наблюдение при развертывании и свертывании лагеря"
         return "педагогическое наблюдение за " + _join_and(cycle)
+    if re.match(r"(?i)^участвует\s+в\b", result):
+        body = re.sub(r"(?i)^участвует\s+в\s*", "", result).rstrip(".")
+        return "педагогическое наблюдение за участием в " + body
+    if re.match(r"(?i)^выполняет\s+", result) and any(
+        stem in low for stem in ("аппликац", "конструир", "рисован", "рисунк")
+    ):
+        chunks: list[str] = []
+        for part in re.split(r",\s+", result.rstrip(".")):
+            if _is_finite_result_phrase(part):
+                chunks.append(part)
+            elif chunks:
+                chunks[-1] = f"{chunks[-1]}, {part}"
+        pieces: list[str] = []
+        for chunk in chunks:
+            verb = _leading_finite_verb(chunk)
+            obj = _normalize_spaces(chunk[len(verb) :]).strip(" ,")
+            verb_low = verb.casefold()
+            if verb_low == "выполняет":
+                focus = _phrase_to_genitive(obj) if obj else ""
+                pieces.append(_normalize_spaces(f"выполнением {focus}"))
+            elif verb_low == "конструирует":
+                pieces.append(_normalize_spaces(f"конструированием {obj}"))
+            elif verb_low == "рисует":
+                focus = _phrase_to_genitive(obj) if obj else ""
+                pieces.append(_normalize_spaces(f"рисованием {focus}"))
+        if pieces:
+            return "педагогическое наблюдение за " + _join_and(pieces)
+        focus = re.sub(r"(?i)^выполняет\s+", "", result).rstrip(".")
+        return "педагогическое наблюдение за выполнением " + _phrase_to_genitive(focus)
     if "экскурси" in type_low or low.startswith("совершает прогул") or low.startswith("совершает экскурси"):
         return "педагогическое наблюдение на экскурсии"
     return ""
@@ -2633,6 +2899,13 @@ def type_from_frame(
         event_type = _activity_event_type(planned_result, frame.clause)
         if event_type:
             return event_type
+        if re.match(r"(?i)^участвует\s+в\b", planned_result):
+            if re.search(r"(?i)\b(?:играх|игре|эстафет)", planned_result):
+                return "игра"
+            if "викторин" in result:
+                return "викторина"
+            if re.search(r"(?i)\bпоход", planned_result):
+                return "поход"
         if result.startswith("выполняет практическое задание по теме"):
             # The generic safe RESULT intentionally carries no activity form.
             # Recover TYPE only from the row-local practical source and
@@ -2695,6 +2968,15 @@ def type_from_frame(
                 return "практикум по транспортировке пострадавшего"
             if "дневник самоконтроля" in result and "дневника самоконтроля" in clause:
                 return "практикум по самоконтролю"
+            lead_token = _leading_activity_token(frame.clause)
+            if (
+                planned_result.casefold().startswith("выполняет")
+                and lead_token
+                and _CREATIVE_HEAD_RE.match(lead_token)
+                and _dominant_label(_line_form_scores(frame.clause), min_score=2)
+                == "творческая работа"
+            ):
+                return "творческая работа"
             return "практикум"
     lead = _leading_clause(frame)
     scores = _line_form_scores(lead)
@@ -3031,6 +3313,17 @@ def _compress_exercise_remainders(remainders: list[str]) -> str:
 
 
 def _game_participate_object(clause: str, *, more_follow: bool) -> str:
+    objects, tail = _participation_object_parts(clause)
+    if objects:
+        if more_follow and len(objects) > 1:
+            body = ", ".join(objects)
+        elif len(objects) > 1:
+            body = ", ".join(objects)
+        else:
+            body = objects[0]
+        if tail:
+            return f"{body}: {tail}" if not tail.startswith(" ") else f"{body}:{tail}"
+        return body
     text = _normalize_spaces(clause)
     head, colon, tail = text.partition(":")
     pieces = [part.strip() for part in re.split(r"\s+и\s+", head) if part.strip()]
@@ -3362,9 +3655,7 @@ def _quality_issue(
         words = match.group(1).casefold().split()
         while words and _is_adjective(words[0]):
             words.pop(0)
-        if not words or words[0] not in {
-            "играх", "эстафетах", "занятиях", "викторине", "конкурсе", "соревнованиях",
-        }:
+        if not words or words[0] not in _PARTICIPATION_CASES:
             return "unproven_participation_case"
     if re.search(r"(?i)\bориентирует\s+(?:на|по|в)\b", result):
         return "unproven_verb_valency"

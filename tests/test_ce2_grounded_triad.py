@@ -10,7 +10,9 @@ from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
     ContentEngineV2Result,
     _aggregate_week_lesson_type,
+    _noun_nom_to_acc,
     _observable_result,
+    _phrase_to_genitive,
     build_lesson_content_v2,
     control_from_frame,
     fill_from_source,
@@ -789,3 +791,180 @@ def test_theory_only_does_not_wrap_nominal_activity_as_performance():
     low = derived.planned_result.casefold()
     assert not low.startswith("выполняет закаливание")
     assert not low.startswith("закаливает")
+
+
+def test_w1_didactic_games_become_participation():
+    source = (
+        "Дидактические игры: «Загадки-задачки Рассеянного», "
+        "«Сколько орехов», «Что растет в родном краю»."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("участвует в дидактических играх")
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert derived.lesson_type == "игра"
+    assert derived.assessment_method.casefold().startswith(
+        "педагогическое наблюдение за участием в"
+    )
+
+
+def test_w_gt1_outdoor_games_use_same_participation_converter():
+    practice = (
+        "Закаливание природными факторами (солнце, воздух, вода). "
+        "Подвижные игры на свежем воздухе, эстафеты, дни здоровья."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=practice,
+        program_content=practice,
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=1,
+        practice_appearance_count=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("участвует в подвижных играх")
+    assert "эстафетах" in low
+    assert "дни здоровья" not in low
+    assert derived.lesson_type == "игра"
+    assert derived.assessment_method.casefold().startswith(
+        "педагогическое наблюдение за участием в"
+    )
+
+
+def test_day_hikes_become_participation_in_hike():
+    source = "Походы выходного дня."
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("участвует в походах")
+    assert "выходного дня" in low
+    assert derived.lesson_type == "поход"
+    assert derived.assessment_method.casefold().startswith(
+        "педагогическое наблюдение за участием в"
+    )
+
+
+def test_creative_source_stays_observable_without_invented_verbs():
+    source = (
+        "Аппликация, конструирование из бумаги, рисунки национальной одежды, "
+        "орнамента (творческая работа)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert "апплицирует" not in low
+    assert any(
+        token in low for token in ("выполняет аппликацию", "конструирует")
+    )
+    assert derived.lesson_type == "творческая работа"
+    assert derived.assessment_method
+    assert not derived.assessment_method.startswith("устный опрос по теме")
+
+
+def test_creative_finite_result_does_not_glue_raw_np_tail():
+    source = (
+        "Аппликация, конструирование из бумаги, рисунки национальной одежды, "
+        "орнамента (творческая работа)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    result = derived.planned_result.rstrip(".")
+    low = result.casefold()
+    assert "конструирует из бумаги, рисунки" not in low
+    assert "рисунк" not in low
+    assert "орнамент" not in low
+    assert "выполняет аппликацию" in low
+    assert "конструирует из бумаги" in low
+    finite_re = re.compile(r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b")
+    for part in re.split(r",\s+", result):
+        assert finite_re.match(part), part
+    control = derived.assessment_method.casefold()
+    assert "рисунк" not in control
+    assert "орнамент" not in control
+    assert "конструирует" not in control
+    assert "выполнением" in control
+    assert "конструированием" in control
+    assert derived.lesson_type == "творческая работа"
+
+
+_ACCUSATIVE_AFTER_PERFORMING = re.compile(
+    r"(?i)за выполнением\s+(?:[а-яё-]+(?:ую|юю)\s+)*"
+    r"[а-яё-]*(?:ию|(?<![и])ю|(?:[бвгджзклмнпрстфхцчшщ])у)\b"
+)
+
+
+def test_control_after_performing_rejects_accusative_object():
+    assert _phrase_to_genitive(_noun_nom_to_acc("лекция")) == "лекции"
+    assert _phrase_to_genitive(_noun_nom_to_acc("неделя")) == "недели"
+    source = (
+        "Аппликация, конструирование из бумаги, рисунки национальной одежды, "
+        "орнамента (творческая работа)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    control = derived.assessment_method
+    assert control == (
+        "педагогическое наблюдение за выполнением аппликации "
+        "и конструированием из бумаги"
+    )
+    assert _ACCUSATIVE_AFTER_PERFORMING.search(control) is None
+    assert _ACCUSATIVE_AFTER_PERFORMING.search(
+        "педагогическое наблюдение за выполнением аппликацию и конструированием из бумаги"
+    )
+
+
+def test_aid_methods_keep_proven_first_aid_action():
+    source = (
+        "Основные приёмы оказания первой доврачебной помощи при ожогах, "
+        "обморожениях."
+    )
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith("оказывает")
+    assert "помощь" in low
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert derived.lesson_type == "практикум по оказанию первой помощи"
+    assert derived.assessment_method.casefold().startswith(
+        "педагогическое наблюдение за оказанием первой помощи"
+    )
