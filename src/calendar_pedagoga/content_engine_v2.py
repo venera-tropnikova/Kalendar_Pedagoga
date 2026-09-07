@@ -952,6 +952,8 @@ def _participation_lemma(token: str) -> str | None:
         return "эстафета"
     if core.startswith("викторин"):
         return "викторина"
+    if core.startswith("заняти"):
+        return "занятие"
     if core == "поход":
         return "поход"
     if re.fullmatch(r"походы|походов|походам|походами|походах", core):
@@ -964,6 +966,7 @@ def _participation_locative(lemma: str) -> str:
         "игра": "играх",
         "эстафета": "эстафетах",
         "викторина": "викторине",
+        "занятие": "занятиях",
         "поход": "походе",
         "походы": "походах",
     }[lemma]
@@ -992,9 +995,13 @@ def _one_participation_object(part: str) -> str | None:
     lemma = _participation_lemma(head)
     if lemma is None:
         return None
+    remainder = " ".join(rest[1:]).strip()
+    if lemma == "занятие":
+        first = remainder.split()[0] if remainder.split() else ""
+        if not first or not _is_preposition(first):
+            return None
     loc = _participation_locative(lemma)
     adjs = [_decap_lexical(_adj_to_participation_locative(mod)) for mod in mods]
-    remainder = " ".join(rest[1:]).strip()
     words = [*adjs, loc]
     if remainder:
         words.append(remainder)
@@ -1144,6 +1151,86 @@ def _closed_form_activity_result(text: str) -> tuple[str, str, str, str] | None:
         obj, cond = _split_object_and_conditions(body)
         return _normalize_spaces(phrase), lemma or "участие", obj, cond
     return _creative_activity_result(text)
+
+
+_KNOWLEDGE_PP_STARTS = frozenset({"о", "об", "обо", "про"})
+
+
+def _remainder_is_quoted_label(remainder: str) -> bool:
+    return bool(re.search(r"[«»\"„“]", remainder or ""))
+
+
+def _remainder_is_dependent_object(remainder: str) -> bool:
+    """Verbal-noun object/complement: NP without a leading preposition."""
+
+    text = _normalize_spaces(remainder)
+    if not text or text.startswith(":") or _remainder_is_quoted_label(text):
+        return False
+    tokens = text.split()
+    if _is_preposition(tokens[0]):
+        return False
+    _mods, rest = _leading_modifiers(tokens)
+    return bool(rest)
+
+
+def _remainder_is_knowledge_np(remainder: str) -> bool:
+    first = remainder.split()[0].casefold() if remainder.split() else ""
+    if first in _KNOWLEDGE_PP_STARTS:
+        return True
+    tokens = remainder.split()
+    _mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return False
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    low = head.casefold()
+    if _is_theory_knowledge_token(head):
+        return True
+    if low.endswith(("ений", "аний", "яний")) and len(low) > 5:
+        nom_pl = low[:-4] + ("ения" if low.endswith("ений") else "ания" if low.endswith("аний") else "яния")
+        return nom_pl in _THEORY_KNOWLEDGE_HEADS or _verbal_noun_lemma(nom_pl).casefold() in _THEORY_KNOWLEDGE_HEADS
+    return False
+
+
+def _practice_activity_np_object(mods: list[str], head: str, remainder: str) -> str:
+    acc = _proven_feminine_acc(head)
+    noun = _decap_lexical(acc if acc is not None else head)
+    words = [_decap_lexical(mod) for mod in mods] + [noun]
+    return _append_remainder(" ".join(words), remainder)
+
+
+def _unconjugated_practice_activity_result(
+    text: str,
+) -> tuple[str, str, str, str] | None:
+    """Practice activity NP without a proven verb → выполняет + source NP."""
+
+    tokens = _normalize_spaces(text).split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head, remainder = _head_core_and_remainder(rest)
+    if not remainder.strip():
+        return None
+    if _remainder_is_quoted_label(remainder) or _remainder_is_knowledge_np(remainder):
+        return None
+    if not _remainder_is_dependent_object(remainder):
+        return None
+    if _conjugate_verbal_noun(head):
+        return None
+    if _participation_lemma(head) == "занятие":
+        return None
+    lemma = _verbal_noun_lemma(head).casefold()
+    deverbal_ka = bool(re.search(r"(?i)(?:тка|дка|нка|вка|жка|зка)$", lemma))
+    # A -ка suffix is only a candidate filter, not activity evidence.
+    if not (_has_stem(head, _PERFORM_STEMS) or deverbal_ka):
+        return None
+    obj_np = _practice_activity_np_object(mods, head, remainder)
+    obj, cond = _split_object_and_conditions(remainder)
+    return (
+        _normalize_spaces("выполняет " + obj_np),
+        head.casefold(),
+        obj,
+        cond,
+    )
 
 
 def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
@@ -1297,6 +1384,9 @@ def _transform_segment(
         formed = _closed_form_activity_result(text)
         if formed:
             return formed
+        unconjugated = _unconjugated_practice_activity_result(text)
+        if unconjugated:
+            return unconjugated
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
         named = _name_kinds(text)
@@ -1614,7 +1704,7 @@ def _is_finite_result_phrase(phrase: str) -> bool:
     return bool(_RESULT_FINITE_RE.match(phrase.strip()))
 
 
-def _merge_repeated_verbs(text: str) -> str:
+def _merge_repeated_verbs(text: str, *, only: frozenset[str] | None = None) -> str:
     parts = re.split(r",\s+", text)
     if len(parts) < 2:
         return text
@@ -1623,12 +1713,18 @@ def _merge_repeated_verbs(text: str) -> str:
     prev_verb = ""
     for part in parts:
         found = verb_re.match(part)
-        if found and prev_verb and found.group(1).casefold() == prev_verb:
+        verb = found.group(1).casefold() if found else ""
+        if (
+            found
+            and prev_verb
+            and verb == prev_verb
+            and (only is None or verb in only)
+        ):
             rest = part[found.end() :]
             if merged:
                 merged[-1] = f"{merged[-1].rstrip(',')} и {rest}"
             continue
-        prev_verb = found.group(1).casefold() if found else ""
+        prev_verb = verb
         merged.append(part)
     return ", ".join(merged)
 
@@ -2601,6 +2697,17 @@ def _phrase_to_genitive(phrase: str) -> str:
     else:
         head = [_head_noun_to_genitive(head[0]), *head[1:]]
     return _normalize_spaces(" ".join((*head, *tail)))
+
+
+def _coordinated_phrase_to_genitive(phrase: str) -> str:
+    parts = [
+        part.strip()
+        for part in re.split(r"\s+и\s+", _normalize_spaces(phrase))
+        if part.strip()
+    ]
+    if len(parts) < 2:
+        return _phrase_to_genitive(phrase)
+    return " и ".join(_phrase_to_genitive(part) for part in parts)
 
 
 def _phrase_to_dative_noun(noun: str) -> str:
@@ -3752,9 +3859,11 @@ def _finite_other_slot_result(clause: str) -> str:
         topic_title="",
     )
     phrase = _observable_result(phrase) if phrase else ""
-    if phrase and _is_finite_result_phrase(phrase):
-        return phrase
-    return ""
+    if not phrase or not _is_finite_result_phrase(phrase):
+        return ""
+    if phrase.casefold().startswith(("характеризует", "называет")):
+        return ""
+    return phrase
 
 
 def _strongest_finite_phrase(phrases: list[str]) -> str:
@@ -4029,12 +4138,19 @@ def _aggregate_slot_result(slot: tuple[str, ...]) -> str:
                 phrase = _finite_other_slot_result(clause)
                 if phrase:
                     predicates.append(phrase)
-    finite = [item for item in predicates if item and _is_finite_result_phrase(item)]
+    finite = [
+        item.rstrip(" .")
+        for item in predicates
+        if item and _is_finite_result_phrase(item)
+    ]
     if not finite:
         return ""
-    if not _slot_has_named_practice_kind(slot):
+    if not _slot_has_named_practice_kind(slot) and len(finite) <= 1:
         return _cap_sentence(_strongest_finite_phrase(finite))
-    return _cap_sentence(", ".join(finite))
+    joined = [finite[0], *(_lower_lead(item) for item in finite[1:])]
+    return _cap_sentence(
+        _merge_repeated_verbs(", ".join(joined), only=frozenset({"выполняет"}))
+    )
 
 
 def _slot_selected_activity(slot: tuple[str, ...]) -> tuple[str, str]:
@@ -4044,7 +4160,8 @@ def _slot_selected_activity(slot: tuple[str, ...]) -> tuple[str, str]:
     result = _aggregate_slot_result(slot)
     if not result:
         return joined, ""
-    if _slot_has_named_practice_kind(slot):
+    finite_units = [clause for clause in slot if _finite_other_slot_result(clause)]
+    if _slot_has_named_practice_kind(slot) or len(finite_units) > 1:
         return joined, result
     target = result.rstrip(".")
     for clause in slot:
@@ -4089,7 +4206,7 @@ def _slot_control_from_result(result: str) -> str:
                         obj = obj[: -len(" элементы акробатики")] + " элементов акробатики"
                 parts.append("выполнением " + _normalize_spaces(obj))
             else:
-                parts.append("выполнением " + _phrase_to_genitive(body))
+                parts.append("выполнением " + _coordinated_phrase_to_genitive(body))
         elif verb.startswith("участвует"):
             parts.append("участием в " + body)
         elif verb == "выбирает":

@@ -1129,6 +1129,81 @@ def test_catalog_alone_is_not_an_activity_slot():
     assert "фестиваль" not in first.lesson_type.casefold()
 
 
+def test_lessons_with_prepositional_place_are_participation():
+    derived = _slot_fields("Занятия в бассейне.", index=0, weeks=2)
+    low = derived.planned_result.casefold()
+    assert low.startswith("участвует в занятиях в бассейне")
+    assert "устанавливает" not in low
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert "по теме" not in derived.assessment_method.casefold()
+
+
+def test_bare_lessons_label_is_not_participation():
+    derived = _slot_fields("Занятия.", index=0, weeks=2)
+    assert derived.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_packed_climbing_slot_keeps_all_source_activities():
+    practice = (
+        "Техника движения в походе: темп, режим. "
+        "Преодоление препятствий: залесенная местность, крутые склоны. "
+        "Выбор места привала. "
+        "Занятия на скалодроме. "
+        "Установка палатки. "
+        "Вязка туристских узлов."
+    )
+    derived = _slot_fields(practice, index=1, weeks=2)
+    low = derived.planned_result.casefold()
+    assert derived.planned_result == (
+        "Участвует в занятиях на скалодроме, "
+        "выполняет установку палатки и вязку туристских узлов."
+    )
+    assert "выполняет установку палатки, выполняет" not in low
+    assert "устанавливает" not in low
+    assert "вяжет" not in low
+    assert derived.assessment_method == (
+        "педагогическое наблюдение за участием в занятиях на скалодроме "
+        "и выполнением установки палатки и вязки туристских узлов"
+    )
+    assert derived.assessment_method.casefold().count("выполнением") == 1
+
+
+def test_event_name_and_lone_process_stay_generic_fallback():
+    family = derive_fields_v2(
+        topic_title="Моя семья",
+        theory_text="",
+        practice_text="Мероприятие «Мама, папа, я – дружная семья».",
+        program_content="Мероприятие «Мама, папа, я – дружная семья».",
+        theory_hours=1,
+        practice_hours=1,
+    )
+    assert family.planned_result.startswith("Выполняет практическое задание")
+    braking = _slot_fields("Торможение.", index=0, weeks=2)
+    assert braking.planned_result.startswith("Выполняет практическое задание")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Сказка о царе.",
+        "Лодка на берегу.",
+        "Книжка на полке.",
+        "Песня о дружбе.",
+        "Стенка из кирпича.",
+        "Загадка на заборе.",
+        "Вязка.",
+        "Установка требований.",
+    ],
+)
+def test_ordinary_or_suffix_np_is_not_invented_activity(source):
+    derived = _slot_fields(source, index=0, weeks=2)
+    assert derived.planned_result.startswith("Выполняет практическое задание")
+    low = derived.planned_result.casefold()
+    assert "вяжет" not in low
+    assert "устанавливает" not in low
+    assert not re.search(r"^выполняет (?!практическое задание)", low)
+
+
 def _theory_fields(source: str, *, title: str = "Тема занятия") -> ContentEngineV2Result:
     return derive_fields_v2(
         topic_title=title,
