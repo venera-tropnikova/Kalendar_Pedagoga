@@ -588,6 +588,14 @@ def _prepare_month_cell(cell, month: str) -> None:
     _set_month_paragraph_format(cell)
 
 
+def _prepare_week_cell(cell, value: str) -> None:
+    """Keep the vertical week/date identifier centered after any text rewrite."""
+
+    _set_cell_text(cell, value)
+    _ensure_text_direction_bt_lr(cell)
+    _center_cell_text(cell)
+
+
 def _format_month_cell(cell, month: str) -> None:
     """Подпись месяца по центру объединённого блока на странице."""
 
@@ -598,6 +606,7 @@ def _clear_month_continuation_cell(cell) -> None:
     _set_cell_text(cell, "")
     _ensure_text_direction_bt_lr(cell)
     _set_cell_vertical_align(cell, "center")
+    _set_month_paragraph_format(cell)
 
 
 def _write_row(
@@ -615,8 +624,7 @@ def _write_row(
 ) -> None:
     cells = row.cells
     _format_month_cell(cells[columns.month], month)
-    _set_cell_text(cells[columns.week], f"{week_number}\n{date_range}")
-    _center_cell_text(cells[columns.week])
+    _prepare_week_cell(cells[columns.week], f"{week_number}\n{date_range}")
     _set_cell_text(cells[columns.theory], theory_text)
     _set_cell_text(cells[columns.theory_mark], "")
     _set_cell_text(cells[columns.practice], practice_text)
@@ -1132,6 +1140,7 @@ def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset
 
     from docx.table import _Cell
 
+    columns = _columns_for_table(table)
     logical_rows = [deepcopy(row._tr) for row in table.rows[2:]]
     logical_texts = [[cell.text for cell in row.cells] for row in table.rows[2:]]
     if len(logical_rows) != len(layouts):
@@ -1161,6 +1170,14 @@ def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset
                 cell = _Cell(row._tr.tc_lst[column], row)
                 _remove_vmerge(cell)
                 _set_cell_text(cell, text)
+            _prepare_month_cell(
+                _Cell(row._tr.tc_lst[columns.month], row),
+                segment.cells[columns.month],
+            )
+            _prepare_week_cell(
+                _Cell(row._tr.tc_lst[columns.week], row),
+                segment.cells[columns.week],
+            )
             _prevent_row_split(row)
             months.append(segment.cells[0])
             if split:

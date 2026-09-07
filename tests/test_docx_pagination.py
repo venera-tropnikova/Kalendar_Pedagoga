@@ -146,6 +146,38 @@ def test_pdf_measures_continuation_and_monthly_week_numbers(monkeypatch):
     assert ''.join(segment.cells[2] for segment in first) == 'abcdef'
 
 
+def test_physical_page_segments_center_vertical_month_and_week_cells():
+    from calendar_pedagoga.docx_generation import _apply_page_row_segments
+    from calendar_pedagoga.docx_qa import (
+        DataRowPageLayout,
+        DataRowPageSegment,
+        DataRowPageSpan,
+    )
+    from docx.oxml.ns import qn
+
+    document = Document()
+    table = document.add_table(rows=3, cols=8)
+    table.rows[2].cells[0].text = 'Октябрь'
+    table.rows[2].cells[1].text = '8\n19–25.10'
+    table.rows[2].cells[2].text = 'Теория'
+    layout = DataRowPageLayout(
+        span=DataRowPageSpan(1, 2, True),
+        segments=(
+            DataRowPageSegment(1, ('Октябрь', '8\n19–25.10', 'Тео', '', '', '', '', '')),
+            DataRowPageSegment(2, ('Октябрь', '8\n19–25.10', 'рия', '', '', '', '', '')),
+        )
+    )
+
+    _apply_page_row_segments(table, (layout,))
+
+    for row in table.rows[2:]:
+        for cell in row._tr.tc_lst[:2]:
+            assert cell.tcPr.find(qn('w:textDirection')).get(qn('w:val')) == 'btLr'
+            assert cell.tcPr.find(qn('w:vAlign')).get(qn('w:val')) == 'center'
+            for paragraph in cell.p_lst:
+                assert paragraph.find(qn('w:pPr')).find(qn('w:jc')).get(qn('w:val')) == 'center'
+
+
 @pytest.mark.parametrize('month,week', [('Mon', '19'), ('Month', '1'), ('', '')])
 def test_split_with_incomplete_identifier_is_unsafe(monkeypatch, month, week):
     _pdf(monkeypatch, [[[month, week, 'abc']], [['', '', 'def'], ['Month', '20', 'gh']]])

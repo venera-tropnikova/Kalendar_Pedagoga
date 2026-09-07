@@ -457,6 +457,10 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
             vertical_alignment = raw_cells[column].tcPr.find(qn("w:vAlign"))
             assert vertical_alignment is not None
             assert vertical_alignment.get(qn("w:val")) == "center"
+            for paragraph in raw_cells[column].p_lst:
+                justification = paragraph.find(qn("w:pPr")).find(qn("w:jc"))
+                assert justification is not None
+                assert justification.get(qn("w:val")) == "center"
 
         month_merge = raw_cells[0].tcPr.find(qn("w:vMerge"))
         month_xml_text = "".join(raw_cells[0].xpath(".//w:t/text()")).strip()
