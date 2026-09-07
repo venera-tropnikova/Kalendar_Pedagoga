@@ -15,6 +15,7 @@ from calendar_pedagoga.content_engine_v2 import (
     control_from_frame,
     fill_from_source,
     type_from_frame,
+    derive_fields_v2,
 )
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
@@ -171,8 +172,6 @@ def test_mixed_hours_form_mentions_are_not_activity_without_practice_source():
 
 
 def test_safe_fallback_does_not_reopen_other_practice_slots():
-    from calendar_pedagoga.content_engine_v2 import derive_fields_v2
-
     practice = (
         "Экскурсия по улицам микрорайона. "
         "Мой любимый уголок микрорайона. "
@@ -195,6 +194,72 @@ def test_safe_fallback_does_not_reopen_other_practice_slots():
     assert "экскурс" not in (
         f"{result.lesson_type} {result.planned_result} {result.assessment_method}"
     ).casefold()
+
+
+def test_analysis_with_trailing_game_keeps_analysis_action():
+    result = derive_fields_v2(
+        topic_title="Ситуации общения",
+        theory_text="",
+        practice_text="Анализ ситуаций, игры-фантазии.",
+        program_content="Анализ ситуаций, игры-фантазии.",
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=0,
+        practice_appearance_count=2,
+    )
+    low = result.planned_result.casefold()
+    assert low.startswith("анализирует")
+    assert "участвует в анализ" not in low
+    assert not result.planned_result.startswith("Выполняет практическое задание")
+
+
+def test_conducting_games_is_grounded_activity_not_generic():
+    result = derive_fields_v2(
+        topic_title="Общение",
+        theory_text="",
+        practice_text="Проведение дидактических и ролевых игр.",
+        program_content="Проведение дидактических и ролевых игр.",
+        theory_hours=0,
+        practice_hours=2,
+        occurrence_index=0,
+        practice_appearance_count=2,
+    )
+    low = result.planned_result.casefold()
+    assert low.startswith("проводит")
+    assert "участвует" not in low
+    assert not result.planned_result.startswith("Выполняет практическое задание")
+    assert "дидактическ" in low and "ролев" in low
+
+
+def test_neighbor_game_mention_does_not_override_leading_action():
+    result = derive_fields_v2(
+        topic_title="План местности",
+        theory_text="",
+        practice_text="Составление плана местности, игры на внимание.",
+        program_content="Составление плана местности, игры на внимание.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert low.startswith("составляет")
+    assert "участвует" not in low
+    assert result.lesson_type != "игра"
+
+
+def test_partial_coordination_keeps_proven_finite_result():
+    result = derive_fields_v2(
+        topic_title="Праздник",
+        theory_text="",
+        practice_text="Подготовка и участие в мероприятиях.",
+        program_content="Подготовка и участие в мероприятиях.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert low.startswith("подготавливает")
+    assert "участие" not in low
+    assert not result.planned_result.startswith("Выполняет практическое задание")
+    assert result.assessment_method
 
 
 def test_parenthetical_details_do_not_add_extra_outcomes():

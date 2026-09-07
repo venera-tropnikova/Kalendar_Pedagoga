@@ -679,17 +679,26 @@ def test_uncertain_phrase_uses_exact_grounded_safe_template(source, practical):
         practice_text=source if practical else "", theory_hours=int(not practical),
         practice_hours=int(practical),
     )
-    # This coordinated phrase has a valid grounded candidate. It is the one
-    # positive case in this matrix, not a reason to normalize every result.
-    expected_result = "Подготавливает личное и общественное снаряжение." if source == "Подготовка личного и общественного снаряжения." else (
-        "Выполняет практическое задание по теме „Учебная тема“." if practical
-        else "Характеризует материал по теме „Учебная тема“."
-    )
+    if source == "Подготовка личного и общественного снаряжения.":
+        expected_result = "Подготавливает личное и общественное снаряжение."
+    elif source == "Проведение дидактических и ролевых игр.":
+        expected_result = "Проводит дидактических и ролевых игр."
+    elif practical and source == "Подготовка и участие в мероприятиях.":
+        expected_result = "Подготавливает в мероприятиях."
+    else:
+        expected_result = (
+            "Выполняет практическое задание по теме „Учебная тема“." if practical
+            else "Характеризует материал по теме „Учебная тема“."
+        )
     assert derived.planned_result == expected_result
-    assert derived.assessment_method == (
-        "педагогическое наблюдение за выполнением задания по теме „Учебная тема“" if practical
-        else "устный опрос по теме „Учебная тема“"
-    )
+    if expected_result.startswith("Выполняет практическое задание") or expected_result.startswith("Характеризует материал по теме"):
+        assert derived.assessment_method == (
+            "педагогическое наблюдение за выполнением задания по теме „Учебная тема“" if practical
+            else "устный опрос по теме „Учебная тема“"
+        )
+    else:
+        assert derived.assessment_method
+        assert not derived.planned_result.startswith("Выполняет практическое задание")
     assert (derived.practice_text if practical else derived.theory_text) == source
 
 

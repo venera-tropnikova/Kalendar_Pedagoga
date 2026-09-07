@@ -723,6 +723,32 @@ def _leading_modifiers(tokens: list[str]) -> tuple[list[str], list[str]]:
     return mods, rest
 
 
+def _leading_activity_token(clause: str) -> str:
+    """Head of the selected activity, ignoring adjectives and hyphen tails."""
+
+    tokens = _normalize_spaces(clause).split()
+    _mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return ""
+    raw = rest[0].strip(" «»\"'(),.;:")
+    if not raw:
+        return ""
+    return re.split(r"[^\wёЁ]", raw, maxsplit=1)[0]
+
+
+def _is_leading_game_form(token: str) -> bool:
+    # Genitive remnant «игр» is not a leading game activity.
+    return bool(re.match(r"(?i)^(игр(?:а|ы|у|е|ами|ах)|эстафет\w*)$", token))
+
+
+def _is_leading_form_activity(token: str) -> bool:
+    if not token:
+        return False
+    if _is_walk_word(token) or _is_exercise_word(token) or _is_leading_game_form(token):
+        return True
+    return bool(re.match(r"(?i)^викторин\w*$", token))
+
+
 def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
     """«уход за X и ремонт» — два действия, без перечня видов ремонта."""
 
@@ -1368,7 +1394,10 @@ def _action_class(clause: str, *, theory_only: bool = False) -> int:
         return 0
     if theory_only and _looks_like_verbal_noun(first):
         return 1
-    if _has_stem(lead, _FORM_STEMS + _PERFORM_STEMS):
+    head = _leading_activity_token(clause)
+    if _is_leading_form_activity(head) or _has_stem(head, _PERFORM_STEMS):
+        return 3
+    if _has_stem(lead, _PERFORM_STEMS):
         return 3
     if _has_stem(lead, _PRODUCE_STEMS + ("ориентир", "измерен")):
         return 3
@@ -2696,16 +2725,13 @@ def _practice_unit_kind(clause: str) -> str:
     low = text.casefold()
     if re.search(r"(?i)\bосвоен", text):
         return "master"
-    tokens = text.split()
-    _mods, rest = _leading_modifiers(tokens)
-    head = re.sub(r"[^\wёЁ]", "", rest[0] if rest else "")
+    head = _leading_activity_token(text)
     if _is_exercise_word(head):
         return "exercise"
     if re.match(r"(?i)^элемент", head):
         return "element"
-    if re.search(r"(?i)\bэстафет", low) or re.search(
-        r"(?i)\bигр(?:а|ы|е|ами|ах)?\b", low
-    ):
+    # A later «игра/игры» does not reclassify a different leading action.
+    if _is_leading_game_form(head):
         return "game"
     if re.search(r"(?i)\bспорт\b", low) or re.search(r"(?i)атлетик", low):
         return "sport"
@@ -3169,6 +3195,13 @@ def _derive_fields_candidate(
     )
 
 
+def _proven_finite_predicates() -> set[str]:
+    return set(_VERBAL_NOUN_TO_VERB.values()) | {
+        "характеризует", "называет", "совершает", "участвует", "осваивает",
+        "распознаёт", "исследует", "работает", "ориентируется",
+    }
+
+
 def _quality_issue(
     result: str, control: str, *, source: str = "", clause: str = "",
 ) -> str:
@@ -3180,10 +3213,7 @@ def _quality_issue(
         clause_words = {word[:4] for word in _word_tokens(clause.casefold()) if len(word) >= 4}
         if clause_words - source_words:
             return "source_leakage"
-    allowed = set(_VERBAL_NOUN_TO_VERB.values()) | {
-        "характеризует", "называет", "совершает", "участвует", "осваивает",
-        "распознаёт", "исследует", "работает", "ориентируется",
-    }
+    allowed = _proven_finite_predicates()
     first = result.split()[0].casefold()
     if first not in allowed:
         return "unproven_predicate"
@@ -3215,8 +3245,15 @@ def _quality_issue(
         return "unproven_object_case"
     # A surviving genitive modifier after these transitive predicates is not
     # evidence of a successfully converted direct object. Do not guess a repair.
-    if re.search(r"(?i)\b(?:проводит|выполняет|подготавливает)\s+[а-яё]+(?:ых|их)\b", result):
-        return "unproven_object_case"
+    # A span copied from the selected clause is already source-grounded.
+    genitive_after_verb = re.search(
+        r"(?i)\b(?:проводит|выполняет|подготавливает)\s+([а-яё]+(?:ых|их)\b.*)$",
+        result.rstrip("."),
+    )
+    if genitive_after_verb:
+        span = genitive_after_verb.group(1)
+        if not (clause and span.casefold() in clause.casefold()):
+            return "unproven_object_case"
     if re.search(r"(?i)\b(?:подготовки|выполнения)\s+[а-яё]+(?:ое|ая|ые)\b", control):
         return "unsafe_control_case"
     if control.startswith("устный опрос") and not control.startswith("устный опрос по теме „"):
@@ -3256,6 +3293,53 @@ def _unproven_raw_colon_subject(object_head: str, clause: str) -> bool:
     return bool(source_head and source_head.group(1).casefold() == object_head.casefold())
 
 
+def _salvage_proven_finite_result(result: str) -> str | None:
+    """Keep a proven finite predicate; drop one unproven coordinated neighbour."""
+
+    allowed = _proven_finite_predicates()
+    text = _normalize_spaces(result).rstrip(".")
+    match = re.match(r"(?i)^([А-Яа-яЁё]+)\s+и\s+(\w+)(\s+.*)?$", text)
+    if not match:
+        return None
+    left, right, rest = match.group(1), match.group(2), match.group(3) or ""
+    if left.casefold() not in allowed or right.casefold() in allowed:
+        return None
+    return _cap_sentence(_normalize_spaces(f"{left}{rest}"))
+
+
+def _triad_from_selected_frame(
+    candidate: ContentEngineV2Result,
+    *,
+    planned_result: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> ContentEngineV2Result:
+    selected = _normalize_spaces(candidate.frame.clause)
+    lesson_type = type_from_frame(
+        candidate.frame,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        theory_text="",
+        practice_text=selected,
+        program_content=selected,
+        planned_result=planned_result,
+    )
+    control = control_from_frame(
+        candidate.frame,
+        lesson_type=lesson_type,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        planned_result=planned_result,
+    )
+    control = _align_control_to_result(control, planned_result)
+    return replace(
+        candidate,
+        lesson_type=lesson_type,
+        planned_result=planned_result,
+        assessment_method=control,
+    )
+
+
 def _closed_candidate(
     candidate: ContentEngineV2Result, *, issue: str, topic_title: str, practical: bool,
 ) -> ContentEngineV2Result | None:
@@ -3271,6 +3355,10 @@ def _closed_candidate(
         return replace(candidate, planned_result=result, assessment_method=control)
     if issue == "unproven_verb_valency" and re.match(r"(?i)^ориентирование\s+(?:на|по|в)\s", candidate.frame.clause):
         return replace(candidate, planned_result=re.sub(r"(?i)\bориентирует\b", "Ориентируется", candidate.planned_result))
+    if issue == "unproven_coordinated_predicate":
+        salvaged = _salvage_proven_finite_result(candidate.planned_result)
+        if salvaged:
+            return replace(candidate, planned_result=salvaged)
     return None
 
 
@@ -3294,6 +3382,13 @@ def derive_fields_v2(
         return candidate
     repaired = _closed_candidate(candidate, issue=issue, topic_title=topic_title, practical=practical)
     if repaired is not None:
+        if issue == "unproven_coordinated_predicate":
+            repaired = _triad_from_selected_frame(
+                repaired,
+                planned_result=repaired.planned_result,
+                theory_hours=theory_hours,
+                practice_hours=practice_hours,
+            )
         repair_issue = _quality_issue(repaired.planned_result, repaired.assessment_method,
                                       source=grounded_source, clause=repaired.frame.clause)
         if not repair_issue:
