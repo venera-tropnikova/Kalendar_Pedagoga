@@ -749,6 +749,124 @@ def _is_leading_form_activity(token: str) -> bool:
     return bool(re.match(r"(?i)^викторин\w*$", token))
 
 
+# Closed nominal-activity frames: the source names an observable activity NP,
+# but that lemma has no proven finite conjugation. Map only onto verbs that
+# are already in the proven predicate set. Never invent a verb from a suffix.
+_NOMINAL_PERFORM_LEMMAS = frozenset({"закаливание", "катание"})
+_ACTIVITY_GLOSS_RE = re.compile(r"\s+[–—−]\s+|\s+-\s+")
+
+
+def _nominal_activity_lemma(word: str) -> str:
+    core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE).casefold()
+    if re.fullmatch(r"помощ[ьи]", core):
+        return "помощь"
+    if re.fullmatch(r"поездк[аиуеы]|поездок", core):
+        return "поездка"
+    return _verbal_noun_lemma(word).casefold()
+
+
+def _decap_lexical(word: str) -> str:
+    prefix, core, suffix = _strip_punct_word(word)
+    if not core or re.match(r"^[А-ЯЁ]{2,}$", core):
+        return word
+    if core[:1].isupper():
+        core = core[:1].lower() + core[1:]
+    return f"{prefix}{core}{suffix}"
+
+
+def _aid_activity_evidence(mods: list[str], remainder: str) -> bool:
+    for mod in mods:
+        stem = re.sub(r"[^\wёЁ]", "", mod, flags=re.IGNORECASE).casefold()
+        if stem.startswith(("перв", "доврачебн")):
+            return True
+    return bool(re.search(r"(?i)(?:^|\s)при\s", remainder))
+
+
+def _trip_activity_evidence(mods: list[str]) -> bool:
+    return any(
+        re.sub(r"[^\wёЁ]", "", mod, flags=re.IGNORECASE).casefold().startswith("экскурсионн")
+        for mod in mods
+    )
+
+
+def _head_core_and_remainder(rest: list[str]) -> tuple[str, str]:
+    _prefix, core, suffix = _strip_punct_word(rest[0])
+    leftover: list[str] = []
+    colon = "".join(char for char in suffix if char == ":")
+    if colon:
+        leftover.append(colon)
+    leftover.extend(rest[1:])
+    remainder = _normalize_spaces(" ".join(leftover))
+    if remainder.startswith(":"):
+        remainder = ": " + remainder[1:].lstrip()
+    return core, remainder
+
+
+def _append_remainder(phrase: str, remainder: str) -> str:
+    if not remainder:
+        return phrase
+    if remainder[:1] in {":", ";", ","}:
+        return _normalize_spaces(phrase + remainder)
+    return _normalize_spaces(f"{phrase} {remainder}")
+
+
+def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
+    """Safe NP → finite RESULT. Returns None when the action cannot be proven."""
+
+    tokens = _normalize_spaces(text).split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head, remainder = _head_core_and_remainder(rest)
+    lemma = _nominal_activity_lemma(head)
+    if lemma == "помощь":
+        if not _aid_activity_evidence(mods, remainder):
+            return None
+        acc_mods = [
+            _decap_lexical(_adj_to_acc(mod, plural=False, gender="f"))
+            for mod in mods
+        ]
+        np_words = [*acc_mods, _decap_lexical(head)]
+        phrase = _append_remainder("оказывает " + " ".join(np_words), remainder)
+        obj, cond = _split_object_and_conditions(
+            _normalize_spaces(" ".join([*acc_mods, "помощь", remainder]))
+        )
+        return phrase, "помощь", obj, cond
+    if lemma in _NOMINAL_PERFORM_LEMMAS:
+        np_words = [_decap_lexical(mod) for mod in mods] + [_decap_lexical(head)]
+        phrase = _append_remainder("выполняет " + " ".join(np_words), remainder)
+        obj, cond = _split_object_and_conditions(remainder)
+        return phrase, lemma, obj, cond
+    if lemma == "поездка":
+        if not _trip_activity_evidence(mods):
+            return None
+        plural = head.casefold() in {"поездки", "поездок"}
+        if plural:
+            acc_mods = [_decap_lexical(_adj_to_acc(mod, plural=True, gender="f")) for mod in mods]
+            acc_head = _decap_lexical(head)
+        else:
+            acc_mods = [_decap_lexical(_adj_to_acc(mod, plural=False, gender="f")) for mod in mods]
+            acc_head = _decap_lexical(_noun_nom_to_acc(head))
+        phrase = _append_remainder("совершает " + " ".join([*acc_mods, acc_head]), remainder)
+        obj, cond = _split_object_and_conditions(remainder.lstrip(": ").strip())
+        return phrase, "поездка", obj, cond
+    return None
+
+
+def _nominal_activity_result(text: str) -> tuple[str, str, str, str] | None:
+    """Universal layer: nominal activity NP → observable finite RESULT."""
+
+    direct = _match_nominal_activity_np(text)
+    if direct:
+        return direct
+    gloss = _ACTIVITY_GLOSS_RE.search(text)
+    if gloss:
+        tail = text[gloss.end() :].strip(" ,")
+        if tail:
+            return _match_nominal_activity_np(tail)
+    return None
+
+
 def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
     """«уход за X и ремонт» — два действия, без перечня видов ремонта."""
 
@@ -886,6 +1004,11 @@ def _transform_segment(
             if cond:
                 phrase += f" {cond}"
             return _normalize_spaces(phrase), head.casefold(), obj, cond
+
+    if not theory_only:
+        nominal = _nominal_activity_result(text)
+        if nominal:
+            return nominal
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
         named = _name_kinds(text)
@@ -2262,6 +2385,12 @@ def _process_control(result: str, lesson_type: str) -> str:
         if remainder:
             return "педагогическое наблюдение за выполнением упражнений " + remainder
         return "педагогическое наблюдение за выполнением упражнений"
+    wrapped_nominal = re.match(r"(?i)^выполняет\s+(закаливание|катание)\b", result)
+    if wrapped_nominal:
+        focus = re.sub(r"(?i)^выполняет\s+", "", result).rstrip(".")
+        return "педагогическое наблюдение за выполнением " + _phrase_to_genitive(focus)
+    if re.match(r"(?i)^оказывает\b", result) and "помощ" in low:
+        return "педагогическое наблюдение за оказанием первой помощи"
     if low.startswith("отрабатывает технику") or "отрабатывает технику" in low:
         rest = re.sub(r"(?i)^отрабатывает технику\s*", "", result).rstrip(".")
         rest = rest.split(":")[0]
@@ -2551,7 +2680,16 @@ def type_from_frame(
                 return "краеведческий практикум"
             if "аптечк" in result and "формирован" in clause:
                 return "практикум по комплектованию аптечки"
-            if "оказывает первую помощь" in result and "оказание первой помощи" in clause:
+            if (
+                "оказывает" in result
+                and "помощ" in result
+                and (
+                    "перв" in result
+                    or "доврачебн" in result
+                    or "перв" in clause
+                    or "доврачебн" in clause
+                )
+            ):
                 return "практикум по оказанию первой помощи"
             if "транспортировки пострадавшего" in result and "транспортировки пострадавшего" in clause:
                 return "практикум по транспортировке пострадавшего"

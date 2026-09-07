@@ -669,3 +669,123 @@ def test_mixed_week_with_conflicting_practice_types_uses_safe_fallback():
         practice_text="Тестирование и практическая работа.",
     )
     assert actual == "теоретико-практическое занятие"
+
+
+@pytest.mark.parametrize(
+    ("source", "result_stem", "lesson_type", "control_stem"),
+    [
+        (
+            "Первая доврачебная помощь при ушибах, потёртостях, ссадинах и ранах.",
+            "оказывает первую доврачебную помощь при",
+            "практикум по оказанию первой помощи",
+            "педагогическое наблюдение за оказанием первой помощи",
+        ),
+        (
+            "Закаливание природными факторами (солнце, воздух вода).",
+            "выполняет закаливание природными факторами",
+            "практикум",
+            "педагогическое наблюдение за выполнением закаливания",
+        ),
+        (
+            "Любимые зимние развлечения – катание на санках, на коньках.",
+            "выполняет катание на санках",
+            "практикум",
+            "педагогическое наблюдение за выполнением катания",
+        ),
+        (
+            "Экскурсионные поездки: Стерлитамакские шиханы, Торатау.",
+            "совершает экскурсионные поездки:",
+            "экскурсия",
+            "педагогическое наблюдение на экскурсии",
+        ),
+    ],
+)
+def test_nominal_activity_yields_finite_result_from_same_frame(
+    source, result_stem, lesson_type, control_stem,
+):
+    derived = derive_fields_v2(
+        topic_title="Тема занятия",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert low.startswith(result_stem)
+    assert not derived.planned_result.startswith("Выполняет практическое задание")
+    assert derived.lesson_type == lesson_type
+    assert derived.assessment_method.casefold().startswith(control_stem)
+    assert derived.frame.clause
+    triad = f"{derived.lesson_type} {derived.planned_result} {derived.assessment_method}".casefold()
+    assert any(marker in triad for marker in result_stem.split()[:2])
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "История семьи.",
+        "Содержание домашних животных.",
+        "Развлечение.",
+        "Калибрование прибора.",
+        "Правила поведения в лесу.",
+        "Значение закаливания.",
+        "Помощь родителям.",
+        "Поездки выходного дня: городской парк.",
+        "Любимые зимние развлечения.",
+        "Предприятие.",
+        "Занятие.",
+        "Абракание материала.",
+    ],
+)
+def test_descriptive_nouns_do_not_invent_nominal_activity(source):
+    derived = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = derived.planned_result.casefold()
+    assert not any(
+        invented in low
+        for invented in (
+            "развлекает",
+            "содержит",
+            "калибрует",
+            "закаливает",
+            "катает",
+            "катается",
+            "поезжает",
+            "предприявает",
+            "занявает",
+            "абракает",
+        )
+    )
+    assert not low.startswith("выполняет содержание")
+    assert not low.startswith("выполняет развлечение")
+    assert not low.startswith("выполняет калибрование")
+    assert not low.startswith("выполняет правила")
+    assert not low.startswith("выполняет историю")
+    assert not low.startswith("оказывает помощь родителям")
+    assert not low.startswith("совершает поездки выходного")
+    assert "катание" not in low
+    first = low.split()[0]
+    from calendar_pedagoga.content_engine_v2 import _proven_finite_predicates
+
+    assert first in _proven_finite_predicates()
+
+
+def test_theory_only_does_not_wrap_nominal_activity_as_performance():
+    derived = derive_fields_v2(
+        topic_title="Закаливание",
+        theory_text="Закаливание природными факторами (солнце, воздух вода).",
+        practice_text="",
+        program_content="Закаливание природными факторами (солнце, воздух вода).",
+        theory_hours=1,
+        practice_hours=0,
+    )
+    low = derived.planned_result.casefold()
+    assert not low.startswith("выполняет закаливание")
+    assert not low.startswith("закаливает")
