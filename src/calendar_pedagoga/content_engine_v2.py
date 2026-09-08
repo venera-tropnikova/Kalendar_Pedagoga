@@ -2404,21 +2404,25 @@ def _drop_leading_verb(text: str) -> str:
 
 
 _KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет"})
+_PROVEN_FINITE_VERBS = frozenset(_VERBAL_NOUN_TO_VERB.values()) | _KNOWLEDGE_RESULT_VERBS | frozenset(
+    _FINITE_TO_NOUN
+) | {
+    "выбирает",
+    "осваивает",
+    "участвует",
+    "совершает",
+    "распознаёт",
+    "исследует",
+    "работает",
+    "ориентируется",
+}
+_ACTION_FINITE_VERBS = _PROVEN_FINITE_VERBS - _KNOWLEDGE_RESULT_VERBS
+_VERB_TO_VERBAL_NOUN = {
+    verb: noun for noun, verb in _VERBAL_NOUN_TO_VERB.items()
+}
 _CONTROL_RESULT_VERB_RE = re.compile(
     r"(?i)\b("
-    + "|".join(
-        sorted(
-            {
-                *_KNOWLEDGE_RESULT_VERBS,
-                "выбирает",
-                "осваивает",
-                "участвует",
-                *_FINITE_TO_NOUN,
-            },
-            key=len,
-            reverse=True,
-        )
-    )
+    + "|".join(sorted(_PROVEN_FINITE_VERBS, key=len, reverse=True))
     + r")\b"
 )
 
@@ -2440,27 +2444,96 @@ def _result_control_segments(result: str) -> list[tuple[str, str]]:
     return segments
 
 
-def _oral_object_for_control(obj: str) -> str:
-    """Dative of a proven RESULT object. Do not drop sibling knowledge conjuncts."""
+def _finite_token(word: str) -> str:
+    return _strip_punct_word(word)[1].casefold()
 
-    dative = _phrase_to_dative(obj)
-    if len(_split_direct_case_commas(obj)) > 1:
+
+def _is_proven_finite_token(word: str) -> bool:
+    return _finite_token(word) in _PROVEN_FINITE_VERBS
+
+
+def _is_action_finite_token(word: str) -> bool:
+    return _finite_token(word) in _ACTION_FINITE_VERBS
+
+
+def _starts_with_action_finite(text: str) -> bool:
+    first = _normalize_spaces(text).split()[:1]
+    return bool(first) and _is_action_finite_token(first[0])
+
+
+def _verbal_noun_to_instrumental(noun: str) -> str:
+    prefix, core, suffix = _strip_punct_word(noun)
+    low = core.casefold()
+    if low.endswith(("ение", "ание", "яние", "тие")):
+        changed = core + "м"
+    elif low.endswith("ка") and len(core) > 3:
+        changed = core[:-1] + "ой"
+    elif low.endswith("а") and len(core) > 3:
+        changed = core[:-1] + "ой"
+    elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
+        changed = core + "ом"
+    else:
+        changed = core
+    return f"{prefix}{_match_caps(core, changed)}{suffix}"
+
+
+def _observation_for_action_verb(verb: str, obj: str) -> str:
+    """Process CONTROL for a proven action finite. Never oral + dative of the verb."""
+
+    noun = _VERB_TO_VERBAL_NOUN.get(verb)
+    if not noun:
+        return ""
+    focus = _phrase_to_genitive(obj) if obj else ""
+    return _normalize_spaces(
+        f"педагогическое наблюдение за {_verbal_noun_to_instrumental(noun)} {focus}"
+    )
+
+
+def _observation_from_action_segments(segments: list[tuple[str, str]]) -> str:
+    parts = [
+        _observation_for_action_verb(verb, obj)
+        for verb, obj in segments
+        if verb in _ACTION_FINITE_VERBS
+    ]
+    parts = [item for item in parts if item]
+    if not parts:
+        return ""
+    prefix = "педагогическое наблюдение за "
+    if all(item.startswith(prefix) for item in parts):
+        tails = [item[len(prefix) :] for item in parts]
+        return prefix + _join_and(tails)
+    return "; ".join(parts)
+
+
+def _oral_object_for_control(obj: str) -> str:
+    """Dative of a proven RESULT object. Do not dative a leftover finite verb."""
+
+    phrase = _normalize_spaces(obj).strip(" ,.;")
+    if not phrase or _starts_with_action_finite(phrase):
+        return ""
+    first = phrase.split()[0]
+    if _is_proven_finite_token(first):
+        phrase = _normalize_spaces(phrase[len(first) :]).strip(" ,.;")
+        if not phrase or _starts_with_action_finite(phrase):
+            return ""
+    dative = _phrase_to_dative(phrase)
+    if len(_split_direct_case_commas(phrase)) > 1:
         return dative
     return _shorten_clause(dative, max_len=80)
 
 
 def _oral_from_knowledge_objects(objects: list[str]) -> str:
-    cleaned = [
-        _normalize_spaces(item).strip(" ,.;")
+    converted = [
+        _oral_object_for_control(item)
         for item in objects
         if _normalize_spaces(item).strip(" ,.;")
     ]
-    if not cleaned:
+    converted = [item for item in converted if item]
+    if not converted:
         return ""
-    if len(cleaned) == 1:
-        return "устный опрос по " + _oral_object_for_control(cleaned[0])
-    parts = [_oral_object_for_control(item) for item in cleaned]
-    return "устный опрос по " + _join_and(parts)
+    if len(converted) == 1:
+        return "устный опрос по " + converted[0]
+    return "устный опрос по " + _join_and(converted)
 
 
 def _rebuild_skill_result(segments: list[tuple[str, str]]) -> str:
@@ -2491,6 +2564,7 @@ def _control_from_proven_result(result: str, *, lesson_type: str = "") -> str:
             _skill_control(skill_result)
             or _slot_control_from_result(skill_result)
             or _process_control(skill_result, lesson_type)
+            or _observation_from_action_segments(segments)
         )
     if oral and observed:
         return f"{oral}; {observed}"
@@ -2529,6 +2603,8 @@ def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
     proven = _control_from_proven_result(planned_result)
     if proven:
         return proven
+    if _starts_with_action_finite(planned_result):
+        return ""
     blob = _normalize_spaces(planned_result or "").casefold()
     kinds = re.search(r"виды\s+([а-яё]+)", blob)
     if kinds:
@@ -2570,14 +2646,22 @@ def _align_control_to_result(control: str, result: str) -> str:
         if rebuilt:
             control_text = rebuilt
             control_low = rebuilt.casefold()
+        elif _starts_with_action_finite(result_text):
+            observed = _observation_from_action_segments(
+                _result_control_segments(result_text)
+            )
+            if observed:
+                return observed
         else:
             core = re.sub(
                 r"(?i)^(характеризует|называет)\s+",
                 "",
                 result_text.rstrip("."),
             ).strip()
-            if core:
-                return "устный опрос по " + _oral_object_for_control(core)
+            if core and not _starts_with_action_finite(core):
+                complement = _oral_object_for_control(core)
+                if complement:
+                    return "устный опрос по " + complement
     if "самострахов" in result_low and "самострахов" not in control_low:
         if "препятств" in control_low:
             return control_text.rstrip(".") + " и самостраховкой"
@@ -2891,6 +2975,8 @@ def _adj_to_dative(word: str) -> str:
 def _noun_to_dative(word: str) -> str:
     prefix, core, suffix = _strip_punct_word(word)
     low = core.casefold()
+    if low in _PROVEN_FINITE_VERBS:
+        return f"{prefix}{core}{suffix}"
     if low in {"меню", "кофе"}:
         changed = core
     elif re.search(r"(?i)(?:ам|ям|ами|ями|ах|ях|ов|ев|ём)$", low):
@@ -4411,10 +4497,7 @@ def _derive_fields_candidate(
 
 
 def _proven_finite_predicates() -> set[str]:
-    return set(_VERBAL_NOUN_TO_VERB.values()) | {
-        "характеризует", "называет", "совершает", "участвует", "осваивает",
-        "распознаёт", "исследует", "работает", "ориентируется",
-    }
+    return set(_PROVEN_FINITE_VERBS)
 
 
 def _quality_issue(
@@ -4881,10 +4964,38 @@ def _merge_part_results(results: list[str]) -> str:
     return _normalize_spaces(" ".join(sentences))
 
 
+def _oral_tail_has_finite_dative(tail: str) -> bool:
+    first = _normalize_spaces(tail).split()[:1]
+    if not first:
+        return False
+    token = _finite_token(first[0])
+    if _is_action_finite_token(token):
+        return True
+    return bool(token.endswith("у") and _is_action_finite_token(token[:-1]))
+
+
+def _sanitize_oral_control(control: str) -> str:
+    """Drop oral conjuncts that dativized a leftover action finite."""
+
+    prefix = "устный опрос по "
+    if not control.startswith(prefix):
+        return control
+    rest = control[len(prefix) :]
+    chunks = re.split(r"\s+и\s+", rest)
+    kept = [chunk for chunk in chunks if not _oral_tail_has_finite_dative(chunk)]
+    if not kept:
+        return ""
+    return prefix + " и ".join(kept)
+
+
 def _merge_part_controls(controls: list[str]) -> str:
     if any("по теме „" in item for item in controls):
         return "; ".join(dict.fromkeys(item for item in controls if item))
-    unique = _unique_phrases(controls)
+    unique = [
+        item
+        for item in (_sanitize_oral_control(control) for control in _unique_phrases(controls))
+        if item
+    ]
     if not unique:
         return ""
     if len(unique) == 1:
@@ -4892,7 +5003,14 @@ def _merge_part_controls(controls: list[str]) -> str:
     folded = [item.casefold() for item in unique]
     for prefix in _SHARED_CONTROL_PREFIXES:
         if all(item.startswith(prefix) for item in folded):
-            tails = [item[len(prefix) :].strip() for item in unique]
+            tails = [
+                item[len(prefix) :].strip()
+                for item in unique
+                if prefix != "устный опрос по "
+                or not _oral_tail_has_finite_dative(item[len(prefix) :].strip())
+            ]
+            if not tails:
+                continue
             return prefix + _join_and(_unique_phrases(tails))
     return "; ".join(unique)
 
