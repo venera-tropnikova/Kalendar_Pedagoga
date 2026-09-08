@@ -79,6 +79,55 @@ def test_confirmed_title_occupies_same_number_candidate():
     assert unresolved_disputed(matches, {}) == ()
 
 
+def test_unique_same_number_section_similar_is_text_match():
+    topic = _topic("1.11", "Подведение итогов туристского путешествия", "Основы")
+    item = _item("1.11", "Подведение итогов похода", "Обсуждение итогов и отчёт.", "Основы", 1)
+    match = match_utp_to_program((topic,), (item,), study_year=1)[0]
+    assert match.status is MatchStatus.TEXT_MATCH
+    assert bound_program_item(match) is item
+    assert match.ambiguous_candidates == ()
+    from calendar_pedagoga.match_review import is_disputed_match
+
+    assert not is_disputed_match(match)
+    assert match.program_item.content == "Обсуждение итогов и отчёт."
+
+
+def test_two_same_number_similar_candidates_stay_unconfirmed():
+    topic = _topic("2.7", "Ориентирование по местным приметам", "Топография")
+    items = (
+        _item("2.7", "Ориентирование по местным предметам.", "Солнце и луна.", "Топография", 1),
+        _item("2.7", "Ориентирование по местным признакам.", "Мох и звезда.", "Топография", 1),
+    )
+    match = match_utp_to_program((topic,), items, study_year=1)[0]
+    assert match.status is MatchStatus.UNCONFIRMED
+    assert bound_program_item(match) is None
+    assert set(match.ambiguous_candidates) == {
+        "Ориентирование по местным предметам.",
+        "Ориентирование по местным признакам.",
+    }
+
+
+def test_occupied_unique_similar_number_does_not_bind():
+    keep = _topic("1.11", "Подведение итогов похода", "Основы")
+    halt = _topic("1.11", "Подведение итогов туристского путешествия", "Основы")
+    item = _item("1.11", "Подведение итогов похода", "Отчёт группы.", "Основы", 1)
+    matches = match_utp_to_program((keep, halt), (item,), study_year=1)
+    assert matches[0].status is MatchStatus.EXACT
+    assert bound_program_item(matches[0]) is item
+    assert matches[1].status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(matches[1]) is None
+    assert matches[1].ambiguous_candidates == ()
+
+
+def test_single_token_without_number_stays_not_matched():
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    item = _item(None, "Медицинская аптечка.", "Комплектование аптечки.", "Гигиена", 1)
+    match = match_utp_to_program((topic,), (item,), study_year=1)[0]
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(match) is None
+    assert "Медицинская аптечка." in match.ambiguous_candidates
+
+
 def test_different_numbers_confirmed_same_title_still_match():
     topic = _topic("2.1", "Ансамбль", "Музыка")
     item = _item("5.0", "Ансамбль", "Репетиция состава.", "Музыка")
@@ -430,9 +479,9 @@ def test_key_year2_and_tourists_keep_confirmed_links():
         (
             "1.11",
             "Подведение итогов туристского путешествия",
-            MatchStatus.UNCONFIRMED,
-            None,
-            False,
+            MatchStatus.TEXT_MATCH,
+            "Подведение итогов похода",
+            True,
         ),
         (
             "2.1",
@@ -455,9 +504,9 @@ def test_key_year2_and_tourists_keep_confirmed_links():
         (
             "2.7",
             "Ориентирование по местным приметам. Действия в случае потери ориентировки",
-            MatchStatus.UNCONFIRMED,
-            None,
-            False,
+            MatchStatus.TEXT_MATCH,
+            "Ориентирование по местным предметам.",
+            True,
         ),
         (
             "3.1",
@@ -469,9 +518,9 @@ def test_key_year2_and_tourists_keep_confirmed_links():
         (
             "3.2",
             "Туристские возможности родного края, обзор экскурсионных объектов, музеи",
-            MatchStatus.UNCONFIRMED,
-            None,
-            False,
+            MatchStatus.TEXT_MATCH,
+            "Туристские возможности Башкортостана, обзор экскурсионных объектов, музеи г. Салавата и Башкортостана.",
+            True,
         ),
         ("3.3", "Изучение района путешествия", MatchStatus.EXACT, "Изучение района путешествия", True),
         (
@@ -535,6 +584,13 @@ def test_key_year2_and_tourists_keep_confirmed_links():
     assert [match.utp_position.hours for match in tourist_matches] == [
         topic.hours for topic in tourists_utp.topics
     ]
+    from calendar_pedagoga.match_review import is_disputed_match
+
+    for number in ("1.11", "2.7", "3.2"):
+        match = next(item for item in tourist_matches if item.utp_position.number == number)
+        assert match.status is MatchStatus.TEXT_MATCH
+        assert not is_disputed_match(match)
+        assert bound_program_item(match) is not None
 
 
 def test_different_actions_or_conditions_are_not_title_proof():

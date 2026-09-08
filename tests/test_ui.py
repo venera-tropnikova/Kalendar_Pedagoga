@@ -58,8 +58,84 @@ def _non_utp_docx() -> bytes:
     return stream.getvalue()
 
 
+def _disputed_program_docx() -> bytes:
+    document = Document()
+    headings = {
+        "Содержание программы 1-го года обучения",
+        "1. Введение",
+        "1.1 Ансамбль",
+        "2. Краеведение",
+        "2.1 Моя семья",
+        "4. Изобразительное искусство",
+        "4.1 Сольфеджио",
+    }
+    for text in (
+        "Дополнительная общеобразовательная программа «Синтетика»",
+        "Цель: сформировать навыки.",
+        "Задачи: научить основам.",
+        "Содержание программы 1-го года обучения",
+        "1. Введение",
+        "Знакомство с программой.",
+        "1.1 Ансамбль",
+        "Репетиция состава.",
+        "2. Краеведение",
+        "Изучение родного края.",
+        "2.1 Моя семья",
+        "История семьи.",
+        "4. Изобразительное искусство",
+        "4.1 Сольфеджио",
+        "Интервалы и слуховые диктанты.",
+    ):
+        paragraph = document.add_paragraph()
+        run = paragraph.add_run(text)
+        if text in headings:
+            run.bold = True
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def _disputed_utp_docx() -> bytes:
+    document = Document()
+    document.add_paragraph("Учебно-тематический план")
+    document.add_paragraph("Год обучения: первый")
+    document.add_paragraph("Количество часов в неделю: 2")
+    document.add_paragraph("Общее количество часов в год: 72")
+    document.add_paragraph("36 учебных недель")
+    table = document.add_table(rows=8, cols=5)
+    headers = ("№", "Тема", "всего", "теория/лекции", "практика")
+    for cell, value in zip(table.rows[0].cells, headers, strict=True):
+        cell.text = value
+    rows = (
+        ("1", "Введение", "24", "0", "24"),
+        ("1.1", "Ансамбль", "24", "0", "24"),
+        ("2", "Краеведение", "24", "0", "24"),
+        ("2.1", "Моя семья", "24", "0", "24"),
+        ("4", "Изобразительное искусство", "24", "0", "24"),
+        ("4.1", "Рисование натюрморта", "24", "0", "24"),
+        ("Итого", "", "72", "0", "72"),
+    )
+    for index, values in enumerate(rows, start=1):
+        for cell, value in zip(table.rows[index].cells, values, strict=True):
+            cell.text = value
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
 def _upload(app: AppTest, index: int, path: Path) -> None:
     app.get("file_uploader")[index].set_value((path.name, path.read_bytes(), DOCX_MIME))
+
+
+def _upload_bytes(app: AppTest, index: int, name: str, data: bytes) -> None:
+    app.get("file_uploader")[index].set_value((name, data, DOCX_MIME))
+
+
+def _upload_disputed(app: AppTest, *, template: bool = False) -> None:
+    _upload_bytes(app, 0, "program-synthetic.docx", _disputed_program_docx())
+    _upload_bytes(app, 1, "utp-synthetic.docx", _disputed_utp_docx())
+    if template:
+        _upload(app, 2, _template_file())
 
 
 def _clear_buttons(app: AppTest):
@@ -766,8 +842,7 @@ def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
 
 def test_unresolved_disputed_matches_block_generation() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
-    _upload(app, 0, _program_file())
-    _upload(app, 2, _template_file())
+    _upload_disputed(app, template=True)
     app.run()
     _check_button(app).click().run()
 
@@ -784,8 +859,7 @@ def test_unresolved_disputed_matches_block_generation() -> None:
 
 def test_rejected_matches_allow_generation_with_remarks() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
-    _upload(app, 0, _program_file())
-    _upload(app, 2, _template_file())
+    _upload_disputed(app, template=True)
     app.run()
     _check_button(app).click().run()
     _resolve_disputed_matches(app, prefer_confirm=False)
@@ -812,8 +886,9 @@ def test_rejected_matches_allow_generation_with_remarks() -> None:
 
 def test_file_change_resets_match_reviews() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
-    program = _program_file()
-    _upload(app, 0, program)
+    program = _disputed_program_docx()
+    _upload_bytes(app, 0, "program-synthetic.docx", program)
+    _upload_bytes(app, 1, "utp-synthetic.docx", _disputed_utp_docx())
     app.run()
     _check_button(app).click().run()
     _resolve_disputed_matches(app)
@@ -821,7 +896,7 @@ def test_file_change_resets_match_reviews() -> None:
     assert app.session_state["match_reviews"]
 
     app.get("file_uploader")[0].set_value(
-        (program.name, program.read_bytes() + b"changed", DOCX_MIME)
+        ("program-synthetic.docx", program + b"changed", DOCX_MIME)
     )
     app.run()
 

@@ -146,11 +146,13 @@ def test_occupied_same_number_is_not_disputed_and_shows_notice() -> None:
 
 
 def test_not_matched_with_candidates_can_be_confirmed() -> None:
-    topic = _topic("1.1", "Компас", "Ориентирование")
-    item = _item("1.1", "Работа с компасом", "Стрелка и азимут.", "Ориентирование")
-    match = match_position(topic, (item,))
-    assert match.status in {MatchStatus.NOT_MATCHED, MatchStatus.UNCONFIRMED}
-    assert match.ambiguous_candidates
+    topic = _topic("4.1", "Рисование натюрморта", "ИЗО")
+    item = _item("4.1", "Сольфеджио", "Интервалы и слуховые диктанты.", "ИЗО")
+    match = match_utp_to_program((topic,), (item,))[0]
+    assert match.status is MatchStatus.UNCONFIRMED
+    assert is_disputed_match(match)
+    assert bound_program_item(match) is None
+    assert "Сольфеджио" in match.ambiguous_candidates
     reviews = {
         topic_key(topic): {
             "decision": "USER_CONFIRMED",
@@ -159,7 +161,8 @@ def test_not_matched_with_candidates_can_be_confirmed() -> None:
     }
     row = _one_week_model(topic, _program(item), reviews)[0]
     assert row.match_status is MatchStatus.USER_CONFIRMED
-    assert row.program_content_full == "Стрелка и азимут."
+    assert row.program_topic == item.title
+    assert row.program_content_full == "Интервалы и слуховые диктанты."
 
 
 def test_user_rejected_and_unconfirmed_do_not_use_missing_content_notice() -> None:

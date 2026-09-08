@@ -758,9 +758,10 @@ def test_quality_gate_rejects_derivational_predicate_object_tautology():
         practice_hours=0,
     )
     assert derived.planned_result == (
-        "Характеризует материал по теме „Способы передвижения“."
+        "Характеризует особенности способов передвижения."
     )
-    assert "tautological_predicate_object" in " ".join(derived.warnings)
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert "особенност" in derived.assessment_method
 
 
 def test_safe_topic_quotes_survive_multi_part_merge():

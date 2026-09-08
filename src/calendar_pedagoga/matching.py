@@ -431,6 +431,71 @@ def _free_candidate_titles(
     return tuple(remaining)
 
 
+def _year_compatible(item: ProgramContentItem, study_year: int | None) -> bool:
+    if study_year is None:
+        return True
+    return item.study_year is None or item.study_year == study_year
+
+
+def _release_occupied_candidates(
+    match: ContentMatch,
+    items: tuple[ProgramContentItem, ...],
+    occupied_by_year: dict[int | None, set[ProgramContentItem]],
+) -> ContentMatch:
+    if bound_program_item(match) is not None or not match.ambiguous_candidates:
+        return match
+    remaining = _free_candidate_titles(
+        match.ambiguous_candidates,
+        items,
+        occupied_by_year,
+    )
+    if remaining == match.ambiguous_candidates:
+        return match
+    if match.status is MatchStatus.UNCONFIRMED and not remaining:
+        return ContentMatch(match.utp_position, None, MatchStatus.NOT_MATCHED, 0.0)
+    return ContentMatch(
+        match.utp_position,
+        None,
+        match.status if remaining else MatchStatus.NOT_MATCHED,
+        match.confidence if remaining else 0.0,
+        remaining,
+    )
+
+
+def _bind_unique_numbered_similar(
+    match: ContentMatch,
+    items: tuple[ProgramContentItem, ...],
+    occupied_by_year: dict[int | None, set[ProgramContentItem]],
+    study_year: int | None,
+) -> ContentMatch | None:
+    """Occupancy leftover: one same-number similar item is enough to bind."""
+
+    if match.status is not MatchStatus.UNCONFIRMED:
+        return None
+    topic = match.utp_position
+    if not topic.number or len(match.ambiguous_candidates) != 1:
+        return None
+    title = match.ambiguous_candidates[0]
+    found: list[ProgramContentItem] = []
+    for item in items:
+        if item.title != title:
+            continue
+        if item.number != topic.number:
+            continue
+        if not _sections_compatible(topic.parent_section, item.parent_section):
+            continue
+        if not _year_compatible(item, study_year):
+            continue
+        if not _titles_similar(topic.title, item.title):
+            continue
+        if item in occupied_by_year.get(item.study_year, set()):
+            continue
+        found.append(item)
+    if len(found) != 1:
+        return None
+    return ContentMatch(topic, found[0], MatchStatus.TEXT_MATCH, 0.85)
+
+
 def match_utp_to_program(
     topics: tuple[Topic, ...],
     items: tuple[ProgramContentItem, ...],
@@ -439,33 +504,17 @@ def match_utp_to_program(
 ) -> tuple[ContentMatch, ...]:
     matches = tuple(match_position(topic, items, study_year=study_year) for topic in topics)
     occupied_by_year = _items_occupied_by_confirmed_matches(matches)
-    if not occupied_by_year:
-        return matches
     released: list[ContentMatch] = []
     for match in matches:
-        if bound_program_item(match) is not None or not match.ambiguous_candidates:
-            released.append(match)
-            continue
-        remaining = _free_candidate_titles(
-            match.ambiguous_candidates,
-            items,
-            occupied_by_year,
+        current = _release_occupied_candidates(match, items, occupied_by_year)
+        bound = _bind_unique_numbered_similar(
+            current, items, occupied_by_year, study_year
         )
-        if remaining == match.ambiguous_candidates:
-            released.append(match)
-            continue
-        if match.status is MatchStatus.UNCONFIRMED and not remaining:
-            released.append(
-                ContentMatch(match.utp_position, None, MatchStatus.NOT_MATCHED, 0.0)
+        if bound is not None and bound.program_item is not None:
+            occupied_by_year.setdefault(bound.program_item.study_year, set()).add(
+                bound.program_item
             )
+            released.append(bound)
             continue
-        released.append(
-            ContentMatch(
-                match.utp_position,
-                None,
-                match.status if remaining else MatchStatus.NOT_MATCHED,
-                match.confidence if remaining else 0.0,
-                remaining,
-            )
-        )
+        released.append(current)
     return tuple(released)

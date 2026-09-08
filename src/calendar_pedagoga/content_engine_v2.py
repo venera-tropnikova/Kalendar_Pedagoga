@@ -1487,6 +1487,142 @@ def _theory_object_span_ok(tokens: list[str]) -> bool:
     return True
 
 
+_POSSESSIVE_OR_DEICTIC = frozenset({"его", "ее", "её", "их", "этот", "эта", "это", "эти"})
+_POSSESSIVE_ONLY = frozenset({"его", "ее", "её", "их"})
+_CLAUSE_NP_STOP = frozenset(
+    {
+        "как",
+        "когда",
+        "что",
+        "чем",
+        "где",
+        "куда",
+        "зачем",
+        "почему",
+        "и",
+        "или",
+        "а",
+        "но",
+        "же",
+        "ли",
+        "бы",
+        "это",
+        "то",
+    }
+)
+
+
+def _knowledge_owner_tokens(after_head: list[str]) -> list[str]:
+    """Non-head, non-PP tokens that prove an owner NP after a knowledge head."""
+
+    owners: list[str] = []
+    for token in after_head:
+        if _is_preposition(token):
+            break
+        core = _strip_punct_word(token)[1].casefold()
+        if not core or core in {"и", "или", "а", "но"} | _POSSESSIVE_OR_DEICTIC:
+            continue
+        if _is_theory_knowledge_token(token):
+            continue
+        owners.append(token)
+    return owners
+
+
+def _chunk_looks_like_np(words: list[str]) -> bool:
+    for word in words:
+        core = _strip_punct_word(word)[1].casefold()
+        if len(core) < 3 or core in _CLAUSE_NP_STOP | _POSSESSIVE_OR_DEICTIC:
+            continue
+        if _is_preposition(word):
+            continue
+        return True
+    return False
+
+
+def _unique_possessive_antecedent(tokens: list[str], head_index: int) -> list[str] | None:
+    """Unique in-clause antecedent of его/ее/их immediately before the head."""
+
+    if not any(
+        _strip_punct_word(token)[1].casefold() in _POSSESSIVE_ONLY
+        for token in tokens[:head_index]
+    ):
+        return None
+    end = head_index - 1
+    while end >= 0 and _strip_punct_word(tokens[end])[1].casefold() in _POSSESSIVE_OR_DEICTIC:
+        end -= 1
+    if end < 0:
+        return None
+    left = tokens[: end + 1]
+    chunks = [
+        chunk.split()
+        for chunk in re.split(r",", " ".join(left))
+        if chunk.strip(" .,;")
+    ]
+    groups = [chunk for chunk in chunks if _chunk_looks_like_np(chunk)]
+    if len(groups) != 1:
+        return None
+    return groups[0]
+
+
+def _knowledge_head_span(tokens: list[str], index: int) -> list[str] | None:
+    """Knowledge-head NP with a proven same-clause owner, or None."""
+
+    after = list(tokens[index + 1 :])
+    head = _theory_object_token(tokens[index])
+    if _knowledge_owner_tokens(after):
+        rest = [head, *after]
+        return rest if _theory_object_span_ok(rest) else None
+    antecedent = _unique_possessive_antecedent(tokens, index)
+    if not antecedent:
+        return None
+    rest = [head, *antecedent, *after]
+    return rest if _theory_object_span_ok(rest) else None
+
+
+def _knowledge_object_missing_owner(obj_text: str) -> bool:
+    obj, _cond = _split_object_and_conditions(obj_text)
+    tokens = obj.split()
+    if not tokens or not _is_theory_knowledge_token(tokens[0]):
+        return False
+    return not _knowledge_owner_tokens(tokens[1:])
+
+
+def _drop_tautological_characterize_head(obj: str) -> str | None:
+    """Keep a proven NP tail after a derivationally tautological first noun."""
+
+    tokens = _normalize_spaces(obj).split()
+    if not tokens:
+        return None
+    first = _strip_punct_word(tokens[0])[1]
+    if not _predicate_repeats_object("характеризует", first):
+        return _normalize_spaces(obj)
+    rest = list(tokens[1:])
+    if rest and rest[0].casefold() in {"и", "или"}:
+        rest = rest[1:]
+    if not rest:
+        return None
+    rest[0] = _theory_object_token(rest[0])
+    if not _theory_object_span_ok(rest):
+        return None
+    if _is_theory_knowledge_token(rest[0]) and not _knowledge_owner_tokens(rest[1:]):
+        return None
+    return _normalize_spaces(" ".join(rest))
+
+
+def _salvage_tautological_characterize_result(result: str) -> str | None:
+    match = re.match(r"(?i)^характеризует\s+(.+)$", _normalize_spaces(result).rstrip("."))
+    if match is None:
+        return None
+    dropped = _drop_tautological_characterize_head(match.group(1))
+    if not dropped or dropped.casefold() == match.group(1).casefold():
+        return None
+    obj, cond = _split_object_and_conditions(dropped)
+    if not obj or _knowledge_object_missing_owner(obj):
+        return None
+    phrase = _normalize_spaces("характеризует " + " ".join(part for part in (obj, cond) if part))
+    return _cap_sentence(phrase)
+
+
 def _proven_theory_object(heading: str) -> str | None:
     """Object NP whose first word already satisfies the characterize case gate."""
 
@@ -1498,7 +1634,7 @@ def _proven_theory_object(heading: str) -> str | None:
         return None
     for index, token in enumerate(tokens):
         core = _strip_punct_word(token)[1].casefold()
-        if core in {"его", "ее", "её", "их", "этот", "эта", "это", "эти"}:
+        if core in _POSSESSIVE_OR_DEICTIC:
             continue
         nxt = (
             _strip_punct_word(tokens[index + 1])[1].casefold()
@@ -1514,15 +1650,12 @@ def _proven_theory_object(heading: str) -> str | None:
                 return _normalize_spaces(" ".join(after))
             continue
         if _is_theory_knowledge_token(token):
-            rest = list(tokens[index:])
-            rest[0] = _theory_object_token(rest[0])
-            if _theory_object_span_ok(rest):
+            rest = _knowledge_head_span(tokens, index)
+            if rest:
                 return _normalize_spaces(" ".join(rest))
-            if index > 0:
-                led = [_theory_object_token(tokens[0]), *tokens[1:index], *rest]
-                if _theory_object_span_ok(led):
-                    return _normalize_spaces(" ".join(led))
             continue
+    if _is_theory_knowledge_token(tokens[0]):
+        return None
     led = [_theory_object_token(tokens[0]), *tokens[1:]]
     if not _theory_object_span_ok(led):
         return None
@@ -1533,7 +1666,12 @@ def _characterize(text: str) -> tuple[str, str, str, str]:
     obj = _proven_theory_object(text)
     if not obj:
         return "", "", "", ""
-    obj, cond = _split_object_and_conditions(obj)
+    salvaged = _drop_tautological_characterize_head(obj)
+    if not salvaged:
+        return "", "", "", ""
+    obj, cond = _split_object_and_conditions(salvaged)
+    if not obj or _knowledge_object_missing_owner(obj):
+        return "", "", "", ""
     phrase = _normalize_spaces("характеризует " + " ".join(part for part in (obj, cond) if part))
     return phrase, "характеризует", obj, cond
 
@@ -2975,7 +3113,7 @@ def _adj_to_dative(word: str) -> str:
 def _noun_to_dative(word: str) -> str:
     prefix, core, suffix = _strip_punct_word(word)
     low = core.casefold()
-    if low in _PROVEN_FINITE_VERBS:
+    if low in _PROVEN_FINITE_VERBS or low in _POSSESSIVE_ONLY:
         return f"{prefix}{core}{suffix}"
     if "-" in core and not _is_adjective(core):
         stems = [stem for stem in core.split("-") if stem]
@@ -3055,6 +3193,10 @@ def _dative_np(phrase: str) -> str:
         low = word.casefold()
         if low in {"и", "а", "но", "да"}:
             converted.append("и" if low == "и" else word)
+            continue
+        # его/её/их as determiners are indeclinable; the following NP head takes the case.
+        if not seen_noun and _strip_punct_word(word)[1].casefold() in _POSSESSIVE_ONLY:
+            converted.append(word)
             continue
         if not seen_noun and _is_adjective(word) and not _looks_like_verbal_noun(word):
             converted.append(_adj_to_dative(word))
@@ -3636,6 +3778,88 @@ def control_from_frame(
     return _oral_quiz_control(frame, planned_result)
 
 
+_DISCOURSE_HEAD_RE = re.compile(
+    r"(?i)^(рассказ|бесед|сведен|лекци|истори|описан|сообщен|поняти|значение)"
+)
+_THEMATIC_FORM_ADJ_RE = re.compile(r"(?i)^(?:экскурсионн|соревновательн)\w*")
+_EXPLICIT_ACTIVITY_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:совершает|посещает|проводит)\s+(?:прогулк|экскурси)"
+    r"|^(?:экскурси[яиею])\s+(?:по|в|на|к|во)\b"
+    r"|^(?:посещени[ея])\s+\w"
+    r"|^(?:проведени[ея])\s+(?:экскурси|занят|соревнован|мероприяти|праздник)"
+    r"|^(?:участи[ея])\s+(?:в|во)\b"
+    r"|^(?:отработк[аеи])\s+\w"
+    r"|^(?:заняти[яе])\s+на\s+\w"
+    r"|\b(?:отрабатывает|выполняет\s+упражнен)"
+    r")"
+)
+
+
+def _explicit_activity_evidence(clause: str) -> bool:
+    """True only for an action-clause, not a topic/form heading or object list."""
+
+    lead = _normalize_spaces(clause)
+    if not lead:
+        return False
+    low = lead.casefold()
+    if _DISCOURSE_HEAD_RE.match(low) or _THEMATIC_FORM_ADJ_RE.match(low):
+        return False
+    if re.match(r"(?i)^[а-яё\s,-]+:\s+\S", low) and not _EXPLICIT_ACTIVITY_RE.search(low):
+        return False
+    return bool(_EXPLICIT_ACTIVITY_RE.search(low))
+
+
+def _normalize_source_form(label: str, *, clause: str) -> str:
+    """Map scorer labels onto CE2 TYPE names; drop generic practical overlay."""
+
+    blob = clause.casefold()
+    if label == "тренировочное занятие":
+        return "учебно-тренировочное занятие"
+    if label == "занятие на местности":
+        return "учебно-тренировочное занятие на местности"
+    if label == "соревнования" and "туристск" in blob and "участ" in blob:
+        return "туристские соревнования"
+    if label in {"практическое занятие", "теоретическое занятие"}:
+        return ""
+    return label
+
+
+def _clause_occupation_form(clause: str) -> str:
+    """Explicit activity form of the selected source clause, or empty."""
+
+    lead = _normalize_spaces(clause)
+    if not lead:
+        return ""
+    low = lead.casefold()
+    if _DISCOURSE_HEAD_RE.match(low):
+        return ""
+    if re.match(r"(?i)^посещени[ея]\s+\w", low):
+        return "экскурсия"
+    if re.match(r"(?i)^проведени[ея]\s+экскурси", low):
+        return "экскурсия"
+    if re.search(r"(?i)\b(?:совершает|посещает|проводит)\s+экскурси", low):
+        return "экскурсия"
+    dominant = _dominant_label(_line_form_scores(lead), min_score=2)
+    if dominant in {"игра", "викторина"} and not re.match(r"(?i)^(игр|викторин)", lead):
+        dominant = None
+    if dominant in {"беседа", "исследовательское занятие", "ситуационное занятие"}:
+        dominant = None
+    if not dominant:
+        return ""
+    return _normalize_source_form(dominant, clause=lead)
+
+
+def _allow_specialized_type(
+    clause: str, *, theory_hours: int, practice_hours: int
+) -> bool:
+    if practice_hours:
+        return True
+    if theory_hours and not practice_hours:
+        return _explicit_activity_evidence(clause)
+    return False
+
+
 def type_from_frame(
     frame: ActionFrame,
     *,
@@ -3675,9 +3899,13 @@ def type_from_frame(
             # The generic safe RESULT intentionally carries no activity form.
             # Recover TYPE only from the row-local practical source and
             # only when the existing taxonomy has one unambiguous strong cue.
+            source = practice_text.strip() or frame.clause
+            occupation = _clause_occupation_form(source)
+            if occupation:
+                return occupation
             special_scores = {
                 label: score
-                for label, score in _line_form_scores(practice_text).items()
+                for label, score in _line_form_scores(source).items()
                 if label
                 not in {
                     "практическое занятие",
@@ -3690,6 +3918,9 @@ def type_from_frame(
                 special_scores, min_score=2
             )
             if grounded:
+                mapped = _normalize_source_form(grounded, clause=source)
+                if mapped:
+                    return mapped
                 return grounded
             return "практическое занятие"
         if "составляет" in result and "план" in result and "план-график" in result:
@@ -3744,6 +3975,11 @@ def type_from_frame(
                 return "творческая работа"
             return "практикум"
     lead = _leading_clause(frame)
+    occupation = _clause_occupation_form(lead)
+    if occupation and _allow_specialized_type(
+        lead, theory_hours=theory_hours, practice_hours=practice_hours
+    ):
+        return occupation
     scores = _line_form_scores(lead)
     # A practice-hour allocation is not evidence of a practical activity form.
     # Special TYPE inference is allowed only when this row has grounded
@@ -3755,7 +3991,11 @@ def type_from_frame(
         ):
             dominant = None
         if dominant and dominant not in {"беседа", "исследовательское занятие", "ситуационное занятие"}:
-            return dominant
+            mapped = _normalize_source_form(dominant, clause=lead)
+            if mapped:
+                return mapped
+            if dominant not in {"практическое занятие", "практикум"}:
+                return dominant
     if theory_hours and not practice_hours:
         theory_scores = _line_form_scores(lead or theory_text)
         if theory_scores.get("беседа", 0) >= 2:
@@ -4569,13 +4809,19 @@ def _quality_issue(
         if re.search(r"[.!?]\s*[,;]|[,;]\s*[,;]", text):
             return "broken_clause_join"
     # Structural damage has priority over uncertain case diagnostics.
-    nominal = re.match(r"(?i)^характеризует\s+([а-яё-]+)", result)
-    if nominal and _predicate_repeats_object("характеризует", nominal.group(1)):
-        return "tautological_predicate_object"
-    if nominal and _unproven_raw_colon_subject(nominal.group(1), clause):
-        return "unproven_object_case"
-    if nominal and not re.search(r"[ыиуюеь]$", nominal.group(1)):
-        return "unproven_object_case"
+    nominal = re.match(r"(?i)^характеризует\s+(.+)$", result.rstrip("."))
+    if nominal:
+        obj_text = nominal.group(1)
+        first_match = re.match(r"(?i)^[«\"(]*([а-яё-]+)", obj_text)
+        first_word = first_match.group(1) if first_match else ""
+        if first_word and _predicate_repeats_object("характеризует", first_word):
+            return "tautological_predicate_object"
+        if _knowledge_object_missing_owner(obj_text):
+            return "missing_knowledge_owner"
+        if first_word and _unproven_raw_colon_subject(first_word, clause):
+            return "unproven_object_case"
+        if first_word and not re.search(r"[ыиуюеь]$", first_word):
+            return "unproven_object_case"
     # A surviving genitive modifier after these transitive predicates is not
     # evidence of a successfully converted direct object. Do not guess a repair.
     # A span copied from the selected clause is already source-grounded.
@@ -4591,6 +4837,13 @@ def _quality_issue(
         return "unsafe_control_case"
     if control.startswith("устный опрос") and not control.startswith("устный опрос по теме „"):
         oral_part = control.split(";")[0].strip()
+        if re.match(
+            r"(?i)^устный опрос по (?:истори[ия]|биографи[ия]|рол[иь]|строени[юе]|"
+            r"видам|значени[юе]|поняти[юе]|назначени[юе]|устройств[уео]|"
+            r"правил[ам]|требованиям|характеристик[еа])$",
+            oral_part,
+        ):
+            return "unsafe_oral_control"
         if _oral_object_grounded_in_result(oral_part, result):
             return ""
         # Closed, already-supported knowledge heads; no arbitrary tail gets
@@ -4747,6 +5000,10 @@ def _closed_candidate(
         participatory = _participatory_result_from_clause(candidate.frame.clause)
         if participatory:
             return replace(candidate, planned_result=participatory)
+    if issue == "tautological_predicate_object":
+        salvaged = _salvage_tautological_characterize_result(candidate.planned_result)
+        if salvaged:
+            return replace(candidate, planned_result=salvaged)
     return None
 
 
@@ -4770,7 +5027,7 @@ def derive_fields_v2(
         return candidate
     repaired = _closed_candidate(candidate, issue=issue, topic_title=topic_title, practical=practical)
     if repaired is not None:
-        if issue == "unproven_coordinated_predicate":
+        if issue in {"unproven_coordinated_predicate", "tautological_predicate_object"}:
             repaired = _triad_from_selected_frame(
                 repaired,
                 planned_result=repaired.planned_result,
