@@ -725,9 +725,13 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
     assert "1 год обучения" in header_texts[1]
     assert "72" in header_texts[1]
     assert header_texts[2] == "\tГруппа № ___________ (Класс _________)"
-    assert all("учебный год" not in text for text in header_texts)
+    assert header_texts[3] == "2026–2027 учебный год"
+    assert "учебный год" not in header_texts[1]
+    assert "год обучения" in header_texts[1]
+    assert "\t" not in header_texts[3]
+    assert document.paragraphs[3].alignment == 1  # CENTER
 
-    for paragraph in document.paragraphs[:3]:
+    for paragraph in document.paragraphs[:4]:
         name, size = _run_font(paragraph)
         assert name == "Times New Roman"
         assert size == 12.0
@@ -814,7 +818,7 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
     assert len(empty.paragraphs) == len(source.paragraphs)
     assert empty.paragraphs[2].text == "\tГруппа № ___________ (Класс _________)"
     assert empty.paragraphs[2].alignment == 0  # LEFT
-    assert all("учебный год" not in paragraph.text for paragraph in empty.paragraphs[:4])
+    assert empty.paragraphs[3].text == "2026–2027 учебный год"
     empty_tabs = empty.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:tabs"))
     empty_vals = [tab.get(qn("w:val")) for tab in empty_tabs.findall(qn("w:tab"))]
     assert empty_vals == ["center", "right"]
@@ -838,4 +842,65 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
     tab_vals = [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
     assert tab_vals == ["center", "right"]
     assert all(paragraph.text.strip() != "Иванов И.И." for paragraph in filled.paragraphs)
-    assert all("учебный год" not in paragraph.text for paragraph in filled.paragraphs[:4])
+    assert filled.paragraphs[3].text == "2026–2027 учебный год"
+
+
+def _org_header_fixture(academic_year: str, teacher_name: str = "Иванов И.И."):
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    template_path = REFERENCES / "Календарный план.docx"
+    tourists = resolve_utp(
+        None,
+        validate_upload(
+            UploadPurpose.PROGRAM,
+            program_path.name,
+            program_path.read_bytes(),
+        ),
+    )
+    source = Document(str(template_path))
+    filled = Document(str(template_path))
+    _write_document_header(
+        filled,
+        tourists,
+        academic_year=academic_year,
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        teacher_name=teacher_name,
+        uses_organization_template=True,
+    )
+    return source, filled
+
+
+def test_organization_header_uses_existing_spacer_for_academic_year() -> None:
+    source, filled = _org_header_fixture("2026–2027")
+    assert source.paragraphs[3].text.strip() == ""
+    assert len(filled.paragraphs) == len(source.paragraphs)
+    assert filled.paragraphs[3].text == "2026–2027 учебный год"
+    assert "\t" not in filled.paragraphs[3].text
+    assert filled.paragraphs[3].alignment == 1  # CENTER
+    spacer_tabs = filled.paragraphs[3]._p.find(qn("w:pPr")).find(qn("w:tabs"))
+    assert spacer_tabs is None
+    assert filled.paragraphs[4].text.strip() == ""
+
+
+def test_organization_header_keeps_group_teacher_tabs_and_program_line() -> None:
+    _source, filled = _org_header_fixture("2027–2028")
+    program = filled.paragraphs[1].text
+    assert "год обучения" in program
+    assert "учебный год" not in program
+    group = filled.paragraphs[2]
+    assert group.text == "\tГруппа № ___________ (Класс _________)\tИванов И.И."
+    assert group.alignment == 0  # LEFT
+    tabs = group._p.find(qn("w:pPr")).find(qn("w:tabs"))
+    tab_vals = [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
+    assert tab_vals == ["center", "right"]
+    assert filled.paragraphs[3].text == "2027–2028 учебный год"
+
+
+def test_standard_template_file_and_generated_header_keep_year_slot() -> None:
+    source = Document(str(STANDARD_TEMPLATE_PATH))
+    assert source.paragraphs[2].text.startswith("Группа")
+    assert source.paragraphs[3].text.strip() == ""
+    assert all("учебный год" not in paragraph.text for paragraph in source.paragraphs[:4])
+    document = Document(BytesIO(_key_docx()))
+    assert document.paragraphs[2].text == "2026–2027 учебный год"
+    assert document.paragraphs[3].text.startswith("Группа")

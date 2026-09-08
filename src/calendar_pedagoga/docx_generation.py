@@ -25,6 +25,7 @@ from calendar_pedagoga.lesson_display import (
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.content_generation import WeekTopicPart
+from calendar_pedagoga.academic_year import normalize_academic_year
 from calendar_pedagoga.program_parsing import infer_study_year_number
 
 
@@ -959,10 +960,65 @@ def _fill_organization_header_paragraph(
     return _append_teacher_name_to_group_line(updated, teacher_name)
 
 
+def _paragraph_before_first_table(document):
+    """Последний body-абзац перед первой таблицей, без абзацев внутри таблицы."""
+
+    last_element = None
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:tbl"):
+            break
+        if child.tag == qn("w:p"):
+            last_element = child
+    if last_element is None:
+        return None
+    for paragraph in document.paragraphs:
+        if paragraph._p is last_element:
+            return paragraph
+    return None
+
+
+def _clear_paragraph_tabs(paragraph) -> None:
+    properties = paragraph._p.find(qn("w:pPr"))
+    if properties is None:
+        return
+    tabs = properties.find(qn("w:tabs"))
+    if tabs is not None:
+        properties.remove(tabs)
+
+
+def _header_run_seed_before(document, target):
+    seed = _first_run_properties(target)
+    if seed is not None:
+        return seed
+    for paragraph in document.paragraphs:
+        if paragraph._p is target._p:
+            break
+        found = _first_run_properties(paragraph)
+        if found is not None:
+            seed = found
+    return seed
+
+
+def _fill_organization_academic_year(document, academic_year: str | None) -> None:
+    """Записать канон Y–(Y+1) в существующий пустой абзац перед таблицей."""
+
+    canonical = normalize_academic_year(academic_year)
+    if canonical is None:
+        return
+    spacer = _paragraph_before_first_table(document)
+    if spacer is None or spacer.text.strip():
+        return
+    seed = _header_run_seed_before(document, spacer)
+    _set_paragraph_text_keep_format(spacer, f"{canonical} учебный год", seed)
+    spacer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _clear_paragraph_tabs(spacer)
+
+
 def _fill_organization_header(
     document,
     utp: UtpParseResult,
     *,
+    academic_year: str | None = None,
     program_title: str | None = None,
     study_year_hints: tuple[str | None, ...] = (),
     group_number: str | None = None,
@@ -990,6 +1046,7 @@ def _fill_organization_header(
             paragraph.text.replace("\t", "")
         ):
             _apply_group_teacher_tabs(paragraph, document)
+    _fill_organization_academic_year(document, academic_year)
 
 
 def _write_document_header(
@@ -1008,6 +1065,7 @@ def _write_document_header(
         _fill_organization_header(
             document,
             utp,
+            academic_year=academic_year,
             program_title=program_title,
             study_year_hints=study_year_hints,
             group_number=group_number,
