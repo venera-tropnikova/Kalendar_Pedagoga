@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 from functools import lru_cache
+import inspect
 
 import pytest
 from calendar_pedagoga.docx_generation import (
@@ -31,7 +32,10 @@ from calendar_pedagoga.program_parsing import parse_program
 from calendar_pedagoga.resolve_utp import resolve_utp
 from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 from calendar_pedagoga.content_generation import build_content_model
-from calendar_pedagoga.lesson_content import build_lesson_content
+from calendar_pedagoga.pipeline import (
+    USE_CONTENT_ENGINE_V2,
+    _build_pipeline_lesson_content,
+)
 from calendar_pedagoga.scheduling import build_schedule
 from docx import Document
 from docx.oxml import OxmlElement
@@ -41,6 +45,15 @@ from docx.oxml.ns import qn
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
 
 
+def _resolved_lessons(content):
+    return resolve_lesson_content(
+        _build_pipeline_lesson_content(
+            content,
+            use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+        )
+    )
+
+
 @lru_cache(maxsize=1)
 def _key_docx() -> bytes:
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
@@ -48,7 +61,7 @@ def _key_docx() -> bytes:
     utp = parse_utp(utp_path)
     program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     content = build_content_model(build_schedule(utp), utp, program, utp_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     return generate_calendar_docx(
         utp,
         resolved,
@@ -59,6 +72,16 @@ def _key_docx() -> bytes:
 
 def test_standard_template_exists() -> None:
     assert STANDARD_TEMPLATE_PATH.is_file()
+
+
+def test_docx_helpers_use_production_lesson_engine() -> None:
+    helper_src = inspect.getsource(_resolved_lessons)
+    ce1_call = "build_lesson_content" + "("
+    assert "_build_pipeline_lesson_content" in helper_src
+    assert "USE_CONTENT_ENGINE_V2" in helper_src
+    assert ce1_call not in helper_src
+    assert ce1_call not in inspect.getsource(_key_docx)
+    assert ce1_call not in inspect.getsource(_key_docx_for_year)
 
 
 def test_generated_table_marks_header_rows_for_word_repeat() -> None:
@@ -122,7 +145,7 @@ def _key_docx_for_year(academic_year: str) -> bytes:
     utp = parse_utp(utp_path)
     program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
     content = build_content_model(build_schedule(utp, academic_year), utp, program, utp_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     return generate_calendar_docx(
         utp,
         resolved,
@@ -277,14 +300,12 @@ def test_tour_guides_header_uses_program_and_filename_year() -> None:
     )
     assert line == "«Туристы-проводники» — 1 год обучения (2 часа в неделю)"
     title, hints = _resolve_header_from_rows(
-        resolve_lesson_content(
-            build_lesson_content(
-                build_content_model(
-                    build_schedule(utp),
-                    utp,
-                    program,
-                    f"УТП из файла «{program_path.name}»",
-                )
+        _resolved_lessons(
+            build_content_model(
+                build_schedule(utp),
+                utp,
+                program,
+                f"УТП из файла «{program_path.name}»",
             )
         ),
         program_title=None,
@@ -325,7 +346,7 @@ def test_tour_guides_without_program_generates_valid_empty_content_docx() -> Non
     utp_path = REFERENCES / "УТП ТП 3г. 2ч.docx"
     utp = parse_utp(utp_path)
     content = build_content_model(build_schedule(utp), utp, None, utp_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     docx_bytes = generate_calendar_docx(
         utp,
         resolved,
@@ -433,7 +454,7 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
     utp = resolve_utp(None, validated_program)
     schedule = build_schedule(utp)
     content = build_content_model(schedule, utp, program_upload, program_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     generated = generate_calendar_docx(
         utp,
         resolved,
@@ -489,7 +510,7 @@ def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
     utp = resolve_utp(None, validated_program)
     schedule = build_schedule(utp)
     content = build_content_model(schedule, utp, program_upload, program_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     generated = generate_calendar_docx(
         utp,
         resolved,
@@ -706,7 +727,7 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
     )
     utp = resolve_utp(None, validated_program)
     content = build_content_model(build_schedule(utp), utp, program_upload, program_path.name)
-    resolved = resolve_lesson_content(build_lesson_content(content))
+    resolved = _resolved_lessons(content)
     generated = generate_calendar_docx(
         utp,
         resolved,

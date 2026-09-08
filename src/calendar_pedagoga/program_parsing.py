@@ -23,6 +23,7 @@ class ProgramContentItem:
     title: str
     content: str
     parent_section: str | None = None
+    study_year: int | None = None
 
 
 @dataclass(frozen=True)
@@ -365,6 +366,7 @@ def _content_items(document, study_year: int | None = None) -> tuple[ProgramCont
                     current_title,
                     "\n".join(content).strip(),
                     current_parent,
+                    study_year,
                 )
             )
 
@@ -372,6 +374,8 @@ def _content_items(document, study_year: int | None = None) -> tuple[ProgramCont
         text = _clean(paragraph.text)
         if not text:
             continue
+        if re.search(r"содержание\s+программы\s+\d+-го\s+года\s+обучения", text, re.I):
+            break
         if re.search(r"^\(\d+-й\s+год\s+обучения\)", text, re.I):
             continue
         if re.search(r"по окончани[юя].*года обучения", text, re.I):

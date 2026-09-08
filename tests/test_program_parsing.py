@@ -121,12 +121,19 @@ def test_matching_uses_deterministic_priority() -> None:
 
     matches = match_utp_to_program(topics, items)
 
+    # «Пеший туризм» / «Походы пешком»: один номер и один раздел не подтверждают
+    # тему. Общих отличительных токенов нет (пеший/туризм ≠ походы/пешком),
+    # нормализованные названия не равны, вхождение заголовка не выполняется.
+    # Номер сам по себе содержание не переносит.
     assert [match.status for match in matches] == [
         MatchStatus.EXACT,
         MatchStatus.NORMALIZED,
-        MatchStatus.NUMBER_MATCH,
+        MatchStatus.UNCONFIRMED,
         MatchStatus.NOT_MATCHED,
     ]
+    assert matches[2].program_item is None
+    assert matches[2].utp_position.title == "Пеший туризм"
+    assert matches[2].utp_position.hours == Hours(6, 2, 4)
 
 
 def test_ambiguous_normalized_match_is_not_guessed() -> None:
@@ -143,11 +150,13 @@ def test_ambiguous_normalized_match_is_not_guessed() -> None:
     assert len(match.ambiguous_candidates) == 2
 
 
-def test_unique_contained_title_is_text_match() -> None:
+def test_unique_contained_single_token_is_not_text_match() -> None:
     topic = Topic(None, "Аптечка", Hours(2, 1, 1), "Раздел")
     items = (ProgramContentItem(None, "Медицинская аптечка.", "Текст"),)
     match = match_utp_to_program((topic,), items)[0]
-    assert match.status is MatchStatus.TEXT_MATCH
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert match.program_item is None
+    assert "Медицинская аптечка." in match.ambiguous_candidates
 
 
 def test_real_key_program_matches_all_13_positions() -> None:
@@ -168,7 +177,13 @@ def test_real_key_program_matches_all_13_positions() -> None:
     assert len(program.tasks) == 3
     assert len(program.content_items) == 16
     assert len(matches) == 13
-    assert all(match.status is not MatchStatus.NOT_MATCHED for match in matches)
+    pharmacy = next(match for match in matches if match.utp_position.title == "Аптечка")
+    assert pharmacy.status is MatchStatus.NOT_MATCHED
+    assert pharmacy.program_item is None
+    assert all(
+        match.status is not MatchStatus.NOT_MATCHED or match.utp_position.title == "Аптечка"
+        for match in matches
+    )
 def test_tour_guides_year1_program_finds_content_items() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     program = parse_program(program_path.read_bytes(), program_path.name, study_year=1)

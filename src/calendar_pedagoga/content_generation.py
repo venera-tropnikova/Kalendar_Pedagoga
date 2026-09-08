@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from calendar_pedagoga.matching import MatchStatus, match_utp_to_program
+from calendar_pedagoga.match_review import (
+    MISSING_PROGRAM_CONTENT_NOTICE,
+    apply_match_reviews,
+    topic_key,
+)
+from calendar_pedagoga.matching import MatchStatus, bound_program_item, match_utp_to_program
 from calendar_pedagoga.parsing import UtpParseResult
-from calendar_pedagoga.program_parsing import ProgramData
+from calendar_pedagoga.program_parsing import ProgramData, infer_study_year_number
 from calendar_pedagoga.scheduling import ScheduleResult
 
 
@@ -55,14 +61,31 @@ def _preview(text: str, limit: int = 320) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def study_year_for_matching(utp: UtpParseResult) -> int | None:
+    """Тот же год обучения, что analysis и pipeline передают в matching."""
+
+    return infer_study_year_number(utp.metadata.study_year)
+
+
 def build_content_model(
     schedule: ScheduleResult,
     utp: UtpParseResult,
     program: ProgramData | None,
     source_utp_name: str,
+    match_reviews: Mapping | None = None,
 ) -> tuple[CalendarContentRow, ...]:
     """Связать календарные строки только с фактическими источниками."""
-    matches = match_utp_to_program(utp.topics, program.content_items) if program else ()
+    matches = (
+        match_utp_to_program(
+            utp.topics,
+            program.content_items,
+            study_year=study_year_for_matching(utp),
+        )
+        if program
+        else ()
+    )
+    if program is not None:
+        matches = apply_match_reviews(matches, program.content_items, match_reviews)
     match_by_topic = {
         (match.utp_position.number, match.utp_position.title, match.utp_position.parent_section): match
         for match in matches
@@ -79,13 +102,35 @@ def build_content_model(
     topic_rows: list[tuple[int, WeekTopicPart, object]] = []
     for data in grouped.values():
         element = data["element"]
-        topic_key = (element.topic_number, element.topic, element.section)
-        match = match_by_topic.get(topic_key)
-        program_item = match.program_item if match else None
+        row_topic_key = (element.topic_number, element.topic, element.section)
+        match = match_by_topic.get(row_topic_key)
+        program_item = bound_program_item(match)
         if program is None:
             warnings = ("Образовательная программа не загружена; содержание отсутствует.",)
         elif program_item is None:
-            warnings = (f"Тема УТП «{element.topic}» не сопоставлена с программой.",)
+            review = (
+                (match_reviews or {}).get(topic_key(match.utp_position))
+                if match is not None
+                else None
+            )
+            if isinstance(review, Mapping) and review.get("decision") == "USER_REJECTED":
+                warnings = (
+                    f"Тема УТП «{element.topic}» не связана с содержанием программы "
+                    "(решение педагога).",
+                )
+            elif match is not None and match.status is MatchStatus.UNCONFIRMED:
+                warnings = (
+                    f"Тема УТП «{element.topic}» не сопоставлена с программой: "
+                    "номер без подтверждения названия или раздела недостаточен.",
+                )
+            elif (
+                match is not None
+                and match.status is MatchStatus.NOT_MATCHED
+                and not match.ambiguous_candidates
+            ):
+                warnings = (MISSING_PROGRAM_CONTENT_NOTICE,)
+            else:
+                warnings = (f"Тема УТП «{element.topic}» не сопоставлена с программой.",)
         else:
             warnings = ()
         theory = int(data["theory"])

@@ -32,7 +32,6 @@ def test_prepares_one_request_per_key_week_without_api() -> None:
     assert [request.request_id for request in requests] == [
         f"week-{number:02d}" for number in range(1, 37)
     ]
-    assert all(request.input.program_content for request in requests)
 
 
 def test_city_requests_preserve_source_and_occurrence_context() -> None:

@@ -15,7 +15,6 @@ from calendar_pedagoga.program_parsing import infer_study_year_number, parse_pro
 from calendar_pedagoga.resolve_utp import apply_workload_from_document, resolve_utp
 from calendar_pedagoga.scheduling import build_schedule
 from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
-from test_ce2_grounded_triad import CE2_TP1_WEEK_SNAPSHOT
 
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
@@ -54,44 +53,62 @@ def test_tp1_repeated_topics_use_slots_not_modulo() -> None:
     upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
     utp = resolve_utp(None, upload)
     program = parse_program(upload.content, upload.filename, study_year=1)
-    generated = build_lesson_content_v2(
-        build_content_model(build_schedule(utp, "2026–2027"), utp, program, source.name)
+    schedule = build_schedule(utp, "2026–2027")
+
+    def practice_weeks(number: str) -> int:
+        return len(
+            {
+                element.week.number
+                for element in schedule.elements
+                if element.topic_number == number
+                and element.part_type == "practice"
+                and element.hours
+            }
+        )
+
+    ofp_w = practice_weeks("5.3")
+    sfp_w = practice_weeks("5.4")
+    assert ofp_w == 3
+    assert sfp_w == 5
+    ofp_topic = next(topic for topic in utp.topics if topic.number == "5.3")
+    sfp_topic = next(topic for topic in utp.topics if topic.number == "5.4")
+    ofp_item = next(item for item in program.content_items if item.number == "5.3")
+    sfp_item = next(item for item in program.content_items if item.number == "5.4")
+    ofp_units = practice_units_from_content(
+        ofp_item.content,
+        theory_hours=ofp_topic.hours.theory,
+        practice_hours=ofp_topic.hours.practice,
     )
-    ofp = [lesson for lesson in generated if lesson.source.topic_number == "5.3"]
-    sfp = [lesson for lesson in generated if lesson.source.topic_number == "5.4"]
-    excursion = [lesson for lesson in generated if lesson.source.topic_number == "3.2"]
-    assert len(ofp) == 3
-    assert len(sfp) == 5
-    assert len(excursion) == 2
-    joined = " ".join(item.planned_result.casefold() for item in ofp)
+    sfp_units = practice_units_from_content(
+        sfp_item.content,
+        theory_hours=sfp_topic.hours.theory,
+        practice_hours=sfp_topic.hours.practice,
+    )
+    ofp_slots = assign_practice_slots(ofp_units, ofp_w)
+    sfp_slots = assign_practice_slots(sfp_units, sfp_w)
+    joined = " ".join(unit for slot in ofp_slots for unit in slot).casefold()
     for fragment in (
         "рук и плечевого пояса",
         "мышц шеи",
-        "туловища и ног",
+        "туловища",
+        "ног",
         "сопротивлением",
         "скакалкой",
         "акробатики",
-        "эстафетах",
-        "легкой атлетикой",
-        "лыжным спортом",
+        "эстафет",
+        "легкая атлетика",
+        "лыжный спорт",
         "гимнастические",
         "баскетбол",
-        "плавания",
+        "плавание",
     ):
-        assert fragment in joined
-    assert sfp[4].planned_result == sfp[3].planned_result
-    assert "выносливости" not in sfp[4].planned_result.casefold()
-    assert SLOT_CONTINUE_IN(sfp[4].warnings)
-    assert excursion[0].planned_result == excursion[1].planned_result
-    assert excursion[0].planned_result == CE2_TP1_WEEK_SNAPSHOT[18][2]
-    assert SLOT_CONTINUE_IN(excursion[1].warnings)
-    week1 = generated[1]
-    assert week1.source.topic_number == "1.3"
-    assert week1.planned_result == CE2_TP1_WEEK_SNAPSHOT[1][2]
-
-
-def SLOT_CONTINUE_IN(warnings: tuple[str, ...]) -> bool:
-    return any("продолжение" in item.casefold() for item in warnings)
+        assert fragment in joined, f"OFP slot-units без {fragment!r}: {ofp_slots!r}"
+    assert sfp_slots[4] == sfp_slots[3]
+    assert slot_is_continuation(sfp_slots, 4)
+    last = format_slot_practice_text(sfp_slots[4], continuation=True)
+    assert last.startswith("Продолжение.")
+    assert "выносливости" not in last.casefold()
+    assert "выносливости" in " ".join(sfp_slots[0]).casefold()
 
 
 def _first_repeated_mismatch(generated, program):

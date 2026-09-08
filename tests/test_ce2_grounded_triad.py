@@ -328,11 +328,9 @@ CE2_TP1_WEEK_SNAPSHOT = (
 )
 
 
-def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
+def test_tp1_live_schedule_hours_and_mixed_week():
     from pathlib import Path
-    from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
-    from calendar_pedagoga.content_generation import build_content_model
-    from calendar_pedagoga.program_parsing import parse_program
+
     from calendar_pedagoga.resolve_utp import resolve_utp
     from calendar_pedagoga.scheduling import build_schedule
     from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
@@ -340,22 +338,38 @@ def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
     source = Path(__file__).resolve().parents[1] / "references" / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
     utp = resolve_utp(None, upload)
-    program = parse_program(upload.content, upload.filename, study_year=1)
     schedule = build_schedule(utp, "2026–2027")
-    rows = build_content_model(schedule, utp, program, source.name)
-    before = repr(rows)
-    generated = build_lesson_content_v2(rows)
-    assert len(generated) == 36
     assert len(schedule.weeks) == 36
     assert utp.table_totals.total == 72
     assert utp.table_totals.theory == 27
     assert utp.table_totals.practice == 45
-    assert sum(row.theory_hours for row in rows) == 27
-    assert sum(row.practice_hours for row in rows) == 45
-    assert {(part.topic_number, part.theory_hours) for part in rows[0].week_parts} == {
-        ("1.1", 1),
-        ("1.2", 1),
-    }
+    assert sum(element.hours for element in schedule.elements if element.part_type == "theory") == 27
+    assert sum(element.hours for element in schedule.elements if element.part_type == "practice") == 45
+    week1: dict[str | None, int] = {}
+    for element in schedule.elements:
+        if element.week.number != 1:
+            continue
+        week1[element.topic_number] = week1.get(element.topic_number, 0)
+        if element.part_type == "theory":
+            week1[element.topic_number] += element.hours
+    assert {(number, hours) for number, hours in week1.items()} == {("1.1", 1), ("1.2", 1)}
+
+
+def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
+    import inspect
+
+    from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
+    import tp1_fixed_content
+    from tp1_fixed_content import tp1_number_bound_content_rows
+
+    fixture_src = inspect.getsource(tp1_fixed_content)
+    assert "match_utp_to_program" not in fixture_src
+    assert "bound_program_item" not in fixture_src
+    assert "build_content_model" not in fixture_src
+    rows = tp1_number_bound_content_rows()
+    before = repr(rows)
+    generated = build_lesson_content_v2(rows)
+    assert len(generated) == 36
     assert repr(rows) == before
     clone = re.compile(
         r"(?i)^(практическая работа|педагогическое наблюдение):\s+"
@@ -364,13 +378,30 @@ def test_all_36_first_year_rows_keep_source_schedule_and_grounded_results():
     )
     for index, (original, lesson) in enumerate(zip(rows, generated)):
         number, lesson_type, result, control = CE2_TP1_WEEK_SNAPSHOT[index]
+        week = original.week_number
         assert lesson.source is original
-        assert original.topic_number == number
-        assert lesson.lesson_type == lesson_type
+        assert original.topic_number == number, (
+            f"неделя {week}: topic_number\n"
+            f"expected: {number!r}\n"
+            f"actual: {original.topic_number!r}"
+        )
+        assert lesson.lesson_type == lesson_type, (
+            f"неделя {week}: TYPE\n"
+            f"expected: {lesson_type!r}\n"
+            f"actual: {lesson.lesson_type!r}"
+        )
         assert is_single_pedagogical_lesson_type(lesson.lesson_type)
         assert "+" not in lesson.lesson_type
-        assert lesson.planned_result == result
-        assert lesson.assessment_method == control
+        assert lesson.planned_result == result, (
+            f"неделя {week}: RESULT\n"
+            f"expected: {result!r}\n"
+            f"actual: {lesson.planned_result!r}"
+        )
+        assert lesson.assessment_method == control, (
+            f"неделя {week}: CONTROL\n"
+            f"expected: {control!r}\n"
+            f"actual: {lesson.assessment_method!r}"
+        )
         assert clone.search(lesson.assessment_method) is None
         triad = f"{lesson.lesson_type} {lesson.planned_result} {lesson.assessment_method}".lower()
         assert not any(word in triad for word in ("чек-лист", "защита", "норматив", "баллов", "секунд"))

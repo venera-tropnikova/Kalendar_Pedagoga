@@ -1,5 +1,6 @@
 from datetime import date
 import hashlib
+import inspect
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,28 @@ def _check_button(app: AppTest):
     return next(button for button in app.button if button.label == "Проверить документы")
 
 
+def _resolve_disputed_matches(app: AppTest, *, prefer_confirm: bool = True) -> AppTest:
+    for _ in range(40):
+        confirms = [
+            button
+            for button in app.button
+            if button.label == "Подтвердить соответствие" and not button.disabled
+        ]
+        rejects = [
+            button for button in app.button if button.label == "Соответствия нет"
+        ]
+        if not confirms and not rejects:
+            return app
+        if prefer_confirm and confirms:
+            confirms[0].click().run()
+            continue
+        if rejects:
+            rejects[0].click().run()
+            continue
+        confirms[0].click().run()
+    raise AssertionError("остались нерешённые спорные соответствия")
+
+
 def test_initial_screen_contains_required_controls() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
 
@@ -149,6 +172,7 @@ def test_clear_program_resets_analysis_but_keeps_other_files() -> None:
     _upload(app, 2, template)
     app.run()
     _check_button(app).click().run()
+    _resolve_disputed_matches(app)
 
     assert _analysis_ready(app) is True
     assert "Документы проверены" in _page_text(app)
@@ -227,6 +251,7 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     _upload(app, 0, _program_file())
     app.run()
     _check_button(app).click().run()
+    _resolve_disputed_matches(app)
 
     text = _page_text(app)
     assert not app.exception
@@ -522,6 +547,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     _upload(app, 2, _template_file())
     app.run()
     _check_button(app).click().run()
+    _resolve_disputed_matches(app)
 
     generated = SimpleNamespace(
         filename="calendar.docx",
@@ -543,6 +569,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         generate.click().run()
 
     pipeline.assert_called_once()
+    assert pipeline.call_args.kwargs["match_reviews"] == app.session_state["match_reviews"]
     assert pipeline.call_args.kwargs["use_ai"] is False
     assert "ai_provider" not in pipeline.call_args.kwargs
     assert pipeline.call_args.kwargs["group_number"] == ""
@@ -578,6 +605,7 @@ def test_generated_plan_survives_calendar_and_week_click_reruns() -> None:
     _upload(app, 2, _template_file())
     app.run()
     _check_button(app).click().run()
+    _resolve_disputed_matches(app)
 
     source = SimpleNamespace(
         week_number=19,
@@ -672,6 +700,7 @@ def test_teacher_name_is_optional_and_invalidates_download() -> None:
     _upload(app, 2, _template_file())
     app.run()
     _check_button(app).click().run()
+    _resolve_disputed_matches(app)
 
     generated = SimpleNamespace(
         filename="calendar.docx",
@@ -733,3 +762,143 @@ def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
         code not in " ".join(shown)
         for code in ("broken_clause_join", "unproven_object_case")
     )
+
+
+def test_unresolved_disputed_matches_block_generation() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 2, _template_file())
+    app.run()
+    _check_button(app).click().run()
+
+    assert "Документы проверены" not in _page_text(app)
+    assert "Нужно сопоставить темы" in _page_text(app)
+    generate = next(
+        button for button in app.button if button.label == "Сформировать календарный план"
+    )
+    assert generate.disabled
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
+        generate.click().run()
+        pipeline.assert_not_called()
+
+
+def test_rejected_matches_allow_generation_with_remarks() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 2, _template_file())
+    app.run()
+    _check_button(app).click().run()
+    _resolve_disputed_matches(app, prefer_confirm=False)
+
+    assert "Документы проверены" in _page_text(app)
+    generate = next(
+        button for button in app.button if button.label == "Сформировать календарный план"
+    )
+    assert not generate.disabled
+    generated = SimpleNamespace(
+        filename="calendar.docx",
+        content=b"generated-docx",
+        warnings=(),
+        ai_usage=None,
+    )
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated):
+        generate.click().run()
+
+    text = _page_text(app)
+    assert "План с замечаниями" in text
+    assert "без связанного содержания программы" in text
+    assert "✓ Календарный план готов" not in text
+
+
+def test_file_change_resets_match_reviews() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    program = _program_file()
+    _upload(app, 0, program)
+    app.run()
+    _check_button(app).click().run()
+    _resolve_disputed_matches(app)
+    assert "match_reviews" in app.session_state
+    assert app.session_state["match_reviews"]
+
+    app.get("file_uploader")[0].set_value(
+        (program.name, program.read_bytes() + b"changed", DOCX_MIME)
+    )
+    app.run()
+
+    assert "match_reviews" not in app.session_state
+    assert "match_reviews_scope" not in app.session_state
+
+
+def test_group_and_teacher_keep_match_reviews() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    _check_button(app).click().run()
+    _resolve_disputed_matches(app)
+    reviews = dict(app.session_state["match_reviews"])
+    scope = app.session_state["match_reviews_scope"]
+
+    next(item for item in app.text_input if item.label == "Группа №").set_value("5").run()
+    assert app.session_state["match_reviews"] == reviews
+    assert app.session_state["match_reviews_scope"] == scope
+
+    next(item for item in app.text_input if item.label == "ФИО педагога").set_value(
+        "Сидоров С.С."
+    ).run()
+    assert app.session_state["match_reviews"] == reviews
+    assert app.session_state["match_reviews_scope"] == scope
+    assert app.session_state["analysis_ready"] is True
+
+
+def test_missing_content_notice_does_not_ask_confirm_or_reject() -> None:
+    from calendar_pedagoga.match_review import MISSING_PROGRAM_CONTENT_NOTICE
+    from calendar_pedagoga.matching import ContentMatch, MatchStatus
+    from calendar_pedagoga.parsing import Hours, Topic
+    from calendar_pedagoga.program_parsing import ProgramData
+
+    halt = Topic("4.1", "Рисование натюрморта", Hours(2, 0, 2), "ИЗО")
+    keep = Topic("4.2", "Сольфеджио", Hours(2, 0, 2), "ИЗО")
+    matches = (
+        ContentMatch(halt, None, MatchStatus.NOT_MATCHED, 0.0),
+        ContentMatch(keep, None, MatchStatus.EXACT, 1.0),
+    )
+    program = ProgramData(
+        title="Синтетика",
+        duration=None,
+        student_age=None,
+        goal=None,
+        tasks=(),
+        lesson_forms=(),
+        teaching_methods=(),
+        expected_results=(),
+        knowledge_outcomes=(),
+        skill_outcomes=(),
+        content_items=(),
+    )
+    infos: list[str] = []
+    labels: list[str] = []
+    with (
+        patch.object(ui.st, "info", side_effect=lambda text, **_: infos.append(text)),
+        patch.object(ui.st, "markdown", lambda *_, **__: None),
+        patch.object(
+            ui.st,
+            "button",
+            side_effect=lambda label, **_: labels.append(label) or False,
+        ),
+    ):
+        ui._render_missing_content_notices(matches)
+        ui._render_match_review_cards(matches, program, "scope")
+
+    assert MISSING_PROGRAM_CONTENT_NOTICE in infos
+    assert "Подтвердить соответствие" not in labels
+    assert "Соответствия нет" not in labels
+
+
+def test_analysis_uses_pipeline_ce2_and_not_ce1() -> None:
+    source = inspect.getsource(ui)
+    ce1_call = "build_lesson_content" + "("
+    assert ce1_call not in source
+    assert "_build_pipeline_lesson_content" in source
+    normative = inspect.getsource(ui._lesson_views_for_normative)
+    assert "build_lesson_content_v2" not in normative
+    assert "row.lesson_type" in normative

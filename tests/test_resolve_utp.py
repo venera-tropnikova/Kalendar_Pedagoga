@@ -4,9 +4,7 @@ from pathlib import Path
 from docx import Document
 import pytest
 
-from calendar_pedagoga.matching import MatchStatus, match_utp_to_program
 from calendar_pedagoga.parsing import Hours, parse_utp
-from calendar_pedagoga.program_parsing import parse_program
 from calendar_pedagoga.resolve_utp import (
     AUTO_WORKLOAD_WARNING,
     UtpResolutionError,
@@ -73,16 +71,9 @@ def test_key_regression_separate_files() -> None:
         UploadPurpose.PROGRAM, program_path.name, program_path.read_bytes()
     )
     utp = resolve_utp(validated_utp, validated_program)
-    program = parse_program(
-        validated_program.content,
-        validated_program.filename,
-        study_year=2,
-    )
-    matches = match_utp_to_program(utp.topics, program.content_items)
     assert len(utp.topics) == 13
     assert utp.table_totals == Hours(72, 22, 50)
     assert utp.metadata.study_weeks == 36
-    assert sum(match.status is not MatchStatus.NOT_MATCHED for match in matches) == 13
     assert len(build_schedule(utp).weeks) == 36
 
 

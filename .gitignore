@@ -17,4 +17,6 @@ build/
 # Project archive and generated calendar QA outputs
 Kalendar_Pedagoga.zip
 references/Календарный_план_*.docx
+!references/Календарный_план_КЛЮЧ_2026-2027_с_датами.docx
+!references/Календарный_план_Туристы_проводники_3_год_2026-2027_Верно.docx
 

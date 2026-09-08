@@ -153,3 +153,31 @@ def test_tour_guides_pipeline_ce2_without_ai_keeps_grid() -> None:
     assert not has_blocking_qa_issues(
         validate_calendar_docx(result.content, expected_weeks=36)
     )
+
+
+def test_analysis_and_pipeline_share_ce2_lesson_fields() -> None:
+    from calendar_pedagoga.lesson_resolution import resolve_lesson_content
+
+    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
+    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
+    utp = parse_utp(utp_path)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
+    content = build_content_model(
+        build_schedule(utp, "2026–2027"),
+        utp,
+        program,
+        utp_path.name,
+    )
+    analysis = _build_pipeline_lesson_content(
+        content,
+        use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+    )
+    resolved = resolve_lesson_content(analysis)
+    assert [
+        (row.lesson_type, row.planned_result, row.assessment_method, row.warnings)
+        for row in analysis
+    ] == [
+        (row.lesson_type, row.planned_result, row.assessment_method, row.warnings)
+        for row in resolved
+    ]
+    assert len(analysis) == 36

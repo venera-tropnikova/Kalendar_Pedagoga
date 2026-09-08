@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
@@ -101,11 +102,18 @@ def run_calendar_pipeline(
     class_name: str | None = None,
     teacher_name: str | None = None,
     use_content_engine_v2: bool | None = None,
+    match_reviews: Mapping | None = None,
 ) -> PipelineResult:
     """Выполнить полный конвейер формирования календарного плана."""
 
     schedule = build_schedule(utp, academic_year)
-    content_rows = build_content_model(schedule, utp, program, source_utp_name)
+    content_rows = build_content_model(
+        schedule,
+        utp,
+        program,
+        source_utp_name,
+        match_reviews=match_reviews,
+    )
     lesson_rows = _build_pipeline_lesson_content(
         content_rows,
         use_content_engine_v2=_content_engine_v2_enabled(use_content_engine_v2),

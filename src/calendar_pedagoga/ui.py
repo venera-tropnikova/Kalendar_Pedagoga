@@ -32,9 +32,12 @@ from calendar_pedagoga.academic_year import (
     mentions_from_utp,
     resolve_academic_year,
 )
-from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
-from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
-from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
+from calendar_pedagoga.lesson_content import LessonContentRow
+from calendar_pedagoga.content_generation import (
+    CalendarContentRow,
+    build_content_model,
+    study_year_for_matching,
+)
 from calendar_pedagoga.normative_engine import (
     NormativeCheck,
     NormativeLayer,
@@ -56,7 +59,12 @@ from calendar_pedagoga.organization_template import (
     OrganizationTemplateError,
     select_calendar_template,
 )
-from calendar_pedagoga.pipeline import PipelineError, run_calendar_pipeline
+from calendar_pedagoga.pipeline import (
+    PipelineError,
+    USE_CONTENT_ENGINE_V2,
+    _build_pipeline_lesson_content,
+    run_calendar_pipeline,
+)
 from calendar_pedagoga.docx_generation import (
     _allow_row_split,
     _columns_for_table,
@@ -76,10 +84,20 @@ from calendar_pedagoga.upload_validation import (
     validate_upload,
 )
 from calendar_pedagoga.parsing import UtpParseResult, parse_utp
-from calendar_pedagoga.matching import ContentMatch, match_utp_to_program
+from calendar_pedagoga.match_review import (
+    MISSING_PROGRAM_CONTENT_NOTICE,
+    ProgramItemRef,
+    candidate_items,
+    is_disputed_match,
+    is_missing_program_content,
+    rejected_topic_count,
+    review_scope,
+    topic_key,
+    unresolved_disputed,
+)
+from calendar_pedagoga.matching import ContentMatch, MatchStatus, match_utp_to_program
 from calendar_pedagoga.program_parsing import (
     ProgramData,
-    infer_study_year_number,
     parse_program,
     study_year_label,
 )
@@ -165,6 +183,8 @@ def _reset_analysis_state() -> None:
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
         "calendar_context",
+        "match_reviews",
+        "match_reviews_scope",
     ):
         st.session_state.pop(key, None)
 
@@ -2774,6 +2794,160 @@ def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(visible)
 
 
+def _match_review_scope_from_uploads(
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    study_year: int | None,
+) -> str:
+    return review_scope(
+        validated_utp.filename,
+        validated_utp.content,
+        validated_program.filename if validated_program is not None else None,
+        validated_program.content if validated_program is not None else None,
+        study_year,
+    )
+
+
+def _reviews_for_scope(scope: str) -> dict:
+    if st.session_state.get("match_reviews_scope") != scope:
+        st.session_state["match_reviews"] = {}
+        st.session_state["match_reviews_scope"] = scope
+    return st.session_state.setdefault("match_reviews", {})
+
+
+def _invalidate_generated_plan() -> None:
+    had_result = bool(
+        st.session_state.get("calendar_download")
+        or st.session_state.get("calendar_generation_succeeded")
+    )
+    for key in (
+        "calendar_download",
+        "calendar_warnings",
+        "calendar_ai_usage",
+        "calendar_generation_pending",
+        "calendar_generation_error",
+        "calendar_generation_succeeded",
+        "calendar_resolved_lessons",
+        "calendar_plan_snapshot",
+    ):
+        st.session_state.pop(key, None)
+    if had_result:
+        st.session_state["calendar_generation_invalidated"] = True
+
+
+def _store_match_review(
+    scope: str,
+    key: tuple[str | None, str, str | None],
+    decision: str,
+    item_ref: ProgramItemRef | None,
+) -> None:
+    reviews = _reviews_for_scope(scope)
+    reviews[key] = {
+        "decision": decision,
+        "item_ref": item_ref.as_dict() if item_ref is not None else None,
+    }
+    _invalidate_generated_plan()
+    st.rerun()
+
+
+def _dispute_reason(match: ContentMatch) -> str:
+    if match.status is MatchStatus.UNCONFIRMED:
+        return "Автосопоставление не подтверждено: одного номера недостаточно без совпадения названия."
+    return "Автосопоставление не подтверждено: сходство названия недостаточно для переноса содержания."
+
+
+def _render_missing_content_notices(matches: tuple[ContentMatch, ...]) -> None:
+    missing = [match for match in matches if is_missing_program_content(match)]
+    if not missing:
+        return
+    for match in missing:
+        topic = match.utp_position
+        number = topic.number or "без номера"
+        section = topic.parent_section or "раздел не указан"
+        st.markdown(f"**УТП:** {topic.title} · {number} · {section}")
+        st.info(MISSING_PROGRAM_CONTENT_NOTICE)
+
+
+def _render_match_review_cards(
+    matches: tuple[ContentMatch, ...],
+    program: ProgramData | None,
+    scope: str,
+) -> None:
+    if program is None:
+        return
+    disputed = [match for match in matches if is_disputed_match(match)]
+    if not disputed:
+        return
+    reviews = _reviews_for_scope(scope)
+    items = program.content_items
+    st.markdown('<p class="kp-status-lead">Спорные соответствия тем</p>', unsafe_allow_html=True)
+    for index, match in enumerate(disputed):
+        key = topic_key(match.utp_position)
+        topic = match.utp_position
+        review = reviews.get(key)
+        candidates = candidate_items(match, items)
+        number = topic.number or "без номера"
+        section = topic.parent_section or "раздел не указан"
+        st.markdown(
+            f"**УТП:** {topic.title} · {number} · {section}"
+        )
+        st.caption(_dispute_reason(match))
+        widget_id = f"{index}:{key[0] or ''}:{key[1]}:{key[2] or ''}"
+        decided = isinstance(review, dict) and review.get("decision") in {
+            "USER_CONFIRMED",
+            "USER_REJECTED",
+        }
+        if isinstance(review, dict) and review.get("decision") == "USER_CONFIRMED":
+            st.success("Соответствие подтверждено педагогом.")
+        elif isinstance(review, dict) and review.get("decision") == "USER_REJECTED":
+            st.info("Соответствия нет. Содержание программы для этой темы не будет использовано.")
+        if decided:
+            if st.button("Изменить решение", key=f"match_change_{widget_id}"):
+                reviews = _reviews_for_scope(scope)
+                reviews.pop(key, None)
+                _invalidate_generated_plan()
+                st.rerun()
+            continue
+        if not candidates:
+            st.warning("Кандидаты программы не найдены.")
+        for item in candidates:
+            preview = item.content.replace("\n", " ")
+            if len(preview) > 220:
+                preview = preview[:219].rstrip() + "…"
+            item_number = item.number or "без номера"
+            item_section = item.parent_section or "раздел не указан"
+            st.markdown(
+                f"- Программа: {item.title} · {item_number} · {item_section}"
+            )
+            if preview:
+                st.caption(preview)
+        selected_ref = None
+        if len(candidates) == 1:
+            selected_ref = ProgramItemRef.from_item(candidates[0])
+        elif len(candidates) > 1:
+            labels = {
+                f"{item.number or '—'} · {item.title} · {item.parent_section or '—'}": item
+                for item in candidates
+            }
+            chosen = st.radio(
+                "Выберите кандидата программы",
+                options=tuple(labels),
+                key=f"match_candidate_{widget_id}",
+            )
+            selected_ref = ProgramItemRef.from_item(labels[chosen])
+        actions = st.columns(2)
+        with actions[0]:
+            if st.button(
+                "Подтвердить соответствие",
+                key=f"match_confirm_{widget_id}",
+                disabled=selected_ref is None,
+            ):
+                _store_match_review(scope, key, "USER_CONFIRMED", selected_ref)
+        with actions[1]:
+            if st.button("Соответствия нет", key=f"match_reject_{widget_id}"):
+                _store_match_review(scope, key, "USER_REJECTED", None)
+
+
 def _collect_analysis_warnings(
     utp: UtpParseResult,
     matches: tuple[ContentMatch, ...],
@@ -2809,9 +2983,8 @@ _YEAR_NO_DURATION_UI = "Срок программы не указан, срав�
 
 
 def _lesson_views_for_normative(
-    content_rows: tuple[CalendarContentRow, ...],
+    lessons: tuple[LessonContentRow, ...],
 ) -> tuple[NormativeLessonView, ...]:
-    rows = build_lesson_content_v2(content_rows)
     return tuple(
         NormativeLessonView(
             theory_hours=row.source.theory_hours,
@@ -2820,7 +2993,7 @@ def _lesson_views_for_normative(
             assessment_method=row.assessment_method,
             topic_title=row.source.topic_title,
         )
-        for row in rows
+        for row in lessons
     )
 
 
@@ -3024,7 +3197,9 @@ def _render_teacher_analysis_screen(
     source_utp_name: str | None = None,
     program_filename: str | None = None,
     content_rows: tuple[CalendarContentRow, ...] = (),
+    lessons: tuple[LessonContentRow, ...] = (),
     after_summary: Callable[[], None] | None = None,
+    review_scope_id: str | None = None,
 ) -> None:
     metadata = utp.metadata
     totals = utp.table_totals
@@ -3035,12 +3210,15 @@ def _render_teacher_analysis_screen(
         academic_year=academic_year,
         study_year_hints=(source_utp_name, program_filename),
         schedule=schedule,
-        lessons=_lesson_views_for_normative(content_rows),
+        lessons=_lesson_views_for_normative(lessons),
     )
     generated = bool(
         st.session_state.get("calendar_generation_succeeded")
         and st.session_state.get("calendar_download")
     )
+    reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
+    unresolved = unresolved_disputed(matches, reviews)
+    rejected = rejected_topic_count(reviews)
     program_name = _fact(metadata.program_name or (program.title if program else None))
     study_year = _fact(
         study_year_label(
@@ -3054,8 +3232,24 @@ def _render_teacher_analysis_screen(
     title_col, edit_col = st.columns((3.4, 1.1), gap="small")
     with title_col:
         if generated:
+            if rejected:
+                st.markdown(
+                    f'<p class="kp-status-title">План с замечаниями: {rejected} тем '
+                    "без связанного содержания программы</p>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<p class="kp-status-title">✓ Календарный план готов</p>',
+                    unsafe_allow_html=True,
+                )
+        elif unresolved:
             st.markdown(
-                '<p class="kp-status-title">✓ Календарный план готов</p>',
+                '<p class="kp-status-title">Нужно сопоставить темы</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<p class="kp-status-lead">Подтвердите или отклоните спорные соответствия</p>',
                 unsafe_allow_html=True,
             )
         else:
@@ -3099,6 +3293,10 @@ def _render_teacher_analysis_screen(
         with st.expander("Подробнее о проверке", expanded=False):
             _render_normative_report(report, academic_year=academic_year)
 
+    if review_scope_id:
+        _render_missing_content_notices(matches)
+        _render_match_review_cards(matches, program, review_scope_id)
+
     if after_summary is not None:
         after_summary()
     _render_year_calendar_card(academic_year, owner="analysis")
@@ -3129,6 +3327,8 @@ def _show_generation_controls(
     group_number: str,
     class_name: str,
     teacher_name: str,
+    matches: tuple[ContentMatch, ...] = (),
+    review_scope_id: str | None = None,
 ) -> None:
     current_revision = _generator_revision()
     if current_revision != _LOADED_GENERATOR_REVISION:
@@ -3152,12 +3352,14 @@ def _show_generation_controls(
         st.session_state.get("calendar_generation_succeeded")
         and st.session_state.get("calendar_download")
     )
+    reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
+    generate_blocked = bool(unresolved_disputed(matches, reviews))
     if generated:
         _show_generation_result()
         regenerate = st.button(
             "Сформировать заново",
             use_container_width=True,
-            disabled=generation_pending,
+            disabled=generation_pending or generate_blocked,
             key="regenerate_calendar",
         )
         generation_requested = regenerate
@@ -3166,9 +3368,11 @@ def _show_generation_controls(
             "Сформировать календарный план",
             type="primary",
             use_container_width=True,
-            disabled=generation_pending,
+            disabled=generation_pending or generate_blocked,
             key="generate_calendar",
         )
+    if generate_blocked:
+        generation_requested = False
     if generation_requested:
         st.session_state.pop("calendar_generation_invalidated", None)
         st.session_state["calendar_generation_pending"] = True
@@ -3207,6 +3411,7 @@ def _show_generation_controls(
                         group_number=group_number,
                         class_name=class_name,
                         teacher_name=teacher_name,
+                        match_reviews=reviews,
                     )
                     operation.publish_result(result.filename, result.content)
                     st.session_state["calendar_download"] = operation.take_result_for_download()
@@ -3370,7 +3575,7 @@ def run_app() -> None:
         program = parse_program(
             validated_program.content,
             validated_program.filename,
-            study_year=infer_study_year_number(resolved_utp.metadata.study_year),
+            study_year=study_year_for_matching(resolved_utp),
         )
         validated_program = ValidatedUpload(
             validated_program.purpose,
@@ -3423,15 +3628,32 @@ def run_app() -> None:
 
         try:
             schedule = build_schedule(utp, academic_year)
+            matching_year = study_year_for_matching(utp)
+            review_scope_id = _match_review_scope_from_uploads(
+                validated_utp,
+                validated_program,
+                matching_year,
+            )
+            reviews = _reviews_for_scope(review_scope_id)
             content_rows = build_content_model(
                 schedule,
                 utp,
                 program,
                 validated_utp.filename,
+                match_reviews=reviews,
             )
-            lessons = build_lesson_content(content_rows)
+            lessons = _build_pipeline_lesson_content(
+                content_rows,
+                use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+            )
             matches = (
-                tuple(match_utp_to_program(utp.topics, program.content_items))
+                tuple(
+                    match_utp_to_program(
+                        utp.topics,
+                        program.content_items,
+                        study_year=matching_year,
+                    )
+                )
                 if program is not None
                 else ()
             )
@@ -3461,6 +3683,8 @@ def run_app() -> None:
                 validated_program.filename if validated_program is not None else None
             ),
             content_rows=content_rows,
+            lessons=lessons,
+            review_scope_id=review_scope_id,
             after_summary=lambda: _show_generation_controls(
                 validated_utp=validated_utp,
                 validated_program=validated_program,
@@ -3469,5 +3693,7 @@ def run_app() -> None:
                 group_number=group_number,
                 class_name=class_name,
                 teacher_name=teacher_name,
+                matches=matches,
+                review_scope_id=review_scope_id,
             ),
         )

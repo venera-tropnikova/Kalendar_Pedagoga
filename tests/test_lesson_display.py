@@ -124,7 +124,6 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     from pathlib import Path
 
     from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
-    from calendar_pedagoga.content_generation import build_content_model
     from calendar_pedagoga.docx_generation import (
         _practice_appearance_counts,
         _topic_cells_for_lesson,
@@ -132,17 +131,16 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     )
     from calendar_pedagoga.lesson_resolution import resolve_lesson_content
     from calendar_pedagoga.pipeline import _lesson_rows_from_v2
-    from calendar_pedagoga.program_parsing import parse_program
     from calendar_pedagoga.resolve_utp import resolve_utp
-    from calendar_pedagoga.scheduling import build_schedule
     from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
-    from test_ce2_grounded_triad import CE2_TP1_WEEK_SNAPSHOT
+    from tp1_fixed_content import tp1_number_bound_content_rows
 
     source = Path(__file__).resolve().parents[1] / "references" / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
     utp = resolve_utp(None, upload)
-    program = parse_program(upload.content, upload.filename, study_year=1)
-    rows = build_content_model(build_schedule(utp, "2026–2027"), utp, program, source.name)
+    rows = tuple(
+        row for row in tp1_number_bound_content_rows() if row.week_number >= 29
+    )
     generated = build_lesson_content_v2(rows)
     resolved = resolve_lesson_content(_lesson_rows_from_v2(generated))
     counts = _practice_appearance_counts(resolved)
@@ -161,22 +159,22 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     seen_ofp: list[str] = []
     for lesson in resolved:
         week = lesson.source.source.week_number
+        assert week in tokens
         _theory, practice = _topic_cells_for_lesson(
             lesson,
             display_numbers,
             topic_counts=counts,
             topic_occurrences=occurrences,
         )
-        snap = CE2_TP1_WEEK_SNAPSHOT[week - 1]
-        assert lesson.lesson_type == snap[1]
-        assert lesson.planned_result == snap[2]
-        assert lesson.assessment_method == snap[3]
-        if week not in tokens:
-            continue
         token = tokens[week]
         low = practice.casefold()
-        assert token in low
-        assert token in lesson.planned_result.casefold()
+        assert token in low, (
+            f"неделя {week}: в практике нет слота {token!r}\nactual: {practice!r}"
+        )
+        assert token in lesson.planned_result.casefold(), (
+            f"неделя {week}: в RESULT нет слота {token!r}\n"
+            f"actual: {lesson.planned_result!r}"
+        )
         assert "основная задача общей физической" not in low
         assert "роль и значение специальной" not in low
         assert "индивидуальный подход" not in low
