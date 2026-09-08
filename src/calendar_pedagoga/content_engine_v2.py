@@ -2977,6 +2977,14 @@ def _noun_to_dative(word: str) -> str:
     low = core.casefold()
     if low in _PROVEN_FINITE_VERBS:
         return f"{prefix}{core}{suffix}"
+    if "-" in core and not _is_adjective(core):
+        stems = [stem for stem in core.split("-") if stem]
+        if len(stems) >= 2:
+            inflected = "-".join(
+                _adj_to_dative(stem) if _is_adjective(stem) else _noun_to_dative(stem)
+                for stem in stems
+            )
+            return f"{prefix}{inflected}{suffix}"
     if low in {"меню", "кофе"}:
         changed = core
     elif re.search(r"(?i)(?:ам|ям|ами|ями|ах|ях|ов|ев|ём)$", low):
@@ -3022,6 +3030,17 @@ def _noun_to_dative(word: str) -> str:
     return f"{prefix}{_match_caps(core, changed)}{suffix}"
 
 
+def _is_postposed_dative_adjective(word: str) -> bool:
+    """Agreeing modifier after the head, not a genitive noun like «занятий»."""
+
+    if _looks_like_verbal_noun(word) or not _is_adjective(word):
+        return False
+    core = _strip_punct_word(word)[1].casefold()
+    if core.endswith(("ние", "тие", "ание", "яние")):
+        return False
+    return bool(re.search(r"(?i)(?:ое|ее|ая|яя|ые|ие|ую|юю)$", core))
+
+
 def _dative_np(phrase: str) -> str:
     words = _normalize_spaces(phrase).split()
     if not words:
@@ -3029,29 +3048,28 @@ def _dative_np(phrase: str) -> str:
     head, tail = _split_prep_tail(words)
     if not head:
         return _normalize_spaces(phrase)
-    if len(head) >= 2 and all(
-        _is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая"))
-        for word in head[:-1]
-    ):
-        head = [_adj_to_dative(word) for word in head[:-1]] + [_noun_to_dative(head[-1])]
-    elif (
-        len(head) >= 3
-        and _is_adjective(head[0])
-        and any(word.casefold() == "и" for word in head[:-1])
-    ):
-        noun = _noun_to_dative(head[-1])
-        mids = []
-        for word in head[:-1]:
-            if word.casefold() == "и":
-                mids.append(word.casefold())
-            elif _is_adjective(word):
-                mids.append(_adj_to_dative(word))
-            else:
-                mids.append(_noun_to_dative(word))
-        head = [*mids, noun]
-    else:
-        head = [_noun_to_dative(head[0]), *head[1:]]
-    text = _normalize_spaces(" ".join((*head, *tail)))
+    converted: list[str] = []
+    seen_noun = False
+    leftover: list[str] = []
+    for index, word in enumerate(head):
+        low = word.casefold()
+        if low in {"и", "а", "но", "да"}:
+            converted.append("и" if low == "и" else word)
+            continue
+        if not seen_noun and _is_adjective(word) and not _looks_like_verbal_noun(word):
+            converted.append(_adj_to_dative(word))
+            continue
+        if not seen_noun:
+            converted.append(_noun_to_dative(word))
+            seen_noun = True
+            continue
+        if _is_postposed_dative_adjective(word):
+            converted.append(_adj_to_dative(word))
+            continue
+        leftover = list(head[index:])
+        break
+    converted.extend(leftover)
+    text = _normalize_spaces(" ".join((*converted, *tail)))
     if text[:1].isupper():
         text = text[:1].lower() + text[1:]
     return text
