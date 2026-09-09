@@ -4,7 +4,7 @@
 Локальное приложение для подготовки календарного плана педагога
 в DOCX на основе УТП и образовательной программы.
 
-Рабочая папка: D:\Kalendar_Pedagoga.
+Рабочая папка (canonical): C:\Users\tropn\AppData\Local\Temp\kp_calendar_qa_consolidated.
 Интерфейс: Streamlit.
 Адрес: http://localhost:8501.
 
@@ -84,6 +84,22 @@
   Основание: согласованный этап учебного года в org-шапке (Option A).
   Заменяет «шапка шаблона организации без учебного года — отдельный этап»
   и «учебный год не добавляется».
+- 09.09.2026: каноническая ветка — feat/calendar-qa-consolidated;
+  worktree C — единственная canonical development branch
+  (C:\Users\tropn\AppData\Local\Temp\kp_calendar_qa_consolidated).
+  Стабильная точка: 7704416.
+  QA: 623 collected / 619 passed / 4 skipped / 0 failed.
+  A-blockers = 0; категория B — допустимые NOTICE / safe fallback,
+  в текущем релизе не исправляется; новую языковую стилистику
+  и edge-cases не брать.
+  RULE 8: study_year выбирается явно; несколько embedded УТП без года
+  → BLOCK; separate УТП — источник фактического плана; различия того
+  же года → NOTICE; конфликт годов → BLOCK.
+  Natasha/Stanza spike: KEEP CE2; dependency parser не интегрировать.
+  Worktree A (kp_g1_matching) и B (D:\Kalendar_Pedagoga) заморожены.
+  Интеграция в deploy-render-docker — только fast-forward после очистки B.
+  Основание: freeze границы релиза после RULE 8.
+  Заменяет контур «после закрытия mixed-week» как открытый A-backlog.
 Новые решения фиксировать здесь кратко: дата, суть,
 основание утверждения и заменяемое решение, если есть.
 Не превращать паспорт в журнал задач.

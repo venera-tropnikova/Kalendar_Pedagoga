@@ -1,11 +1,38 @@
 # Работа с проектом «Календарь педагога»
 
 ## Перед началом
-- Проверить рабочую папку: D:\Kalendar_Pedagoga.
+- Канонический worktree: C:\Users\tropn\AppData\Local\Temp\kp_calendar_qa_consolidated
+  (kp_calendar_qa_consolidated). C — единственная canonical
+  development branch.
+- Каноническая ветка: feat/calendar-qa-consolidated.
+- Текущая стабильная точка: 7704416.
+- Worktree A (kp_g1_matching) и B (D:\Kalendar_Pedagoga) заморожены:
+  не менять, не коммитить, не чистить dirty.
+- Интеграция в deploy-render-docker — только fast-forward после очистки
+  worktree B. Merge, cherry-pick и stash из A/B не делать.
 - Прочитать PROJECT_PASSPORT.md и PROJECT_RULES.md.
 - Проверить ветку, git status и релевантный diff.
 - Существующие dirty-изменения считать чужими: не перезаписывать,
   не откатывать, не очищать и не включать в свою задачу.
+
+## QA текущего релиза
+- Прогон на стабильной точке 7704416: 623 collected / 619 passed /
+  4 skipped / 0 failed.
+- A-blockers = 0.
+- Категория B = допустимые NOTICE / safe fallback; в текущем релизе
+  не исправляется.
+- Новую языковую стилистику и edge-cases не брать.
+
+## RULE 8
+- study_year выбирается явно.
+- Несколько embedded УТП без года → BLOCK.
+- Отдельный УТП — источник фактического плана.
+- Различия того же года → NOTICE.
+- Конфликт годов → BLOCK.
+
+## CE2
+- Natasha/Stanza spike: KEEP CE2.
+- Dependency parser в текущий релиз не интегрировать.
 
 ## Выполнение
 - Одна задача — одна логическая цель и минимальная область изменений.
