@@ -5497,6 +5497,12 @@ _SHARED_CONTROL_PREFIXES = (
 )
 
 
+def _week_parts_are_independent_topics(parts: tuple[WeekTopicPart, ...]) -> bool:
+    """True when the week holds more than one topic identity."""
+
+    return len({(part.topic_number, part.topic_title) for part in parts}) > 1
+
+
 def _merge_part_results(results: list[str]) -> str:
     if any("по теме „" in item for item in results):
         return " ".join(dict.fromkeys(item for item in results if item))
@@ -5510,6 +5516,25 @@ def _merge_part_results(results: list[str]) -> str:
         objects = [_drop_leading_verb(item).rstrip(" .") for item in unique]
         return _cap_sentence(f"{verbs[0]} {_join_and(objects)}")
     sentences = [item if item.endswith(".") else f"{item}." for item in unique]
+    return _normalize_spaces(" ".join(sentences))
+
+
+def _merge_independent_part_results(results: list[str]) -> str:
+    """Keep each topic's RESULT as its own sentence. Do not fold same verbs."""
+
+    sentences: list[str] = []
+    seen: set[str] = set()
+    for item in results:
+        text = _normalize_spaces(item).rstrip()
+        if not text:
+            continue
+        if not text.endswith("."):
+            text += "."
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        sentences.append(text)
     return _normalize_spaces(" ".join(sentences))
 
 
@@ -5561,6 +5586,23 @@ def _merge_part_controls(controls: list[str]) -> str:
             if not tails:
                 continue
             return prefix + _join_and(_unique_phrases(tails))
+    return "; ".join(unique)
+
+
+def _merge_independent_part_controls(controls: list[str]) -> str:
+    """Keep each topic's CONTROL as its own clause. Do not fold shared prefixes."""
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for control in controls:
+        item = _sanitize_oral_control(_normalize_spaces(control))
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
     return "; ".join(unique)
 
 
@@ -5619,12 +5661,16 @@ def _aggregate_week_lesson_type(
     candidate = types[0] if len(types) == 1 else ""
     theory_hours = sum(part.theory_hours for part in parts)
     practice_hours = sum(part.practice_hours for part in parts)
+    independent = _week_parts_are_independent_topics(parts)
+    differing_forms = independent and len(types) > 1
 
     if theory_hours and not practice_hours:
         candidate = "теоретическое занятие"
 
     elif practice_hours and not theory_hours:
-        if candidate and candidate not in _GENERIC_LESSON_TYPES:
+        if differing_forms:
+            candidate = "практическое занятие"
+        elif candidate and candidate not in _GENERIC_LESSON_TYPES:
             pass
         else:
             candidate = "практическое занятие"
@@ -5634,13 +5680,17 @@ def _aggregate_week_lesson_type(
             logger.info(
                 "CE2 type ambiguity: mixed hours without both row-local sources"
             )
-            if (
+            if differing_forms:
+                candidate = "теоретико-практическое занятие"
+            elif (
                 len(derived_parts) == 1
                 and derived_parts[0].lesson_type != "комбинированное занятие"
             ):
                 candidate = derived_parts[0].lesson_type
             else:
                 candidate = "теоретико-практическое занятие"
+        elif differing_forms:
+            candidate = "теоретико-практическое занятие"
         else:
             candidate = _mixed_week_lesson_type(parts, derived_parts)
 
@@ -5667,8 +5717,14 @@ def _merge_week_part_fields(
         theory_text=theory_text,
         practice_text=practice_text,
     )
-    planned_result = _merge_part_results([item.planned_result for item in derived_parts])
-    assessment = _merge_part_controls([item.assessment_method for item in derived_parts])
+    results = [item.planned_result for item in derived_parts]
+    controls = [item.assessment_method for item in derived_parts]
+    if _week_parts_are_independent_topics(parts):
+        planned_result = _merge_independent_part_results(results)
+        assessment = _merge_independent_part_controls(controls)
+    else:
+        planned_result = _merge_part_results(results)
+        assessment = _merge_part_controls(controls)
     return lesson_type, planned_result, assessment
 
 
