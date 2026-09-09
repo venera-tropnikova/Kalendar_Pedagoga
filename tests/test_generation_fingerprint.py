@@ -29,25 +29,25 @@ def _generated_app(with_utp=False, with_template=False):
         template = ROOT / "references" / "Календарный план.docx"
         app.get("file_uploader")[2].set_value((template.name, template.read_bytes(), MIME))
     app.run()
-    next(b for b in app.button if b.label == "Проверить документы").click().run()
-    for _ in range(40):
-        confirms = [
-            button
-            for button in app.button
-            if button.label == "Подтвердить соответствие" and not button.disabled
-        ]
-        rejects = [button for button in app.button if button.label == "Соответствия нет"]
-        if not confirms and not rejects:
-            break
-        (confirms[0] if confirms else rejects[0]).click().run()
-    else:
-        raise AssertionError("остались нерешённые спорные соответствия")
-    assert not next(b for b in app.button if b.label == "Сформировать календарный план").disabled
     generated = SimpleNamespace(filename="calendar.docx", content=b"test-docx", warnings=())
     with patch.object(ui, "run_calendar_pipeline", return_value=generated) as pipeline:
-        next(b for b in app.button if b.label == "Сформировать календарный план").click().run()
+        next(b for b in app.button if b.label == "Проверить документы").click().run()
+        for _ in range(40):
+            confirms = [
+                button
+                for button in app.button
+                if button.label == "Подтвердить соответствие" and not button.disabled
+            ]
+            rejects = [button for button in app.button if button.label == "Соответствия нет"]
+            if not confirms and not rejects:
+                break
+            (confirms[0] if confirms else rejects[0]).click().run()
+        else:
+            raise AssertionError("остались нерешённые спорные соответствия")
         pipeline.assert_called_once()
     assert not app.exception
+    assert not any(b.label == "Сформировать календарный план" for b in app.button)
+    assert not any(b.label == "Сформировать заново" for b in app.button)
     assert len(app.get("download_button")) == 1
     return app
 
@@ -177,27 +177,31 @@ def test_changed_code_cannot_regenerate_with_old_imports(with_utp, with_template
             pipeline.assert_not_called()
         assert not app.exception
         assert not app.get("download_button")
-        assert next(b for b in app.button if b.label == "Сформировать календарный план").disabled
+        assert not any(b.label == "Сформировать календарный план" for b in app.button)
         assert any(item.value == "Приложение обновилось. Обновите страницу, чтобы продолжить."
                    for item in app.info)
         mismatch_logs = [record.getMessage() for record in caplog.records
                          if record.name == ui.__name__ and 'revision mismatch' in record.getMessage()]
         assert mismatch_logs
         assert set(mismatch_logs) == {'Generator revision mismatch: loaded=old current=new'}
-        # Simulate a fresh process with current imports; normal STATE 2 returns.
+        # Simulate a fresh process with current imports; auto-generation returns.
+        generated = SimpleNamespace(filename="calendar.docx", content=b"test-docx", warnings=())
         with patch.object(ui, '_LOADED_GENERATOR_REVISION', 'new'):
-            app.run()
-            for _ in range(40):
-                confirms = [
-                    button
-                    for button in app.button
-                    if button.label == "Подтвердить соответствие" and not button.disabled
-                ]
-                rejects = [
-                    button for button in app.button if button.label == "Соответствия нет"
-                ]
-                if not confirms and not rejects:
-                    break
-                (confirms[0] if confirms else rejects[0]).click().run()
-            assert not next(b for b in app.button if b.label == "Сформировать календарный план").disabled
+            with patch.object(ui, "run_calendar_pipeline", return_value=generated) as pipeline:
+                app.run()
+                for _ in range(40):
+                    confirms = [
+                        button
+                        for button in app.button
+                        if button.label == "Подтвердить соответствие" and not button.disabled
+                    ]
+                    rejects = [
+                        button for button in app.button if button.label == "Соответствия нет"
+                    ]
+                    if not confirms and not rejects:
+                        break
+                    (confirms[0] if confirms else rejects[0]).click().run()
+                pipeline.assert_called_once()
             assert not any('Приложение обновилось.' in item.value for item in app.info)
+            assert not any(b.label == "Сформировать календарный план" for b in app.button)
+            assert len(app.get("download_button")) == 1

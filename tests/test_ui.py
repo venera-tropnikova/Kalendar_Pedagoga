@@ -154,6 +154,41 @@ def _check_button(app: AppTest):
     return next(button for button in app.button if button.label == "Проверить документы")
 
 
+def _fake_generated(**overrides: object) -> SimpleNamespace:
+    payload = {
+        "filename": "calendar.docx",
+        "content": b"generated-docx",
+        "warnings": (),
+        "ai_usage": None,
+        "resolved_lessons": (),
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
+
+
+def _check_and_resolve(
+    app: AppTest,
+    generated: SimpleNamespace | None = None,
+    *,
+    prefer_confirm: bool = True,
+):
+    result = generated if generated is not None else _fake_generated()
+    with patch(
+        "calendar_pedagoga.ui.run_calendar_pipeline", return_value=result
+    ) as pipeline:
+        _check_button(app).click().run()
+        _resolve_disputed_matches(app, prefer_confirm=prefer_confirm)
+    return pipeline
+
+
+def _generate_buttons(app: AppTest):
+    return [
+        button
+        for button in app.button
+        if button.label in {"Сформировать календарный план", "Сформировать заново"}
+    ]
+
+
 def _resolve_disputed_matches(app: AppTest, *, prefer_confirm: bool = True) -> AppTest:
     for _ in range(40):
         confirms = [
@@ -247,11 +282,10 @@ def test_clear_program_resets_analysis_but_keeps_other_files() -> None:
     _upload(app, 0, program)
     _upload(app, 2, template)
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
+    _check_and_resolve(app)
 
     assert _analysis_ready(app) is True
-    assert "Документы проверены" in _page_text(app)
+    assert "calendar_download" in app.session_state
 
     template_nonce = app.session_state["upload_nonce_template"]
     _clear_buttons(app)[0].click().run()
@@ -326,12 +360,11 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
+    _check_and_resolve(app)
 
     text = _page_text(app)
     assert not app.exception
-    assert "Документы проверены" in text
+    assert "Календарный план" in text
     assert _default_year() in text
     assert "1 год обучения" in text
     assert "Часы совпадают" in text
@@ -339,8 +372,9 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "замечан" in text
     assert any(item.label == "Подробнее о проверке" for item in app.expander)
     assert any(button.label == "Изменить данные" for button in app.button)
-    assert any(
-        button.label == "Сформировать календарный план" for button in app.button
+    assert not _generate_buttons(app)
+    assert app.get("download_button")[0].label == (
+        f"Скачать календарный план за {_default_year()} учебный год"
     )
     assert "Нормативная и методическая проверка" in text
     assert "Документы закона" in text
@@ -622,9 +656,6 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     _upload(app, 0, _program_file())
     _upload(app, 2, _template_file())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
-
     generated = SimpleNamespace(
         filename="calendar.docx",
         content=b"generated-docx",
@@ -638,11 +669,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     )
     assert [item.label for item in app.text_input] == ["Группа №", "Класс", "ФИО педагога"]
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
-    generate = next(
-        button for button in app.button if button.label == "Сформировать календарный план"
-    )
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
-        generate.click().run()
+    pipeline = _check_and_resolve(app, generated)
 
     pipeline.assert_called_once()
     assert pipeline.call_args.kwargs["match_reviews"] == app.session_state["match_reviews"]
@@ -655,14 +682,15 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert "1 г" in (pipeline.call_args.kwargs["program_filename"] or "")
     assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
     assert "Группа Нет" not in _page_text(app)
-    assert app.session_state["calendar_generation_pending"] is False
+    assert "calendar_generation_pending" not in app.session_state
     assert app.session_state["calendar_generation_succeeded"] is True
     assert app.session_state["calendar_download"].content == b"generated-docx"
     assert "Календарный план сформирован с замечаниями" in _page_text(app)
     assert "✓ Календарный план готов" not in _page_text(app)
     assert app.get("download_button")[0].label == (
-        f"Скачать план за {_default_year()} учебный год"
+        f"Скачать календарный план за {_default_year()} учебный год"
     )
+    assert not _generate_buttons(app)
     assert "Ширина таблицы" not in _page_text(app)
     assert not any("Ширина таблицы" in (item.value or "") for item in app.warning)
     assert not any("продолжение уже представленного" in (item.value or "") for item in app.warning)
@@ -675,15 +703,23 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert SLOT_CONTINUE_WARNING in stored
     assert SLOT_PACK_WARNING in stored
 
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as rerun_pipeline:
+        app.run()
+        rerun_pipeline.assert_not_called()
+    assert app.session_state["calendar_download"].content == b"generated-docx"
+
+    next(button for button in app.button if button.label == "Изменить данные").click().run()
+    assert "calendar_download" not in app.session_state
+    assert "calendar_generation_succeeded" not in app.session_state
+    assert len(app.get("download_button")) == 0
+    assert not _generate_buttons(app)
+
 
 def test_generated_plan_survives_calendar_and_week_click_reruns() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
     _upload(app, 2, _template_file())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
-
     source = SimpleNamespace(
         week_number=19,
         date_range="11–17.01",
@@ -721,12 +757,7 @@ def test_generated_plan_survives_calendar_and_week_click_reruns() -> None:
         ai_usage=None,
         resolved_lessons=(october_resolved, resolved),
     )
-    generate = next(
-        button for button in app.button
-        if button.label == "Сформировать календарный план"
-    )
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated):
-        generate.click().run()
+    _check_and_resolve(app, generated)
 
     open_buttons = [
         button for button in app.button
@@ -776,23 +807,11 @@ def test_teacher_name_is_optional_and_invalidates_download() -> None:
     _upload(app, 0, _program_file())
     _upload(app, 2, _template_file())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
-
-    generated = SimpleNamespace(
-        filename="calendar.docx",
-        content=b"generated-docx",
-        warnings=(),
-        ai_usage=None,
-    )
+    generated = _fake_generated()
     teacher = next(item for item in app.text_input if item.label == "ФИО педагога")
     assert teacher.value in {"", None}
 
-    generate = next(
-        button for button in app.button if button.label == "Сформировать календарный план"
-    )
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
-        generate.click().run()
+    pipeline = _check_and_resolve(app, generated)
     assert pipeline.call_args.kwargs["teacher_name"] == ""
     assert app.session_state["calendar_generation_succeeded"] is True
     assert app.session_state["calendar_download"].content == b"generated-docx"
@@ -803,12 +822,10 @@ def test_teacher_name_is_optional_and_invalidates_download() -> None:
     assert app.session_state["calendar_generation_invalidated"]
     assert "calendar_download" not in app.session_state
     assert app.session_state["analysis_ready"] is True
+    assert not _generate_buttons(app)
+    assert len(app.get("download_button")) == 0
 
-    generate = next(
-        button for button in app.button if button.label == "Сформировать календарный план"
-    )
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
-        generate.click().run()
+    pipeline = _check_and_resolve(app, generated)
     assert pipeline.call_args.kwargs["teacher_name"] == "Иванов И.И."
     assert app.session_state["calendar_generation_succeeded"] is True
 
@@ -845,44 +862,31 @@ def test_unresolved_disputed_matches_block_generation() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload_disputed(app, template=True)
     app.run()
-    _check_button(app).click().run()
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
+        _check_button(app).click().run()
+        pipeline.assert_not_called()
 
     assert "Документы проверены" not in _page_text(app)
     assert "Нужно сопоставить темы" in _page_text(app)
-    generate = next(
-        button for button in app.button if button.label == "Сформировать календарный план"
-    )
-    assert generate.disabled
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
-        generate.click().run()
-        pipeline.assert_not_called()
+    assert not _generate_buttons(app)
+    assert len(app.get("download_button")) == 0
+    assert "calendar_download" not in app.session_state
 
 
 def test_rejected_matches_allow_generation_with_remarks() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload_disputed(app, template=True)
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app, prefer_confirm=False)
-
-    assert "Документы проверены" in _page_text(app)
-    generate = next(
-        button for button in app.button if button.label == "Сформировать календарный план"
-    )
-    assert not generate.disabled
-    generated = SimpleNamespace(
-        filename="calendar.docx",
-        content=b"generated-docx",
-        warnings=(),
-        ai_usage=None,
-    )
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated):
-        generate.click().run()
+    _check_and_resolve(app, prefer_confirm=False)
 
     text = _page_text(app)
     assert "Календарный план сформирован с замечаниями" in text
     assert "без связанного содержания программы" in text
     assert "✓ Календарный план готов" not in text
+    assert not _generate_buttons(app)
+    assert app.get("download_button")[0].label == (
+        f"Скачать календарный план за {_default_year()} учебный год"
+    )
 
 
 def test_file_change_resets_match_reviews() -> None:
@@ -891,8 +895,7 @@ def test_file_change_resets_match_reviews() -> None:
     _upload_bytes(app, 0, "program-synthetic.docx", program)
     _upload_bytes(app, 1, "utp-synthetic.docx", _disputed_utp_docx())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
+    _check_and_resolve(app)
     assert "match_reviews" in app.session_state
     assert app.session_state["match_reviews"]
 
@@ -909,8 +912,7 @@ def test_group_and_teacher_keep_match_reviews() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
     app.run()
-    _check_button(app).click().run()
-    _resolve_disputed_matches(app)
+    _check_and_resolve(app)
     reviews = dict(app.session_state["match_reviews"])
     scope = app.session_state["match_reviews_scope"]
 
@@ -988,6 +990,45 @@ def test_identical_missing_content_notice_is_not_duplicated() -> None:
         ui._render_missing_content_notices(matches)
 
     assert infos == [MISSING_PROGRAM_CONTENT_NOTICE]
+
+
+def test_year_conflict_block_does_not_generate() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    _upload(app, 1, REFERENCES / "УТП ТП 3г. 2ч.docx")
+    app.run()
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
+        _check_button(app).click().run()
+        pipeline.assert_not_called()
+
+    assert not app.exception
+    assert any("противоречат" in (item.value or "") for item in app.error)
+    assert len(app.get("download_button")) == 0
+    assert not _generate_buttons(app)
+    assert "calendar_download" not in app.session_state
+    assert not _analysis_ready(app)
+
+
+def test_generation_failure_hides_download() -> None:
+    from calendar_pedagoga.pipeline import PipelineError
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    with patch(
+        "calendar_pedagoga.ui.run_calendar_pipeline",
+        side_effect=PipelineError("DOCX не прошёл QA: overflow"),
+    ) as pipeline:
+        _check_button(app).click().run()
+        _resolve_disputed_matches(app)
+        assert pipeline.called
+    assert len(app.get("download_button")) == 0
+    assert any(
+        "Не удалось сформировать календарный план" in (item.value or "")
+        for item in app.error
+    )
+    assert "calendar_download" not in app.session_state
+    assert not _generate_buttons(app)
 
 
 def test_analysis_uses_pipeline_ce2_and_not_ce1() -> None:

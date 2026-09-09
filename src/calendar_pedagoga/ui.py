@@ -149,6 +149,7 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
         st.session_state["calendar_generation_invalidated"] = True
     for key in keys:
         st.session_state.pop(key, None)
+    st.session_state.pop("calendar_generate_after_check", None)
     st.session_state["calendar_generation_fingerprint"] = fingerprint
     return True
 
@@ -185,6 +186,7 @@ def _reset_analysis_state() -> None:
         "calendar_context",
         "match_reviews",
         "match_reviews_scope",
+        "calendar_generate_after_check",
     ):
         st.session_state.pop(key, None)
 
@@ -2579,6 +2581,8 @@ def _form_is_open() -> bool:
 
 def _open_input_form() -> None:
     st.session_state["ui_edit_inputs"] = True
+    st.session_state.pop("calendar_generate_after_check", None)
+    _invalidate_generated_plan()
     st.rerun()
 
 
@@ -3266,10 +3270,6 @@ def _render_teacher_analysis_screen(
                 '<p class="kp-status-title">✓ Документы проверены</p>',
                 unsafe_allow_html=True,
             )
-            st.markdown(
-                '<p class="kp-status-lead">Можно сформировать календарный план</p>',
-                unsafe_allow_html=True,
-            )
     with edit_col:
         st.markdown('<div class="kp-edit-slot">', unsafe_allow_html=True)
         if st.button("Изменить данные", key="kp_edit_data"):
@@ -3297,10 +3297,9 @@ def _render_teacher_analysis_screen(
         kpi = _weeks_phrase(weeks)
     st.markdown(f'<p class="kp-status-kpi">{html.escape(kpi)}</p>', unsafe_allow_html=True)
 
-    if not generated:
-        _render_status_checks(report)
-        with st.expander("Подробнее о проверке", expanded=False):
-            _render_normative_report(report, academic_year=academic_year)
+    _render_status_checks(report)
+    with st.expander("Подробнее о проверке", expanded=False):
+        _render_normative_report(report, academic_year=academic_year)
 
     if review_scope_id:
         _render_missing_content_notices(matches)
@@ -3327,6 +3326,58 @@ def _store_analysis_context(
     }
 
 
+def _execute_calendar_generation(
+    *,
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    template_selection: CalendarTemplateSelection,
+    academic_year: str,
+    group_number: str,
+    class_name: str,
+    teacher_name: str,
+    reviews: dict,
+) -> None:
+    utp = validated_utp.parsed
+    assert isinstance(utp, UtpParseResult)
+    program = None
+    if validated_program is not None:
+        program = validated_program.parsed
+        assert isinstance(program, ProgramData)
+
+    try:
+        with st.spinner("Формируем календарный план…"):
+            with TransientDocumentSession() as operation:
+                result = run_calendar_pipeline(
+                    utp,
+                    program,
+                    academic_year=academic_year,
+                    template=template_selection,
+                    source_utp_name=validated_utp.filename,
+                    use_ai=False,
+                    program_filename=(
+                        validated_program.filename
+                        if validated_program is not None
+                        else None
+                    ),
+                    group_number=group_number,
+                    class_name=class_name,
+                    teacher_name=teacher_name,
+                    match_reviews=reviews,
+                )
+                operation.publish_result(result.filename, result.content)
+                st.session_state["calendar_download"] = operation.take_result_for_download()
+                st.session_state["calendar_warnings"] = result.warnings
+                resolved_lessons = tuple(getattr(result, "resolved_lessons", ()))
+                st.session_state["calendar_resolved_lessons"] = resolved_lessons
+                st.session_state["calendar_plan_snapshot"] = (
+                    _calendar_plan_snapshot(resolved_lessons, result.content)
+                )
+    except (PipelineError, ScheduleValidationError, ValueError) as error:
+        st.session_state["calendar_generation_error"] = str(error)
+    else:
+        st.session_state["calendar_generation_succeeded"] = True
+
+
 def _show_generation_controls(
     *,
     validated_utp: ValidatedUpload,
@@ -3345,46 +3396,26 @@ def _show_generation_controls(
             "Generator revision mismatch: loaded=%s current=%s",
             _LOADED_GENERATOR_REVISION, current_revision,
         )
-        st.button(
-            "Сформировать календарный план",
-            type="primary",
-            use_container_width=True,
-            disabled=True,
-            key="generate_calendar",
-        )
         st.info("Приложение обновилось. Обновите страницу, чтобы продолжить.")
         _show_generation_result()
         return
 
-    generation_pending = bool(st.session_state.get("calendar_generation_pending"))
     generated = bool(
         st.session_state.get("calendar_generation_succeeded")
         and st.session_state.get("calendar_download")
     )
     reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
     generate_blocked = bool(unresolved_disputed(matches, reviews))
-    if generated:
-        _show_generation_result()
-        regenerate = st.button(
-            "Сформировать заново",
-            use_container_width=True,
-            disabled=generation_pending or generate_blocked,
-            key="regenerate_calendar",
-        )
-        generation_requested = regenerate
-    else:
-        generation_requested = st.button(
-            "Сформировать календарный план",
-            type="primary",
-            use_container_width=True,
-            disabled=generation_pending or generate_blocked,
-            key="generate_calendar",
-        )
-    if generate_blocked:
-        generation_requested = False
-    if generation_requested:
+    has_error = bool(st.session_state.get("calendar_generation_error"))
+    should_generate = (
+        bool(st.session_state.get("calendar_generate_after_check"))
+        and not generate_blocked
+        and not generated
+        and not has_error
+    )
+    if should_generate:
+        st.session_state["calendar_generate_after_check"] = False
         st.session_state.pop("calendar_generation_invalidated", None)
-        st.session_state["calendar_generation_pending"] = True
         st.session_state.pop("calendar_generation_error", None)
         st.session_state.pop("calendar_generation_succeeded", None)
         st.session_state.pop("calendar_resolved_lessons", None)
@@ -3392,56 +3423,19 @@ def _show_generation_controls(
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
+        _execute_calendar_generation(
+            validated_utp=validated_utp,
+            validated_program=validated_program,
+            template_selection=template_selection,
+            academic_year=academic_year,
+            group_number=group_number,
+            class_name=class_name,
+            teacher_name=teacher_name,
+            reviews=reviews,
+        )
         st.rerun()
 
-    if generation_pending:
-        utp = validated_utp.parsed
-        assert isinstance(utp, UtpParseResult)
-        program = None
-        if validated_program is not None:
-            program = validated_program.parsed
-            assert isinstance(program, ProgramData)
-
-        try:
-            with st.spinner("Формируем календарный план…"):
-                with TransientDocumentSession() as operation:
-                    result = run_calendar_pipeline(
-                        utp,
-                        program,
-                        academic_year=academic_year,
-                        template=template_selection,
-                        source_utp_name=validated_utp.filename,
-                        use_ai=False,
-                        program_filename=(
-                            validated_program.filename
-                            if validated_program is not None
-                            else None
-                        ),
-                        group_number=group_number,
-                        class_name=class_name,
-                        teacher_name=teacher_name,
-                        match_reviews=reviews,
-                    )
-                    operation.publish_result(result.filename, result.content)
-                    st.session_state["calendar_download"] = operation.take_result_for_download()
-                    st.session_state["calendar_warnings"] = result.warnings
-                    resolved_lessons = tuple(
-                        getattr(result, "resolved_lessons", ())
-                    )
-                    st.session_state["calendar_resolved_lessons"] = resolved_lessons
-                    st.session_state["calendar_plan_snapshot"] = (
-                        _calendar_plan_snapshot(resolved_lessons, result.content)
-                    )
-        except (PipelineError, ScheduleValidationError, ValueError) as error:
-            st.session_state["calendar_generation_error"] = str(error)
-        else:
-            st.session_state["calendar_generation_succeeded"] = True
-        finally:
-            st.session_state["calendar_generation_pending"] = False
-        st.rerun()
-
-    if not generated:
-        _show_generation_result()
+    _show_generation_result()
 
 
 @st.fragment(run_every="2s")
@@ -3450,7 +3444,7 @@ def _show_generation_result() -> None:
     if _sync_generation_fingerprint((inputs, _generator_revision())):
         _reset_analysis_state()
     if st.session_state.get("calendar_generation_invalidated"):
-        st.info("Сформируйте календарный план заново.")
+        st.info("План устарел. Нажмите «Проверить документы» заново.")
     generation_error = st.session_state.get("calendar_generation_error")
     if generation_error:
         st.error(f"Не удалось сформировать календарный план: {generation_error}")
@@ -3461,11 +3455,11 @@ def _show_generation_result() -> None:
         st.warning(warning)
 
     download = st.session_state.get("calendar_download")
-    if download is not None:
+    if download is not None and not generation_error:
         context = st.session_state.get("calendar_context") or {}
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
         st.download_button(
-            f"Скачать план за {academic_year} учебный год",
+            f"Скачать календарный план за {academic_year} учебный год",
             data=download.content,
             file_name=download.filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -3499,7 +3493,7 @@ def run_app() -> None:
         academic_year, group_number, class_name, teacher_name,
     )
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
-        st.info("План устарел. Нажмите «Проверить документы» и сформируйте календарный план заново.")
+        st.info("План устарел. Нажмите «Проверить документы» заново.")
 
     if check_clicked:
         if program_file is None:
@@ -3614,6 +3608,10 @@ def run_app() -> None:
         st.session_state.pop("calendar_generation_pending", None)
         st.session_state.pop("calendar_generation_error", None)
         st.session_state.pop("calendar_generation_succeeded", None)
+        st.session_state.pop("calendar_resolved_lessons", None)
+        st.session_state.pop("calendar_plan_snapshot", None)
+        st.session_state.pop("calendar_generation_invalidated", None)
+        st.session_state["calendar_generate_after_check"] = True
         st.session_state["ui_edit_inputs"] = False
         st.rerun()
 
