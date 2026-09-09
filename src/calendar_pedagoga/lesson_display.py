@@ -155,21 +155,20 @@ def selected_practice_clause(
         return ""
 
     from calendar_pedagoga.practice_slots import (
-        assign_practice_slots,
+        assign_distributed_practice_slots,
         format_slot_practice_text,
         practice_units_from_content,
-        slot_is_continuation,
     )
 
     units = practice_units_from_content(
         content, theory_hours=theory_hours, practice_hours=practice_hours
     )
     if appearance_count > 1 and units:
-        slots = assign_practice_slots(units, appearance_count)
+        slots, flags = assign_distributed_practice_slots(units, appearance_count)
         index = min(occurrence_index, len(slots) - 1)
         return format_slot_practice_text(
             slots[index],
-            continuation=slot_is_continuation(slots, index),
+            continuation=flags[index] if index < len(flags) else False,
         )
 
     from calendar_pedagoga.content_engine_v2 import select_source_clause

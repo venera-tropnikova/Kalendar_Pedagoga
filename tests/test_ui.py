@@ -664,6 +664,8 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
             SLOT_CONTINUE_WARNING,
             SLOT_PACK_WARNING,
             "Неоднозначное соответствие для «Тема»: вариант А",
+            "Недостаточно данных источника; использован безопасный fallback.",
+            "Безопасный шаблон CE2: unproven_object_case.",
         ),
         ai_usage=None,
     )
@@ -695,10 +697,19 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert not any("Ширина таблицы" in (item.value or "") for item in app.warning)
     assert not any("продолжение уже представленного" in (item.value or "") for item in app.warning)
     assert not any("нескольких исходных практических" in (item.value or "") for item in app.warning)
-    assert any(
+    assert not any(
         "Неоднозначное соответствие для «Тема»" in (item.value or "")
         for item in app.warning
     )
+    assert not any("Недостаточно данных источника" in (item.value or "") for item in app.warning)
+    assert not any("Некоторые формулировки" in (item.value or "") for item in app.warning)
+    assert not any("Не найден отдельный блок" in (item.value or "") for item in app.warning)
+    assert "Неоднозначное соответствие для «Тема»" in _page_text(app)
+    assert "Недостаточно данных источника" in _page_text(app)
+    assert "Некоторые формулировки автоматически приведены" in _page_text(app)
+    assert "не мешают формированию" in _page_text(app)
+    assert any(item.label == "Подробнее о проверке" for item in app.expander)
+    assert callable(pipeline.call_args.kwargs.get("on_progress"))
     stored = app.session_state["calendar_warnings"]
     assert SLOT_CONTINUE_WARNING in stored
     assert SLOT_PACK_WARNING in stored
@@ -856,6 +867,27 @@ def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
         code not in " ".join(shown)
         for code in ("broken_clause_join", "unproven_object_case")
     )
+
+
+def test_check_button_disabled_while_busy() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
+    app.session_state["calendar_busy"] = True
+    app.run()
+    assert _check_button(app).disabled
+
+
+def test_second_click_while_busy_does_not_start_another_generation() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    generated = _fake_generated()
+    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
+        _check_button(app).click().run()
+        app.session_state["calendar_busy"] = True
+        _check_button(app).click().run()
+        _resolve_disputed_matches(app)
+    pipeline.assert_called_once()
+    assert app.session_state["calendar_download"].content == b"generated-docx"
 
 
 def test_unresolved_disputed_matches_block_generation() -> None:

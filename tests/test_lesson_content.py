@@ -307,7 +307,7 @@ def test_key_lesson_type_requires_dominant_form_not_single_keyword() -> None:
     assert week4.lesson_type == "экскурсия"
     week16 = rows[15]
     assert "игр" in week16.practice_text.casefold()
-    assert week16.lesson_type == "игра"
+    assert week16.lesson_type == "дидактическое занятие"
 
 
 def test_tour_guides_results_keep_program_concreteness() -> None:

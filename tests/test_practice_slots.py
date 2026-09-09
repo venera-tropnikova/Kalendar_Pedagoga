@@ -6,10 +6,13 @@ from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.parsing import parse_utp
 from calendar_pedagoga.practice_slots import (
+    assign_distributed_practice_slots,
     assign_practice_slots,
     format_slot_practice_text,
+    partition_items_by_volume,
     practice_units_from_content,
     slot_is_continuation,
+    split_catalog_across_weeks,
 )
 from calendar_pedagoga.program_parsing import infer_study_year_number, parse_program
 from calendar_pedagoga.resolve_utp import apply_workload_from_document, resolve_utp
@@ -180,3 +183,38 @@ def test_tp3_repeated_hours_keep_grid_without_inventing_clauses() -> None:
     assert len(rows) == 5
     assert all(lesson.planned_result for lesson in rows)
     assert sum(lesson.source.practice_hours for lesson in rows) == 10
+
+
+def test_unsafe_single_activity_is_not_split() -> None:
+    text = "Выбор места привала."
+    assert split_catalog_across_weeks(text, 3) is None
+
+
+def test_exercise_purpose_list_is_not_treated_as_place_catalog() -> None:
+    text = (
+        "Упражнения на развитие гибкости, на растягивание и расслабление мышц."
+    )
+    assert split_catalog_across_weeks(text, 2) is None
+
+
+def test_volume_partition_keeps_all_items_in_order() -> None:
+    items = ("один", "двадцать два", "три", "четыре", "пять длиннее")
+    groups = partition_items_by_volume(items, 3)
+    assert groups is not None
+    assert [item for group in groups for item in group] == list(items)
+    assert len(groups) == 3
+    assert all(group for group in groups)
+
+
+def test_assign_distributed_slots_keeps_continuation_flags() -> None:
+    units = ["Экскурсии по парку, к музею, в библиотеку, на набережную."]
+    slots, flags = assign_distributed_practice_slots(units, 2)
+    assert flags == (False, True)
+    assert slots[0] != slots[1]
+    first = format_slot_practice_text(slots[0], continuation=flags[0])
+    second = format_slot_practice_text(slots[1], continuation=flags[1])
+    assert not first.startswith("Продолжение.")
+    assert second.startswith("Продолжение.")
+    joined = f"{first} {second}".casefold()
+    for token in ("парку", "музею", "библиотеку", "набережную"):
+        assert joined.count(token) == 1

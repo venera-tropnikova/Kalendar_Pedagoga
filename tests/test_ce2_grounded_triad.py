@@ -848,7 +848,7 @@ def test_w1_didactic_games_become_participation():
     low = derived.planned_result.casefold()
     assert low.startswith("участвует в дидактических играх")
     assert not derived.planned_result.startswith("Выполняет практическое задание")
-    assert derived.lesson_type == "игра"
+    assert derived.lesson_type == "дидактическое занятие"
     assert derived.assessment_method.casefold().startswith(
         "педагогическое наблюдение за участием в"
     )

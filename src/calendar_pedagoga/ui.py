@@ -8,7 +8,8 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from io import BytesIO
 from zipfile import BadZipFile
@@ -187,6 +188,8 @@ def _reset_analysis_state() -> None:
         "match_reviews",
         "match_reviews_scope",
         "calendar_generate_after_check",
+        "calendar_busy",
+        "calendar_work_status",
     ):
         st.session_state.pop(key, None)
 
@@ -2669,6 +2672,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
             "Проверить документы",
             type="primary",
             use_container_width=True,
+            disabled=bool(st.session_state.get("calendar_busy")),
         )
         if not st.session_state.get("analysis_ready") or form_open:
             _render_year_calendar_card(str(fields[3]), owner="inputs")
@@ -2777,6 +2781,11 @@ _CE2_SAFE_USER_MESSAGE = (
     "к безопасному нейтральному виду."
 )
 
+_STATUS_CHECK_DOCS = "Проверяем документы…"
+_STATUS_BUILD_PLAN = "Формируем календарный план…"
+_STATUS_CHECK_DOCX = "Проверяем готовый документ…"
+_STATUS_READY = "Календарный план готов"
+
 
 def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
     visible: list[str] = []
@@ -2796,6 +2805,39 @@ def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
         )
         visible.append(_CE2_SAFE_USER_MESSAGE)
     return tuple(visible)
+
+
+def _notice_phrase(count: int) -> str:
+    remainder_ten = count % 10
+    remainder_hundred = count % 100
+    if remainder_ten == 1 and remainder_hundred != 11:
+        word = "замечание"
+    elif remainder_ten in {2, 3, 4} and remainder_hundred not in {12, 13, 14}:
+        word = "замечания"
+    else:
+        word = "замечаний"
+    return f"{count} {word}"
+
+
+def _unique_texts(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(item.strip() for item in values if item and item.strip()))
+
+
+def _set_work_status(label: str) -> None:
+    st.session_state["calendar_work_status"] = label
+
+
+@contextmanager
+def _work_status_block(slot, label: str) -> Iterator[object]:
+    host = slot.container() if slot is not None else st.container()
+    with host:
+        with st.status(label, expanded=True) as widget:
+            yield widget
+
+
+def _clear_work_busy() -> None:
+    st.session_state["calendar_busy"] = False
+    st.session_state.pop("calendar_work_status", None)
 
 
 def _match_review_scope_from_uploads(
@@ -3105,16 +3147,35 @@ def _weeks_phrase(count: int) -> str:
     return f"{count} {word}"
 
 
-def _render_status_checks(report: NormativeReport) -> None:
+def _visible_generation_notices() -> tuple[str, ...]:
+    return _unique_texts(
+        _teacher_generation_warnings(
+            tuple(st.session_state.get("calendar_warnings", ()))
+        )
+    )
+
+
+def _compact_notice_count(
+    report: NormativeReport,
+    extra: tuple[str, ...],
+) -> int:
+    remarks = _visible_normative_remarks(report)
+    return len(_unique_texts(tuple(item.teacher_text for item in remarks) + extra))
+
+
+def _render_status_checks(
+    report: NormativeReport,
+    extra_notices: tuple[str, ...] = (),
+) -> None:
     lines: list[str] = []
     if _hours_match(report):
         lines.append('<p class="kp-status-check">✓ Часы совпадают</p>')
     if _calendar_checked(report):
         lines.append('<p class="kp-status-check">✓ Календарь проверен</p>')
-    remarks = _visible_normative_remarks(report)
-    if remarks:
+    notice_count = _compact_notice_count(report, extra_notices)
+    if notice_count:
         lines.append(
-            f'<p class="kp-status-check warn">⚠ {len(remarks)} замечаний '
+            f'<p class="kp-status-check warn">⚠ {_notice_phrase(notice_count)} '
             "— не мешают формированию</p>"
         )
     if lines:
@@ -3231,16 +3292,17 @@ def _render_teacher_analysis_screen(
             program_filename,
         )
     )
+    generation_notices = _visible_generation_notices() if generated else ()
+    has_notices = any(is_missing_program_content(match) for match in matches)
+    extra_notices = generation_notices
+    if has_notices:
+        extra_notices = _unique_texts((*extra_notices, MISSING_PROGRAM_CONTENT_NOTICE))
 
     st.markdown('<div class="kp-status-card">', unsafe_allow_html=True)
     title_col, edit_col = st.columns((3.4, 1.1), gap="small")
     with title_col:
         if generated:
-            visible_warnings = _teacher_generation_warnings(
-                tuple(st.session_state.get("calendar_warnings", ()))
-            )
-            has_notices = any(is_missing_program_content(match) for match in matches)
-            if rejected or has_notices or visible_warnings:
+            if rejected or extra_notices:
                 st.markdown(
                     '<p class="kp-status-title">Календарный план сформирован с замечаниями</p>',
                     unsafe_allow_html=True,
@@ -3297,12 +3359,20 @@ def _render_teacher_analysis_screen(
         kpi = _weeks_phrase(weeks)
     st.markdown(f'<p class="kp-status-kpi">{html.escape(kpi)}</p>', unsafe_allow_html=True)
 
-    _render_status_checks(report)
+    _render_status_checks(report, extra_notices)
     with st.expander("Подробнее о проверке", expanded=False):
         _render_normative_report(report, academic_year=academic_year)
+        if extra_notices:
+            st.markdown(
+                '<p class="kp-normative-check-label warn">⚠ Замечания формирования</p>',
+                unsafe_allow_html=True,
+            )
+            for notice in extra_notices:
+                st.markdown(f"- {notice}")
+        if review_scope_id:
+            _render_missing_content_notices(matches)
 
     if review_scope_id:
-        _render_missing_content_notices(matches)
         _render_match_review_cards(matches, program, review_scope_id)
 
     if after_summary is not None:
@@ -3336,6 +3406,7 @@ def _execute_calendar_generation(
     class_name: str,
     teacher_name: str,
     reviews: dict,
+    status_slot=None,
 ) -> None:
     utp = validated_utp.parsed
     assert isinstance(utp, UtpParseResult)
@@ -3345,7 +3416,14 @@ def _execute_calendar_generation(
         assert isinstance(program, ProgramData)
 
     try:
-        with st.spinner("Формируем календарный план…"):
+        def _progress(label: str) -> None:
+            _set_work_status(label)
+            if status_widget is not None:
+                status_widget.update(label=label, state="running")
+
+        status_widget = None
+        with _work_status_block(status_slot, _STATUS_BUILD_PLAN) as status_widget:
+            _set_work_status(_STATUS_BUILD_PLAN)
             with TransientDocumentSession() as operation:
                 result = run_calendar_pipeline(
                     utp,
@@ -3363,6 +3441,7 @@ def _execute_calendar_generation(
                     class_name=class_name,
                     teacher_name=teacher_name,
                     match_reviews=reviews,
+                    on_progress=_progress,
                 )
                 operation.publish_result(result.filename, result.content)
                 st.session_state["calendar_download"] = operation.take_result_for_download()
@@ -3372,8 +3451,11 @@ def _execute_calendar_generation(
                 st.session_state["calendar_plan_snapshot"] = (
                     _calendar_plan_snapshot(resolved_lessons, result.content)
                 )
+            status_widget.update(label=_STATUS_READY, state="complete")
+            _set_work_status(_STATUS_READY)
     except (PipelineError, ScheduleValidationError, ValueError) as error:
         st.session_state["calendar_generation_error"] = str(error)
+        _set_work_status("")
     else:
         st.session_state["calendar_generation_succeeded"] = True
 
@@ -3389,6 +3471,7 @@ def _show_generation_controls(
     teacher_name: str,
     matches: tuple[ContentMatch, ...] = (),
     review_scope_id: str | None = None,
+    status_slot=None,
 ) -> None:
     current_revision = _generator_revision()
     if current_revision != _LOADED_GENERATOR_REVISION:
@@ -3413,8 +3496,12 @@ def _show_generation_controls(
         and not generated
         and not has_error
     )
+    if generate_blocked or has_error or generated:
+        if not should_generate:
+            st.session_state["calendar_busy"] = False
     if should_generate:
         st.session_state["calendar_generate_after_check"] = False
+        st.session_state["calendar_busy"] = True
         st.session_state.pop("calendar_generation_invalidated", None)
         st.session_state.pop("calendar_generation_error", None)
         st.session_state.pop("calendar_generation_succeeded", None)
@@ -3423,16 +3510,20 @@ def _show_generation_controls(
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
-        _execute_calendar_generation(
-            validated_utp=validated_utp,
-            validated_program=validated_program,
-            template_selection=template_selection,
-            academic_year=academic_year,
-            group_number=group_number,
-            class_name=class_name,
-            teacher_name=teacher_name,
-            reviews=reviews,
-        )
+        try:
+            _execute_calendar_generation(
+                validated_utp=validated_utp,
+                validated_program=validated_program,
+                template_selection=template_selection,
+                academic_year=academic_year,
+                group_number=group_number,
+                class_name=class_name,
+                teacher_name=teacher_name,
+                reviews=reviews,
+                status_slot=status_slot,
+            )
+        finally:
+            _clear_work_busy()
         st.rerun()
 
     _show_generation_result()
@@ -3448,11 +3539,6 @@ def _show_generation_result() -> None:
     generation_error = st.session_state.get("calendar_generation_error")
     if generation_error:
         st.error(f"Не удалось сформировать календарный план: {generation_error}")
-
-    for warning in _teacher_generation_warnings(
-        tuple(st.session_state.get("calendar_warnings", ()))
-    ):
-        st.warning(warning)
 
     download = st.session_state.get("calendar_download")
     if download is not None and not generation_error:
@@ -3476,6 +3562,7 @@ def run_app() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
+    status_slot = st.empty()
 
     (
         utp_file,
@@ -3495,124 +3582,136 @@ def run_app() -> None:
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
 
+    if check_clicked and st.session_state.get("calendar_busy"):
+        check_clicked = False
+
     if check_clicked:
         if program_file is None:
             st.error("Загрузите программу обучения.")
             return
 
-        with TransientDocumentSession() as uploads:
-            uploads.replace(
-                UploadPurpose.PROGRAM,
-                program_file.name,
-                program_file.getvalue(),
-            )
-            if utp_file is not None:
-                uploads.replace(UploadPurpose.UTP, utp_file.name, utp_file.getvalue())
-            if organization_template_file is not None:
+        st.session_state["calendar_busy"] = True
+        _set_work_status(_STATUS_CHECK_DOCS)
+        with _work_status_block(status_slot, _STATUS_CHECK_DOCS) as check_status:
+            with TransientDocumentSession() as uploads:
                 uploads.replace(
-                    UploadPurpose.CALENDAR_TEMPLATE,
-                    organization_template_file.name,
-                    organization_template_file.getvalue(),
-                )
-            try:
-                transient_program = uploads.get(UploadPurpose.PROGRAM)
-                assert transient_program is not None
-                validated_program = validate_upload(
                     UploadPurpose.PROGRAM,
-                    transient_program.filename,
-                    transient_program.content,
+                    program_file.name,
+                    program_file.getvalue(),
                 )
-                transient_utp = uploads.get(UploadPurpose.UTP)
-                validated_utp_upload = (
-                    validate_upload(
-                        UploadPurpose.UTP,
-                        transient_utp.filename,
-                        transient_utp.content,
-                    )
-                    if transient_utp is not None
-                    else None
-                )
-                transient_template = uploads.get(UploadPurpose.CALENDAR_TEMPLATE)
-                validated_template = (
-                    validate_upload(
+                if utp_file is not None:
+                    uploads.replace(UploadPurpose.UTP, utp_file.name, utp_file.getvalue())
+                if organization_template_file is not None:
+                    uploads.replace(
                         UploadPurpose.CALENDAR_TEMPLATE,
-                        transient_template.filename,
-                        transient_template.content,
+                        organization_template_file.name,
+                        organization_template_file.getvalue(),
                     )
-                    if transient_template is not None
-                    else None
-                )
-                resolved_utp = resolve_utp(validated_utp_upload, validated_program)
-            except UploadValidationError as error:
-                st.error(str(error))
-                return
-            except UtpResolutionError as error:
-                st.error(str(error))
-                return
+                try:
+                    transient_program = uploads.get(UploadPurpose.PROGRAM)
+                    assert transient_program is not None
+                    validated_program = validate_upload(
+                        UploadPurpose.PROGRAM,
+                        transient_program.filename,
+                        transient_program.content,
+                    )
+                    transient_utp = uploads.get(UploadPurpose.UTP)
+                    validated_utp_upload = (
+                        validate_upload(
+                            UploadPurpose.UTP,
+                            transient_utp.filename,
+                            transient_utp.content,
+                        )
+                        if transient_utp is not None
+                        else None
+                    )
+                    transient_template = uploads.get(UploadPurpose.CALENDAR_TEMPLATE)
+                    validated_template = (
+                        validate_upload(
+                            UploadPurpose.CALENDAR_TEMPLATE,
+                            transient_template.filename,
+                            transient_template.content,
+                        )
+                        if transient_template is not None
+                        else None
+                    )
+                    resolved_utp = resolve_utp(validated_utp_upload, validated_program)
+                except UploadValidationError as error:
+                    _clear_work_busy()
+                    st.error(str(error))
+                    return
+                except UtpResolutionError as error:
+                    _clear_work_busy()
+                    st.error(str(error))
+                    return
 
-        template_selection = select_calendar_template()
-        if validated_template is not None:
+            template_selection = select_calendar_template()
+            if validated_template is not None:
+                try:
+                    template_selection = select_calendar_template(
+                        validated_template.filename,
+                        validated_template.content,
+                    )
+                except OrganizationTemplateError:
+                    _clear_work_busy()
+                    st.error(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
+                    return
+
+            validated_utp = ValidatedUpload(
+                UploadPurpose.UTP,
+                (
+                    validated_utp_upload.filename
+                    if validated_utp_upload is not None
+                    else f"УТП из файла «{validated_program.filename}»"
+                ),
+                (
+                    validated_utp_upload.content
+                    if validated_utp_upload is not None
+                    else validated_program.content
+                ),
+                resolved_utp,
+            )
+            program = parse_program(
+                validated_program.content,
+                validated_program.filename,
+                study_year=study_year_for_matching(resolved_utp),
+            )
+            validated_program = ValidatedUpload(
+                validated_program.purpose,
+                validated_program.filename,
+                validated_program.content,
+                program,
+            )
+            utp = resolved_utp
+
             try:
-                template_selection = select_calendar_template(
-                    validated_template.filename,
-                    validated_template.content,
-                )
-            except OrganizationTemplateError:
-                st.error(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
+                build_schedule(utp, academic_year)
+            except (ScheduleValidationError, ValueError) as error:
+                _clear_work_busy()
+                st.error(f"Не удалось построить календарное распределение: {error}")
                 return
 
-        validated_utp = ValidatedUpload(
-            UploadPurpose.UTP,
-            (
-                validated_utp_upload.filename
-                if validated_utp_upload is not None
-                else f"УТП из файла «{validated_program.filename}»"
-            ),
-            (
-                validated_utp_upload.content
-                if validated_utp_upload is not None
-                else validated_program.content
-            ),
-            resolved_utp,
-        )
-        program = parse_program(
-            validated_program.content,
-            validated_program.filename,
-            study_year=study_year_for_matching(resolved_utp),
-        )
-        validated_program = ValidatedUpload(
-            validated_program.purpose,
-            validated_program.filename,
-            validated_program.content,
-            program,
-        )
-        utp = resolved_utp
-
-        try:
-            build_schedule(utp, academic_year)
-        except (ScheduleValidationError, ValueError) as error:
-            st.error(f"Не удалось построить календарное распределение: {error}")
-            return
-
-        _store_analysis_context(
-            validated_utp=validated_utp,
-            validated_program=validated_program,
-            template_selection=template_selection,
-            academic_year=academic_year,
-        )
-        st.session_state["analysis_ready"] = True
-        st.session_state.pop("analysis_warnings", None)
-        st.session_state.pop("calendar_download", None)
-        st.session_state.pop("calendar_warnings", None)
-        st.session_state.pop("calendar_ai_usage", None)
-        st.session_state.pop("calendar_generation_pending", None)
-        st.session_state.pop("calendar_generation_error", None)
-        st.session_state.pop("calendar_generation_succeeded", None)
-        st.session_state.pop("calendar_resolved_lessons", None)
-        st.session_state.pop("calendar_plan_snapshot", None)
-        st.session_state.pop("calendar_generation_invalidated", None)
-        st.session_state["calendar_generate_after_check"] = True
-        st.session_state["ui_edit_inputs"] = False
+            _store_analysis_context(
+                validated_utp=validated_utp,
+                validated_program=validated_program,
+                template_selection=template_selection,
+                academic_year=academic_year,
+            )
+            st.session_state["analysis_ready"] = True
+            st.session_state.pop("analysis_warnings", None)
+            st.session_state.pop("calendar_download", None)
+            st.session_state.pop("calendar_warnings", None)
+            st.session_state.pop("calendar_ai_usage", None)
+            st.session_state.pop("calendar_generation_pending", None)
+            st.session_state.pop("calendar_generation_error", None)
+            st.session_state.pop("calendar_generation_succeeded", None)
+            st.session_state.pop("calendar_resolved_lessons", None)
+            st.session_state.pop("calendar_plan_snapshot", None)
+            st.session_state.pop("calendar_generation_invalidated", None)
+            st.session_state["calendar_generate_after_check"] = True
+            st.session_state["ui_edit_inputs"] = False
+            check_status.update(label=_STATUS_BUILD_PLAN, state="running")
+            _set_work_status(_STATUS_BUILD_PLAN)
         st.rerun()
 
     if (
@@ -3702,5 +3801,6 @@ def run_app() -> None:
                 teacher_name=teacher_name,
                 matches=matches,
                 review_scope_id=review_scope_id,
+                status_slot=status_slot,
             ),
         )

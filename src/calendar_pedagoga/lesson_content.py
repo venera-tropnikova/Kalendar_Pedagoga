@@ -191,8 +191,11 @@ def _line_form_scores(text: str) -> dict[str, int]:
     for unit in _clause_units(text):
         low = unit.casefold()
         # Одна фраза — одна ведущая форма (иначе «игры на местности» даёт ничью).
+        if re.match(r"дидактическ\w*\s+игр(?:а|ы)\b", low):
+            add("дидактическое занятие", 2)
+            continue
         if re.match(
-            r"(?:(?:дидактическ|ролев|подвижн)\w*\s+)?игр(?:а|ы)\b",
+            r"(?:(?:ролев|подвижн)\w*\s+)?игр(?:а|ы)\b",
             low,
         ):
             add("игра", 2)

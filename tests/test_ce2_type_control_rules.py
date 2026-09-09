@@ -143,3 +143,45 @@ def test_dictation_stays_control_and_does_not_become_type():
     assert "диктант" not in lesson_type
     assert lesson_type != control
 
+
+def test_key_specialises_type_where_source_is_enough_and_keeps_generic_otherwise() -> None:
+    from pathlib import Path
+
+    from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
+    from calendar_pedagoga.content_generation import build_content_model
+    from calendar_pedagoga.parsing import parse_utp
+    from calendar_pedagoga.program_parsing import infer_study_year_number, parse_program
+    from calendar_pedagoga.resolve_utp import apply_workload_from_document
+    from calendar_pedagoga.scheduling import build_schedule
+
+    root = Path(__file__).resolve().parents[1] / "references"
+    utp = apply_workload_from_document(parse_utp(root / "УТП КЛЮЧ 2 г. 2ч.docx"))
+    program = parse_program(
+        (root / "Программа КЛЮЧ.DOC").read_bytes(),
+        "Программа КЛЮЧ.DOC",
+        study_year=infer_study_year_number(utp.metadata.study_year) or 2,
+    )
+    generated = build_lesson_content_v2(
+        build_content_model(build_schedule(utp, "2026–2027"), utp, program, "УТП КЛЮЧ 2 г. 2ч.docx")
+    )
+    assert len(generated) == 36
+    by_week = {lesson.source.week_number: lesson for lesson in generated}
+    assert by_week[2].lesson_type == "экскурсия"
+    assert by_week[4].lesson_type == "экскурсия"
+    assert by_week[9].lesson_type == "дидактическое занятие"
+    assert by_week[12].lesson_type == "учебно-тренировочное занятие"
+    assert by_week[16].lesson_type == "дидактическое занятие"
+    assert by_week[22].lesson_type == "учебно-тренировочное занятие"
+    assert "бассейн" in by_week[22].planned_result.casefold()
+    assert by_week[14].lesson_type == "практическое занятие"
+    assert by_week[19].lesson_type == "практическое занятие"
+    for lesson in generated:
+        control = lesson.assessment_method.casefold()
+        assert control
+        if control == "педагогическое наблюдение":
+            raise AssertionError(f"W{lesson.source.week_number}: bare control")
+        if lesson.lesson_type == "экскурсия":
+            assert "наблюден" in control
+            assert lesson.planned_result.casefold().startswith(("совершает", "посещает"))
+
+

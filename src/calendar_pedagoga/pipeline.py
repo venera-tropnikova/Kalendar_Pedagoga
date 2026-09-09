@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
@@ -103,9 +103,12 @@ def run_calendar_pipeline(
     teacher_name: str | None = None,
     use_content_engine_v2: bool | None = None,
     match_reviews: Mapping | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> PipelineResult:
     """Выполнить полный конвейер формирования календарного плана."""
 
+    if on_progress is not None:
+        on_progress("Формируем календарный план…")
     schedule = build_schedule(utp, academic_year)
     content_rows = build_content_model(
         schedule,
@@ -157,6 +160,8 @@ def run_calendar_pipeline(
         class_name=class_name,
         teacher_name=teacher_name,
     )
+    if on_progress is not None:
+        on_progress("Проверяем готовый документ…")
     qa_issues = validate_calendar_docx(
         docx_bytes,
         expected_weeks=len(schedule.weeks),

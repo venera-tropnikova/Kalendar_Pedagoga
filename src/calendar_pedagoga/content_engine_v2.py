@@ -28,9 +28,8 @@ from calendar_pedagoga.lesson_content import (
 from calendar_pedagoga.practice_slots import (
     SLOT_CONTINUE_WARNING,
     SLOT_PACK_WARNING,
-    assign_practice_slots,
+    assign_distributed_practice_slots,
     practice_units_from_text,
-    slot_is_continuation,
 )
 
 
@@ -2153,7 +2152,8 @@ def _drop_raw_list_tails(text: str) -> str:
         ):
             continue
         if first[:1].isupper() and not _RESULT_FINITE_RE.match(part):
-            continue
+            if not re.match(r"(?i)^(?:совершает|посещает)\s+", parts[0]):
+                continue
         if re.match(r"(?i)^(игры|игра|соревнования|диктанты|занятия|мини)\b", part):
             continue
         kept.append(part)
@@ -4152,12 +4152,18 @@ def type_from_frame(
         if event_type:
             return event_type
         if re.match(r"(?i)^участвует\s+в\b", planned_result):
+            if "дидактическ" in result and re.search(r"(?i)\bигр", planned_result):
+                return "дидактическое занятие"
             if re.search(r"(?i)\b(?:играх|игре|эстафет)", planned_result):
                 return "игра"
             if "викторин" in result:
                 return "викторина"
             if re.search(r"(?i)\bпоход", planned_result):
                 return "поход"
+            if re.search(r"(?i)занятиях\s+в\s+бассейне", planned_result):
+                return "учебно-тренировочное занятие"
+            if re.search(r"(?i)занятиях\s+на\s+скалодроме", planned_result):
+                return "учебно-тренировочное занятие"
         if result.startswith("выполняет практическое задание по теме"):
             # The generic safe RESULT intentionally carries no activity form.
             # Recover TYPE only from the row-local practical source and
@@ -4874,10 +4880,12 @@ def _derive_fields_candidate(
         and practice_appearance_count > 1
         and units
     ):
-        slots = assign_practice_slots(units, practice_appearance_count)
+        slots, flags = assign_distributed_practice_slots(
+            units, practice_appearance_count
+        )
         index = min(occurrence_index, len(slots) - 1)
         slot = slots[index]
-        continuation = slot_is_continuation(slots, index)
+        continuation = flags[index] if index < len(flags) else False
         if len(units) > practice_appearance_count:
             warnings.append(SLOT_PACK_WARNING)
         if continuation:
