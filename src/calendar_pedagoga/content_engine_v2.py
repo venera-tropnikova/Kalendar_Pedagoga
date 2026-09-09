@@ -103,7 +103,6 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "расчёт": "рассчитывает",
     "решение": "решает",
     "рисование": "рисует",
-    "сборка": "собирает",
     "свертывание": "свертывает",
     "смешивание": "смешивает",
     "составление": "составляет",
@@ -285,7 +284,7 @@ def _is_adjective(word: str) -> bool:
     core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE)
     if re.search(r"(?i)(?:ение|ание|яние|ений|аний|яний|ций)$", core):
         return False
-    if re.search(r"(?i)(?:ностей|телей|ателей|елей)$", core):
+    if re.search(r"(?i)(?:ностей|телей|ателей)$", core):
         return False
     return bool(
         re.search(
@@ -426,9 +425,7 @@ def _adj_to_acc(word: str, *, plural: bool, gender: str = "m") -> str:
             return word[:-2] + "юю"
         return word
     if low.endswith("ого"):
-        stem = word[:-3]
-        last = stem[-1:].casefold() if stem else ""
-        return stem + ("ий" if last in "кгхжшщч" else "ый")
+        return word[:-3] + "ый"
     if low.endswith("его"):
         return word[:-3] + "ий"
     if low.endswith(("ой", "ей")):
@@ -459,19 +456,6 @@ def _noun_acc_features(original: str, acc: str) -> tuple[bool, str]:
     if out.endswith(("у", "ю")):
         return False, "f"
     return False, "m"
-
-
-def _frozen_neuter_gen_sg(original: str, acc: str) -> bool:
-    """True when a 2-syllable cluster -а noun was left unchanged (места, not стол)."""
-
-    src = original.casefold()
-    if src != acc.casefold() or not src.endswith("а") or len(src) <= 3:
-        return False
-    stem = src[:-1]
-    vowels = re.findall(r"(?i)[аеёиоуыэюя]", src)
-    return len(vowels) == 2 and bool(
-        re.search(r"(?i)[^аеёиоуыэюя][^аеёиоуыэюя]$", stem)
-    )
 
 
 def _noun_to_prepositional(word: str) -> str:
@@ -566,15 +550,6 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
         if case == "acc" and not colon_list and (not seen_noun or prefix.startswith("(")):
             acc_core = _noun_gen_to_acc(core)
             plural, gender = _noun_acc_features(core, acc_core)
-            adj_info = pending_cores()
-            if (
-                not plural
-                and _frozen_neuter_gen_sg(core, acc_core)
-                and adj_info
-                and adj_info[-1][2].casefold().endswith(("ого", "его"))
-            ):
-                acc_core = core[:-1] + "о"
-                gender = "n"
             apply_pending(plural, gender)
             core = acc_core
             if not prefix.startswith("("):
@@ -1528,15 +1503,6 @@ def _characterize_head_ok(word: str) -> bool:
     if re.search(r"[ыиуюеь]$", core):
         return True
     lemma = _verbal_noun_lemma(core).casefold()
-    # Listed extra heads whose form already equals accusative: neuter nom.pl
-    # in -а (правила) and closed -о lemmas. Feminine knowledge nouns still
-    # go through the regular accusative converter.
-    if (
-        core.endswith("а")
-        and core in _THEORY_KNOWLEDGE_HEADS
-        and core not in _KNOWLEDGE_NOUNS
-    ):
-        return True
     # Closed knowledge heads whose nominative already equals accusative (neuter -о).
     # Do not open arbitrary nouns that merely end in -о.
     return (
@@ -1567,12 +1533,6 @@ def _proven_feminine_acc(core: str) -> str | None:
     if low.endswith("ия"):
         return None
     if low.endswith(("ения", "ания", "яния", "ена", "ёна")):
-        return None
-    if (
-        low.endswith("а")
-        and low in _THEORY_KNOWLEDGE_HEADS
-        and low not in _KNOWLEDGE_NOUNS
-    ):
         return None
     if low.endswith(("а", "я")):
         return _noun_nom_to_acc(core)
@@ -2785,7 +2745,6 @@ _FINITE_TO_NOUN = {
     "применяет": "применения",
     "изготавливает": "изготовления",
     "разучивает": "разучивания",
-    "разрабатывает": "разработки",
     "формирует": "формирования",
     "оказывает": "оказания",
     "выполняет": "выполнения",
@@ -2793,7 +2752,6 @@ _FINITE_TO_NOUN = {
     "ведёт": "ведения",
     "ведет": "ведения",
     "рисует": "рисования",
-    "собирает": "сборки",
     "строит": "построения",
     "подготавливает": "подготовки",
     "заслушивает": "заслушивания",
@@ -2882,8 +2840,6 @@ def _verbal_noun_to_instrumental(noun: str) -> str:
     low = core.casefold()
     if low.endswith(("ение", "ание", "яние", "тие")):
         changed = core + "м"
-    elif low.endswith(("ция", "сия")):
-        changed = core[:-1] + "ей"
     elif low.endswith("ка") and len(core) > 3:
         changed = core[:-1] + "ой"
     elif low.endswith("а") and len(core) > 3:
@@ -3134,8 +3090,6 @@ def _adj_to_genitive(word: str) -> str:
         core = core[:-2] + "ого"
     elif low.endswith("ое"):
         core = core[:-2] + "ого"
-    elif low.endswith("ее") and len(core) > 3:
-        core = core[:-2] + "его"
     return f"{prefix}{core}{suffix}"
 
 
@@ -3183,8 +3137,6 @@ def _head_noun_to_genitive(word: str) -> str:
         changed = core[:-1] + "и"
     elif low.endswith("й") and len(core) > 2 and core[-2].casefold() in "аеёиоуыэюя":
         changed = core[:-1] + "я"
-    elif low.endswith("о") and len(core) > 2:
-        changed = core[:-1] + "а"
     elif not re.search(r"(?i)[аеёиоуыэюя]$", low):
         changed = core + "а"
     else:
@@ -3652,7 +3604,7 @@ def _activity_event_type(result: str, clause: str) -> str:
     if "соревнован" in event_src:
         if "туристск" in event_src:
             return "туристские соревнования"
-        return "соревнование"
+        return "соревнования"
     if "конкурс" in event_src:
         return "конкурс"
     if "слёт" in event_src or "слет" in event_src:
@@ -3680,20 +3632,6 @@ def _practice_activity_type(result: str, clause: str) -> str:
         return "измерительный практикум"
     if "масштаб" in result_low:
         return "практикум по работе с картой"
-    if (
-        re.search(r"(?i)\b(?:составля|разрабатыва)", result_low)
-        and re.search(r"(?i)\bалгоритм", selected)
-    ):
-        return "практикум по разработке алгоритма"
-    if (
-        re.search(r"(?i)\b(?:составля|разрабатыва)", result_low)
-        and re.search(r"(?i)\bпрограмм", selected)
-    ):
-        return "практикум по составлению программ"
-    if re.search(r"(?i)программирован", selected) and re.search(
-        r"(?i)\b(?:составля|разрабатыва|программиру)", result_low
-    ):
-        return "практикум программирования"
     if (
         result_low.startswith("ориентирует")
         or "стороны горизонта" in result_low
@@ -4049,7 +3987,6 @@ def _skill_control(result: str) -> str:
             "отбирает",
             "применяет",
             "изготавливает",
-            "собирает",
             "разучивает",
             "измеряет",
             "рисует",
@@ -4144,10 +4081,8 @@ def _normalize_source_form(label: str, *, clause: str) -> str:
         return "учебно-тренировочное занятие"
     if label == "занятие на местности":
         return "учебно-тренировочное занятие на местности"
-    if label == "соревнования":
-        if "туристск" in blob and "участ" in blob:
-            return "туристские соревнования"
-        return "соревнование"
+    if label == "соревнования" and "туристск" in blob and "участ" in blob:
+        return "туристские соревнования"
     if label in {"практическое занятие", "теоретическое занятие"}:
         return ""
     return label
@@ -4371,7 +4306,6 @@ _TASK_VERBS = {
     "применяет": "применить", "формирует": "сформировать",
     "оказывает": "оказать", "изготавливает": "изготовить",
     "разучивает": "разучить", "ведёт": "вести",
-    "разрабатывает": "разработать",
     "рисует": "нарисовать", "сравнивает": "сравнить",
     "решает": "решить", "исследует": "исследовать",
     "ухаживает": "ухаживать", "ремонтирует": "ремонтировать",

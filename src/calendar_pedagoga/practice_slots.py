@@ -86,15 +86,6 @@ _CATALOG_HEAD_RE = re.compile(
     r"прогулки(?:\s+и\s+экскурсии)?|посещения"
     r")(?P<sep>\s*:)?\s+(?P<body>.+)$"
 )
-_COLON_OBJECT_HEAD_RE = re.compile(
-    r"(?i)^(?:практика\.\s*)?(?P<head>[^:]{3,80}?)(?P<sep>\s*:)\s+(?P<body>.+)$"
-)
-_OBJECT_ITEM_RE = re.compile(
-    r"(?i)^[\wёЁ«\"„\-]+(?:\s+[\wёЁ«\"„\-]+){0,4}$"
-)
-_EVENT_ROSTER_HEAD_RE = re.compile(
-    r"(?i)\b(?:участи|мероприяти|праздник|фестивал|соревнован|конкурс|сл[её]т)"
-)
 _PLACE_PREP_RE = re.compile(
     r"(?i)^(по|к|ко|в|во|на|у|около|через|от|до|из|с|со)\s+"
 )
@@ -170,19 +161,6 @@ def _item_is_place_or_name(item: str, *, allow_names: bool) -> bool:
     return allow_names and bool(_NAME_ITEM_RE.match(text))
 
 
-def _item_is_catalog_object(item: str) -> bool:
-    """Colon-list object: a place, a name, or a short source NP without a clause."""
-
-    text = item.strip()
-    if _item_is_place_or_name(text, allow_names=True):
-        return True
-    if not text or _FINITE_IN_ITEM_RE.search(text) or _PURPOSE_AFTER_NA_RE.match(text):
-        return False
-    if re.search(r"[.;!?()]", text):
-        return False
-    return bool(_OBJECT_ITEM_RE.match(text))
-
-
 def parse_splittable_catalog(text: str) -> tuple[str, str, tuple[str, ...]] | None:
     """Activity head + catalog items, or None if the list is not safely splittable."""
 
@@ -190,27 +168,17 @@ def parse_splittable_catalog(text: str) -> tuple[str, str, tuple[str, ...]] | No
     if not source:
         return None
     match = _CATALOG_HEAD_RE.match(source)
-    if match:
-        head = _normalize_catalog_spaces(match.group("head"))
-        separator = ": " if match.group("sep") else " "
-        items = _parse_catalog_items(match.group("body"))
-        allow_names = bool(match.group("sep"))
-        if len(items) >= 2 and all(
-            _item_is_place_or_name(item, allow_names=allow_names) for item in items
-        ):
-            return head, separator, tuple(items)
-    colon = _COLON_OBJECT_HEAD_RE.match(source)
-    if not colon:
+    if not match:
         return None
-    head = _normalize_catalog_spaces(colon.group("head"))
-    if not head or _FINITE_IN_ITEM_RE.search(head) or _EVENT_ROSTER_HEAD_RE.search(head):
-        return None
-    items = _parse_catalog_items(colon.group("body"))
+    head = _normalize_catalog_spaces(match.group("head"))
+    separator = ": " if match.group("sep") else " "
+    items = _parse_catalog_items(match.group("body"))
     if len(items) < 2:
         return None
-    if not all(_item_is_catalog_object(item) for item in items):
+    allow_names = bool(match.group("sep"))
+    if not all(_item_is_place_or_name(item, allow_names=allow_names) for item in items):
         return None
-    return head, ": ", tuple(items)
+    return head, separator, tuple(items)
 
 
 def _collapse_shared_prefix(items: tuple[str, ...]) -> str:

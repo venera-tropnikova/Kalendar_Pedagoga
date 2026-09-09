@@ -228,7 +228,7 @@ def _line_form_scores(text: str) -> dict[str, int]:
         if re.match(r"наблюден\w*\b", low):
             add("занятие-наблюдение", 2)
             continue
-        if re.match(r"(?:[а-яё-]+\s+)?соревнован\w*\b", low) or re.search(
+        if re.match(r"соревнован\w*\b", low) or re.search(
             r"\bучасти\w*\s+в\s+[^.;]{0,40}соревнован", low
         ):
             add("соревнования", 2)

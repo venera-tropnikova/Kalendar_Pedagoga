@@ -62,8 +62,8 @@ def test_action_excursion_clause_is_excursion_on_practice():
 
 def test_participation_in_competition_is_event_on_practice():
     source = "Участие в соревновании."
-    assert _derived_type(source, theory=0, practice=2) == "соревнование"
-    assert _type(source, theory=0, practice=2) == "соревнование"
+    assert _derived_type(source, theory=0, practice=2) == "соревнования"
+    assert _type(source, theory=0, practice=2) == "соревнования"
 
 
 def test_participation_in_holiday_or_mass_event_is_not_generic_practice():
@@ -108,7 +108,7 @@ def test_competition_heading_list_is_theory_when_theory_only():
 def test_explicit_action_clause_may_specialize_theory_only():
     assert _type("Экскурсия по улицам города.", theory=2, practice=0) == "экскурсия"
     assert _derived_type("Посещение музея края.", theory=1, practice=0) == "экскурсия"
-    assert _derived_type("Участие в соревновании.", theory=1, practice=0) == "соревнование"
+    assert _derived_type("Участие в соревновании.", theory=1, practice=0) == "соревнования"
 
 
 def test_tourists_approved_types_do_not_regress():
@@ -149,28 +149,3 @@ def test_key_like_special_forms_stay_on_practice(source, expected):
         assert lesson_type == expected
         return
     assert _derived_type(source, theory=0, practice=2) == expected
-
-
-def test_named_training_competition_is_competition_not_generic_practice():
-    source = "Учебное соревнование «Слалом» и «Эстафета»."
-    assert _derived_type(source, theory=0, practice=2) == "соревнование"
-    assert _type(source, theory=0, practice=2) == "соревнование"
-
-
-def test_program_writing_practice_is_not_generic_workshop():
-    source = "Составление программ движения по линии и остановки у стены."
-    assert _derived_type(source, theory=0, practice=2) == (
-        "практикум по составлению программ"
-    )
-    algorithm = "Разработка алгоритма ветвления по датчику."
-    assert _derived_type(algorithm, theory=0, practice=2) == (
-        "практикум по разработке алгоритма"
-    )
-
-
-def test_underspecified_practice_stays_generic_workshop():
-    source = "Практическая работа с чертежом детали."
-    assert _derived_type(source, theory=0, practice=2) in {
-        "практикум",
-        "практическое занятие",
-    }
