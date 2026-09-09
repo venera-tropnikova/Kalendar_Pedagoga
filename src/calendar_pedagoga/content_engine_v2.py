@@ -1431,6 +1431,72 @@ def _heading_without_catalogue(text: str) -> str:
     return heading.strip(" .")
 
 
+def _substantivized_head_without_complement(tokens: list[str]) -> bool:
+    """Bare adjectival head used as a truncated object, with no NP/PP complement."""
+
+    if len(tokens) != 1:
+        return False
+    first = tokens[0]
+    core = _strip_punct_word(first)[1].casefold()
+    if not core or not _is_adjective(first):
+        return False
+    return bool(re.search(r"(?i)(?:ые|ие|ый|ой|ий|ая|яя|ое|ее)$", core))
+
+
+def _is_substantivized_role_object(tokens: list[str]) -> bool:
+    """Adjective used as a person/role NP head, not as a modifier of a noun."""
+
+    if len(tokens) < 2 or not _is_adjective(tokens[0]):
+        return False
+    core = _strip_punct_word(tokens[0])[1].casefold()
+    if not re.search(r"(?i)(?:ые|ие|ый|ой|ий|ая|яя|ых|их|ого|его|ую|юю)$", core):
+        return False
+    return _is_preposition(tokens[1])
+
+
+def _adj_nom_to_animate_acc(word: str) -> str:
+    """Nominative adjectival head → animate accusative (person/role object)."""
+
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if low.endswith("ые") and len(core) > 3:
+        changed = core[:-2] + "ых"
+    elif low.endswith("ие") and len(core) > 3 and not low.endswith(("ние", "тие")):
+        changed = core[:-2] + "их"
+    elif low.endswith(("ый", "ой")) and len(core) > 3:
+        changed = core[:-2] + "ого"
+    elif low.endswith("ий") and len(core) > 3:
+        changed = core[:-2] + "его"
+    elif low.endswith("ая") and len(core) > 3:
+        changed = core[:-2] + "ую"
+    elif low.endswith("яя") and len(core) > 3:
+        changed = core[:-2] + "юю"
+    else:
+        return word
+    return f"{prefix}{_match_caps(core, changed)}{suffix}"
+
+
+def _accusative_characterize_role_object(obj: str) -> str:
+    tokens = _normalize_spaces(obj).split()
+    if not _is_substantivized_role_object(tokens):
+        return obj
+    return _normalize_spaces(
+        " ".join((_adj_nom_to_animate_acc(tokens[0]), *tokens[1:]))
+    )
+
+
+def _heading_with_needed_catalogue(text: str) -> str:
+    """Keep the colon-catalogue when the heading alone is a truncated object."""
+
+    raw = _normalize_spaces(text)
+    heading, sep, tail = raw.partition(":")
+    heading = heading.strip(" .")
+    catalogue = tail.strip(" .") if sep else ""
+    if catalogue and _substantivized_head_without_complement(heading.split()):
+        return _normalize_spaces(f"{heading} {catalogue}")
+    return heading
+
+
 def _characterize_head_ok(word: str) -> bool:
     core = _strip_punct_word(word)[1].casefold()
     return bool(core and re.search(r"[ыиуюеь]$", core))
@@ -1479,10 +1545,15 @@ def _theory_object_token(word: str) -> str:
 def _theory_object_span_ok(tokens: list[str]) -> bool:
     if not tokens or not _characterize_head_ok(tokens[0]):
         return False
+    if _substantivized_head_without_complement(tokens):
+        return False
     first_core = _strip_punct_word(tokens[0])[1].casefold()
     if first_core.endswith(("ые", "ие")) and len(tokens) > 1 and _is_adjective(tokens[0]):
-        raw_next = _strip_punct_word(tokens[1])[1]
-        if not _characterize_head_ok(raw_next) and not _is_theory_knowledge_token(raw_next):
+        raw_next = tokens[1]
+        if _is_preposition(raw_next):
+            return True
+        raw_next_core = _strip_punct_word(raw_next)[1]
+        if not _characterize_head_ok(raw_next_core) and not _is_theory_knowledge_token(raw_next):
             return False
     return True
 
@@ -1616,6 +1687,7 @@ def _salvage_tautological_characterize_result(result: str) -> str | None:
     dropped = _drop_tautological_characterize_head(match.group(1))
     if not dropped or dropped.casefold() == match.group(1).casefold():
         return None
+    dropped = _accusative_characterize_role_object(dropped)
     obj, cond = _split_object_and_conditions(dropped)
     if not obj or _knowledge_object_missing_owner(obj):
         return None
@@ -1626,7 +1698,7 @@ def _salvage_tautological_characterize_result(result: str) -> str | None:
 def _proven_theory_object(heading: str) -> str | None:
     """Object NP whose first word already satisfies the characterize case gate."""
 
-    text = _heading_without_catalogue(heading)
+    text = _heading_with_needed_catalogue(heading)
     if not text or _is_interrogative_clause(text):
         return None
     tokens = text.split()
@@ -1669,6 +1741,7 @@ def _characterize(text: str) -> tuple[str, str, str, str]:
     salvaged = _drop_tautological_characterize_head(obj)
     if not salvaged:
         return "", "", "", ""
+    salvaged = _accusative_characterize_role_object(salvaged)
     obj, cond = _split_object_and_conditions(salvaged)
     if not obj or _knowledge_object_missing_owner(obj):
         return "", "", "", ""
@@ -3090,8 +3163,16 @@ def _adj_to_dative(word: str) -> str:
         changed = core[:-2] + "ей"
     elif low.endswith("ые"):
         changed = core[:-2] + "ым"
+    elif low.endswith("ых"):
+        changed = core[:-2] + "ым"
     elif low.endswith("ие") and not low.endswith(("ние", "тие", "ание", "яние")):
         changed = core[:-2] + "им"
+    elif low.endswith("их"):
+        changed = core[:-2] + "им"
+    elif low.endswith("ого") and len(core) > 4:
+        changed = core[:-3] + "ому"
+    elif low.endswith("его") and len(core) > 4:
+        changed = core[:-3] + "ему"
     elif low.endswith("ая"):
         changed = core[:-2] + "ой"
     elif low.endswith("ое"):
@@ -3330,17 +3411,32 @@ def _selected_activity(result: str, clause: str) -> str:
     return _normalize_spaces(f"{result} {clause}").casefold()
 
 
+_EVENT_PARTICIPATION_RE = re.compile(
+    r"(?i)(?:участв\w*|выступл\w*|участник\w*)\s+(?:в|во)\b"
+)
+_EVENT_KIND_STEMS = (
+    "соревнован",
+    "конкурс",
+    "слёт",
+    "слет",
+    "праздник",
+    "мероприяти",
+)
+
+
+def _has_event_participation(text: str) -> bool:
+    return bool(_EVENT_PARTICIPATION_RE.search(text or ""))
+
+
 def _activity_event_type(result: str, clause: str) -> str:
     """Lesson events from selected activity. Control methods never become TYPE."""
     result_low = result.casefold()
     clause_low = clause.casefold()
-    participates = any(
-        stem in result_low for stem in ("выступа", "участник", "участв")
-    ) or "выступлен" in clause_low
-    if not participates:
+    blob = _normalize_spaces(f"{result} {clause}")
+    if not _has_event_participation(blob):
         return ""
     event_src = result_low if any(
-        stem in result_low for stem in ("соревнован", "конкурс", "слёт", "слет")
+        stem in result_low for stem in _EVENT_KIND_STEMS
     ) else clause_low
     if "соревнован" in event_src:
         if "туристск" in event_src:
@@ -3350,6 +3446,10 @@ def _activity_event_type(result: str, clause: str) -> str:
         return "конкурс"
     if "слёт" in event_src or "слет" in event_src:
         return "туристский слёт" if "туристск" in event_src else "слёт"
+    if "праздник" in event_src:
+        return "праздник"
+    if "мероприяти" in event_src:
+        return "мероприятие"
     return ""
 
 
@@ -4001,6 +4101,13 @@ def type_from_frame(
         if theory_scores.get("беседа", 0) >= 2:
             return "беседа"
         return "теоретическое занятие"
+    if practice_hours:
+        event_clause = " ".join(
+            part for part in (frame.clause, practice_text, program_content) if part
+        )
+        event_type = _activity_event_type(planned_result, event_clause)
+        if event_type:
+            return event_type
     if practice_hours and not (practice_text or "").strip():
         return "теоретическое занятие"
     if practice_hours:
@@ -4821,7 +4928,8 @@ def _quality_issue(
         if first_word and _unproven_raw_colon_subject(first_word, clause):
             return "unproven_object_case"
         if first_word and not re.search(r"[ыиуюеь]$", first_word):
-            return "unproven_object_case"
+            if not _is_substantivized_role_object(obj_text.split()):
+                return "unproven_object_case"
     # A surviving genitive modifier after these transitive predicates is not
     # evidence of a successfully converted direct object. Do not guess a repair.
     # A span copied from the selected clause is already source-grounded.

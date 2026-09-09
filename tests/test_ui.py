@@ -658,7 +658,8 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert app.session_state["calendar_generation_pending"] is False
     assert app.session_state["calendar_generation_succeeded"] is True
     assert app.session_state["calendar_download"].content == b"generated-docx"
-    assert "Календарный план готов" in _page_text(app)
+    assert "Календарный план сформирован с замечаниями" in _page_text(app)
+    assert "✓ Календарный план готов" not in _page_text(app)
     assert app.get("download_button")[0].label == (
         f"Скачать план за {_default_year()} учебный год"
     )
@@ -879,7 +880,7 @@ def test_rejected_matches_allow_generation_with_remarks() -> None:
         generate.click().run()
 
     text = _page_text(app)
-    assert "План с замечаниями" in text
+    assert "Календарный план сформирован с замечаниями" in text
     assert "без связанного содержания программы" in text
     assert "✓ Календарный план готов" not in text
 
@@ -965,8 +966,28 @@ def test_missing_content_notice_does_not_ask_confirm_or_reject() -> None:
         ui._render_match_review_cards(matches, program, "scope")
 
     assert MISSING_PROGRAM_CONTENT_NOTICE in infos
+    assert infos.count(MISSING_PROGRAM_CONTENT_NOTICE) == 1
     assert "Подтвердить соответствие" not in labels
     assert "Соответствия нет" not in labels
+
+
+def test_identical_missing_content_notice_is_not_duplicated() -> None:
+    from calendar_pedagoga.match_review import MISSING_PROGRAM_CONTENT_NOTICE
+    from calendar_pedagoga.matching import ContentMatch, MatchStatus
+    from calendar_pedagoga.parsing import Hours, Topic
+
+    matches = (
+        ContentMatch(Topic("4.1", "Рисование", Hours(2, 0, 2), "ИЗО"), None, MatchStatus.NOT_MATCHED, 0.0),
+        ContentMatch(Topic("4.2", "Лепка", Hours(2, 0, 2), "ИЗО"), None, MatchStatus.NOT_MATCHED, 0.0),
+    )
+    infos: list[str] = []
+    with (
+        patch.object(ui.st, "info", side_effect=lambda text, **_: infos.append(text)),
+        patch.object(ui.st, "markdown", lambda *_, **__: None),
+    ):
+        ui._render_missing_content_notices(matches)
+
+    assert infos == [MISSING_PROGRAM_CONTENT_NOTICE]
 
 
 def test_analysis_uses_pipeline_ce2_and_not_ce1() -> None:

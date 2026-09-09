@@ -2865,7 +2865,7 @@ def _render_missing_content_notices(matches: tuple[ContentMatch, ...]) -> None:
         number = topic.number or "без номера"
         section = topic.parent_section or "раздел не указан"
         st.markdown(f"**УТП:** {topic.title} · {number} · {section}")
-        st.info(MISSING_PROGRAM_CONTENT_NOTICE)
+    st.info(MISSING_PROGRAM_CONTENT_NOTICE)
 
 
 def _render_match_review_cards(
@@ -3232,12 +3232,21 @@ def _render_teacher_analysis_screen(
     title_col, edit_col = st.columns((3.4, 1.1), gap="small")
     with title_col:
         if generated:
-            if rejected:
+            visible_warnings = _teacher_generation_warnings(
+                tuple(st.session_state.get("calendar_warnings", ()))
+            )
+            has_notices = any(is_missing_program_content(match) for match in matches)
+            if rejected or has_notices or visible_warnings:
                 st.markdown(
-                    f'<p class="kp-status-title">План с замечаниями: {rejected} тем '
-                    "без связанного содержания программы</p>",
+                    '<p class="kp-status-title">Календарный план сформирован с замечаниями</p>',
                     unsafe_allow_html=True,
                 )
+                if rejected:
+                    st.markdown(
+                        f'<p class="kp-status-lead">{rejected} тем '
+                        "без связанного содержания программы</p>",
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.markdown(
                     '<p class="kp-status-title">✓ Календарный план готов</p>',
