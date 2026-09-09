@@ -10,6 +10,10 @@ from calendar_pedagoga import ui
 
 ROOT = Path(__file__).resolve().parents[1]
 PROGRAM = ROOT / "references" / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+# Отдельный УТП того же 1-го года, что и PROGRAM. УТП ТП 3г сюда нельзя:
+# RULE 8 даёт BLOCK на явном конфликте 3 ≠ 1.
+SAME_YEAR_UTP = PROGRAM
+SAME_YEAR_UTP_NAME = "УТП ТП 1г. 2ч.docx"
 MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -18,8 +22,9 @@ def _generated_app(with_utp=False, with_template=False):
     assert not any(b.label == "Сформировать календарный план" for b in app.button)
     app.get("file_uploader")[0].set_value((PROGRAM.name, PROGRAM.read_bytes(), MIME))
     if with_utp:
-        utp = ROOT / "references" / "УТП ТП 3г. 2ч.docx"
-        app.get("file_uploader")[1].set_value((utp.name, utp.read_bytes(), MIME))
+        app.get("file_uploader")[1].set_value(
+            (SAME_YEAR_UTP_NAME, SAME_YEAR_UTP.read_bytes(), MIME)
+        )
     if with_template:
         template = ROOT / "references" / "Календарный план.docx"
         app.get("file_uploader")[2].set_value((template.name, template.read_bytes(), MIME))

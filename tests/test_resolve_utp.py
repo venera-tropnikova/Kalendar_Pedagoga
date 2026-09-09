@@ -51,16 +51,17 @@ def test_embedded_utp_from_tour_guides_program() -> None:
 
 def test_separate_utp_has_priority_over_embedded_table() -> None:
     key_utp = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
-    tp_program = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    key_program = REFERENCES / "Программа КЛЮЧ.DOC"
     validated_utp = validate_upload(UploadPurpose.UTP, key_utp.name, key_utp.read_bytes())
     validated_program = validate_upload(
-        UploadPurpose.PROGRAM, tp_program.name, tp_program.read_bytes()
+        UploadPurpose.PROGRAM, key_program.name, key_program.read_bytes()
     )
     result = resolve_utp(validated_utp, validated_program)
     assert result.table_totals == Hours(72, 22, 50)
     assert len(result.topics) == 13
     assert result.metadata.workload_provenance == "document"
     assert AUTO_WORKLOAD_WARNING not in result.warnings
+    assert any("72" in warning and "144" in warning for warning in result.warnings)
 
 
 def test_key_regression_separate_files() -> None:

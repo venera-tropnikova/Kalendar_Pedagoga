@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from itertools import zip_longest
 from pathlib import Path
@@ -62,6 +62,10 @@ class UtpParseResult:
 
 class CompactTableParseError(ValueError):
     """Ошибка позиционного соответствия строк компактного УТП."""
+
+
+class UtpYearSelectionError(ValueError):
+    """Нельзя однозначно выбрать годовую таблицу УТП."""
 
 
 def _clean(value: str) -> str:
@@ -379,15 +383,159 @@ def _parse_table_structure(
     raise ValueError("Не удалось распознать структуру таблицы УТП.")
 
 
+_UTP_PLAN_HEADING = re.compile(
+    r"(?i)учебно[- ]тематическ\w*\s+план|\bутп\b"
+)
+_STUDY_YEAR_IN_HEADING = re.compile(
+    r"(\d+)\s*[-–—]?\s*(?:го|ый|ой|ий|я)?\s*года?\s+обучен"
+)
+
+
+def _is_utp_plan_heading(text: str) -> bool:
+    return bool(_UTP_PLAN_HEADING.search(_clean(text)))
+
+
+def heading_study_year(text: str) -> int | None:
+    """Год обучения из заголовка «УТП N-го года», не из учебного года 2026–2027."""
+
+    cleaned = _clean(text)
+    if not cleaned or not _is_utp_plan_heading(cleaned):
+        return None
+    low = cleaned.casefold()
+    for token, number in (
+        ("перв", 1),
+        ("втор", 2),
+        ("трет", 3),
+        ("четв", 4),
+    ):
+        if token in low and "год" in low:
+            return number
+    found = _STUDY_YEAR_IN_HEADING.search(low)
+    if not found:
+        return None
+    year = int(found.group(1))
+    if 1 <= year <= 8:
+        return year
+    return None
+
+
+def _iter_document_blocks(document):
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    def walk(element):
+        for child in element.iterchildren():
+            if child.tag == qn("w:p"):
+                yield "p", Paragraph(child, document)
+            elif child.tag == qn("w:tbl"):
+                yield "t", Table(child, document)
+            elif child.tag in {qn("w:sdt"), qn("w:sdtContent")}:
+                yield from walk(child)
+
+    yield from walk(document.element.body)
+
+
+@dataclass(frozen=True)
+class UtpTableCandidate:
+    study_year: int | None
+    sections: tuple[Section, ...]
+    topics: tuple[Topic, ...]
+    table_totals: Hours | None
+
+
+def collect_utp_table_candidates(source) -> tuple[UtpTableCandidate, ...]:
+    """Все валидные таблицы УТП в порядке документа, с годом из ближайшего заголовка."""
+
+    document = (
+        source
+        if hasattr(source, "element") and hasattr(source, "tables")
+        else _open_utp_document(source)
+    )
+    last_year: int | None = None
+    found: list[UtpTableCandidate] = []
+    for kind, block in _iter_document_blocks(document):
+        if kind == "p":
+            year = heading_study_year(block.text)
+            if year is not None:
+                last_year = year
+            continue
+        if _utp_table_score(block) < 0:
+            continue
+        try:
+            sections, topics, table_totals = _parse_table_structure(block)
+        except (ValueError, IndexError):
+            continue
+        if not _looks_like_valid_utp(sections, topics, table_totals):
+            continue
+        found.append(
+            UtpTableCandidate(
+                last_year,
+                tuple(sections),
+                tuple(topics),
+                table_totals,
+            )
+        )
+    return tuple(found)
+
+
+def _select_utp_candidate(
+    candidates: tuple[UtpTableCandidate, ...],
+    study_year: int | None,
+) -> UtpTableCandidate:
+    """Выбрать таблицу только по study_year, не по похожести часов или тем."""
+
+    if study_year is not None:
+        matched = [item for item in candidates if item.study_year == study_year]
+        if not matched:
+            raise UtpYearSelectionError(
+                f"В программе нет учебно-тематического плана {study_year}-го "
+                "года обучения."
+            )
+        return matched[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise UtpYearSelectionError(
+            "В программе несколько учебно-тематических планов по годам "
+            "обучения, год не выбран."
+        )
+    raise ValueError("В документе не найдена таблица УТП с темами и часами.")
+
+
+def _store_selected_study_year(
+    result: UtpParseResult,
+    year: int | None,
+) -> UtpParseResult:
+    if year is None:
+        return result
+    from calendar_pedagoga.program_parsing import infer_study_year_number
+
+    current = infer_study_year_number(result.metadata.study_year)
+    if current == year:
+        return result
+    return UtpParseResult(
+        metadata=replace(result.metadata, study_year=f"{year} год обучения"),
+        sections=result.sections,
+        topics=result.topics,
+        table_totals=result.table_totals,
+        warnings=result.warnings,
+    )
+
+
 def _finalize_utp_parse(
     document,
-    sections: list[Section],
-    topics: list[Topic],
+    sections: list[Section] | tuple[Section, ...],
+    topics: list[Topic] | tuple[Topic, ...],
     table_totals: Hours | None,
+    *,
+    study_year: int | None = None,
 ) -> UtpParseResult:
-    for section in sections:
-        if not any(topic.parent_section == section.title for topic in topics):
-            topics.append(
+    section_list = list(sections)
+    topic_list = list(topics)
+    for section in section_list:
+        if not any(topic.parent_section == section.title for topic in topic_list):
+            topic_list.append(
                 Topic(
                     section.number,
                     section.title,
@@ -398,45 +546,75 @@ def _finalize_utp_parse(
             )
     result = UtpParseResult(
         metadata=_metadata([paragraph.text for paragraph in document.paragraphs]),
-        sections=tuple(sections),
-        topics=tuple(topics),
+        sections=tuple(section_list),
+        topics=tuple(topic_list),
         table_totals=table_totals,
     )
     from calendar_pedagoga.validation import validate_utp
 
-    return UtpParseResult(
+    finalized = UtpParseResult(
         metadata=result.metadata,
         sections=result.sections,
         topics=result.topics,
         table_totals=result.table_totals,
         warnings=tuple(validate_utp(result)),
     )
+    return _store_selected_study_year(finalized, study_year)
 
 
-def parse_utp(source: str | Path | bytes | BinaryIO) -> UtpParseResult:
-    """Разобрать УТП DOCX, не изменяя исходный файл."""
-    document = Document(BytesIO(source) if isinstance(source, bytes) else source)
+_DOC_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
+
+
+def _open_utp_document(source: str | Path | bytes | BinaryIO):
+    if isinstance(source, bytes):
+        data = source
+        if data.startswith(_DOC_MAGIC):
+            from calendar_pedagoga.program_parsing import convert_legacy_doc
+
+            data = convert_legacy_doc(data)
+        return Document(BytesIO(data))
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.suffix.lower() == ".doc":
+            from calendar_pedagoga.program_parsing import convert_legacy_doc
+
+            return Document(BytesIO(convert_legacy_doc(path.read_bytes())))
+        return Document(path)
+    return Document(source)
+
+
+def parse_utp(
+    source: str | Path | bytes | BinaryIO,
+    study_year: int | None = None,
+) -> UtpParseResult:
+    """Разобрать УТП DOCX. При нескольких годовых таблицах выбрать по study_year."""
+
+    document = _open_utp_document(source)
     if not document.tables:
         raise ValueError("В УТП не найдена таблица с темами.")
-    ranked = sorted(
-        document.tables,
-        key=_utp_table_score,
-        reverse=True,
-    )
+    candidates = collect_utp_table_candidates(document)
+    if candidates:
+        selected = _select_utp_candidate(candidates, study_year)
+        chosen_year = study_year if study_year is not None else selected.study_year
+        return _finalize_utp_parse(
+            document,
+            selected.sections,
+            selected.topics,
+            selected.table_totals,
+            study_year=chosen_year,
+        )
     last_error: Exception | None = None
     compact_error: CompactTableParseError | None = None
-    for table in ranked:
+    for table in document.tables:
         if _utp_table_score(table) < 0:
             continue
         try:
-            sections, topics, table_totals = _parse_table_structure(table)
+            _parse_table_structure(table)
+        except CompactTableParseError as error:
+            compact_error = error
+            last_error = error
         except (ValueError, IndexError) as error:
             last_error = error
-            if isinstance(error, CompactTableParseError):
-                compact_error = error
-            continue
-        if _looks_like_valid_utp(sections, topics, table_totals):
-            return _finalize_utp_parse(document, sections, topics, table_totals)
     if compact_error is not None:
         raise compact_error
     if last_error is not None:
