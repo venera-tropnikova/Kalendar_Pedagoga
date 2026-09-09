@@ -18,11 +18,47 @@ def _digest(value):
 def test_audit_snapshot_preserves_results_and_untouched_rows():
     # RESULT digest captured before this task. TYPE/CONTROL freeze excludes
     # the agreed change weeks so neighbouring rows cannot drift silently.
-    changed = {2, 3, 4, 6, 9, 11, 12, 13, 14, 16, 17, 23, 29, 30, 31, 36}
-    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == "5c1ffe45bc7e43c9707a93d958d8f59f6c56db51f086076d223243ec12ba448a"
-    assert _digest([list(row[1:]) for week, row in enumerate(
-        CE2_TP1_WEEK_SNAPSHOT, 1
-    ) if week not in changed]) == "46338c7d732ed525b695d03de2bc3512e3de6282ec8264d66b12cf175e63c510"
+    previously_changed = {2, 3, 4, 6, 9, 11, 12, 13, 14, 16, 17, 23, 29, 30, 31, 36}
+    r2_changed = {1}  # W01: oral CONTROL completed from the accepted RESULT
+    changed = previously_changed | r2_changed
+    w01_number, w01_type, w01_result, w01_control = CE2_TP1_WEEK_SNAPSHOT[0]
+    assert w01_number == "1.1"
+    assert w01_type == "теоретическое занятие"
+    assert w01_result == (
+        "Характеризует историю развития туризма в г. Салават и роль туризма "
+        "в подготовке к защите Родины, в выборе профессии и подготовке к "
+        "предстоящей трудовой деятельности."
+    )
+    assert w01_control == (
+        "устный опрос по истории развития туризма в г. Салават и роли туризма "
+        "в подготовке к защите Родины, в выборе профессии и подготовке к "
+        "предстоящей трудовой деятельности"
+    )
+    assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == (
+        "5c1ffe45bc7e43c9707a93d958d8f59f6c56db51f086076d223243ec12ba448a"
+    )
+    # Live W01 CONTROL is excluded from the untouched digest. The historical
+    # oracle still covers the same week set by restoring only the pre-R2
+    # W01 CONTROL; remaining weeks must match that freeze unchanged.
+    pre_r2_w01_control = (
+        "устный опрос по истории развития туризма в г. Салават и роли "
+        "туризма в подготовке к защите Родины"
+    )
+    locked = []
+    for week, row in enumerate(CE2_TP1_WEEK_SNAPSHOT, 1):
+        if week in previously_changed:
+            continue
+        if week in r2_changed:
+            locked.append([w01_type, w01_result, pre_r2_w01_control])
+            continue
+        locked.append(list(row[1:]))
+    assert _digest(locked) == "46338c7d732ed525b695d03de2bc3512e3de6282ec8264d66b12cf175e63c510"
+    remaining_weeks = [
+        week
+        for week, _row in enumerate(CE2_TP1_WEEK_SNAPSHOT, 1)
+        if week not in changed
+    ]
+    assert 1 not in remaining_weeks
 
 
 @pytest.mark.parametrize(("result", "clause", "expected"), [

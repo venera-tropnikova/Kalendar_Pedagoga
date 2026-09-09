@@ -2722,15 +2722,15 @@ def _oral_object_for_control(obj: str) -> str:
     phrase = _normalize_spaces(obj).strip(" ,.;")
     if not phrase or _starts_with_action_finite(phrase):
         return ""
+    topic = re.match(r"(?i)^материал по теме\s+[„\"«](.+?)[“\"»]$", phrase)
+    if topic:
+        return f"теме „{topic.group(1)}“"
     first = phrase.split()[0]
     if _is_proven_finite_token(first):
         phrase = _normalize_spaces(phrase[len(first) :]).strip(" ,.;")
         if not phrase or _starts_with_action_finite(phrase):
             return ""
-    dative = _phrase_to_dative(phrase)
-    if len(_split_direct_case_commas(phrase)) > 1:
-        return dative
-    return _shorten_clause(dative, max_len=80)
+    return _phrase_to_dative(phrase)
 
 
 def _oral_from_knowledge_objects(objects: list[str]) -> str:
@@ -2789,21 +2789,30 @@ def _oral_object_grounded_in_result(control: str, result: str) -> bool:
     if not oral.startswith("устный опрос по ") or oral.startswith("устный опрос по теме"):
         return False
     complement = oral[len("устный опрос по ") :]
-    result_tokens = re.findall(r"[а-яё]{4,}", result.casefold())
+    core = re.sub(
+        r"(?i)^(характеризует|называет)\s+",
+        "",
+        _normalize_spaces(result).rstrip("."),
+    ).strip()
+    if core:
+        expected = _oral_object_for_control(core)
+        if expected and expected.casefold() == complement.casefold():
+            return True
+    result_tokens = re.findall(r"[а-яё]{3,}", result.casefold())
     if not result_tokens:
         return False
-    result_stems = {token[:5] if len(token) >= 5 else token for token in result_tokens}
+    result_stems = {token[:4] if len(token) >= 4 else token for token in result_tokens}
 
     def _stem(token: str) -> str:
-        return token[:5] if len(token) >= 5 else token
+        return token[:4] if len(token) >= 4 else token
 
     extra = [
         token
-        for token in re.findall(r"[а-яё]{4,}", complement.casefold())
+        for token in re.findall(r"[а-яё]{3,}", complement.casefold())
         if not any(
-            _stem(token)[:4] == stem[:4]
-            or _stem(token).startswith(stem[:4])
-            or stem.startswith(_stem(token)[:4])
+            _stem(token)[:3] == stem[:3]
+            or _stem(token).startswith(stem[:3])
+            or stem.startswith(_stem(token)[:3])
             for stem in result_stems
         )
     ]
@@ -2811,6 +2820,8 @@ def _oral_object_grounded_in_result(control: str, result: str) -> bool:
 
 
 def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
+    """Oral CONTROL from the accepted RESULT only; never a shortened source clause."""
+
     proven = _control_from_proven_result(planned_result)
     if proven:
         return proven
@@ -2820,26 +2831,15 @@ def _oral_quiz_control(frame: ActionFrame, planned_result: str) -> str:
     kinds = re.search(r"виды\s+([а-яё]+)", blob)
     if kinds:
         return f"устный опрос по видам {kinds.group(1)}"
-    raw_clause = (frame.clause or "").split(".")[0]
-    raw_result = (planned_result or "").split(".")[0]
-    clause_core = re.sub(r"(?i)^(характеризует|называет)\s+", "", raw_clause).strip()
-    result_core = re.sub(r"(?i)^(характеризует|называет)\s+", "", raw_result).strip()
-    clause_first = clause_core.split()[0] if clause_core.split() else ""
-    if (
-        clause_first.casefold() in {"ее", "её", "его", "их", "эта", "это", "эти"}
-        or _is_adjective(clause_first)
-        or clause_first.casefold() in {"краткие", "общие", "основные", "сведения"}
-    ):
-        source = result_core
-    else:
-        source = clause_core or result_core
-    first = source.split()[0] if source.split() else ""
-    if first.casefold() in {"ее", "её", "его", "их", "эта", "это", "эти"}:
-        return "устный опрос"
-    if source and first and not _is_adjective(first):
-        return "устный опрос по " + _shorten_clause(
-            _phrase_to_dative(source), max_len=48
-        )
+    core = re.sub(
+        r"(?i)^(характеризует|называет)\s+",
+        "",
+        _normalize_spaces(planned_result or "").rstrip("."),
+    ).strip()
+    if core and not _starts_with_action_finite(core):
+        complement = _oral_object_for_control(core)
+        if complement:
+            return "устный опрос по " + complement
     return "устный опрос"
 
 
