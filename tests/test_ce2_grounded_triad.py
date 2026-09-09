@@ -289,7 +289,7 @@ def test_source_fields_are_not_rewritten():
 
 
 CE2_TP1_WEEK_SNAPSHOT = (
-    ("1.1", "теоретическое занятие", "Характеризует историю развития туризма в г. Салават. Характеризует роль туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности.", "устный опрос по истории развития туризма в г. Салават; устный опрос по роли туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности"),
+    ("1.1", "теоретическое занятие", "Характеризует историю развития туризма в г. Салават. Раскрывает роль туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности.", "устный опрос по истории развития туризма в г. Салават; устный опрос по роли туризма в подготовке к защите Родины, в выборе профессии и подготовке к предстоящей трудовой деятельности"),
     ("1.3", "практикум по работе со снаряжением", "Укладывает рюкзаки, подгоняет снаряжение, ухаживает за ним и ремонтирует его.", "педагогическое наблюдение за укладкой рюкзака, подгонкой снаряжения, уходом за ним и ремонтом"),
     ("1.4", "практикум по организации бивака", "Определяет места, пригодные для организации привалов и ночлегов, развертывает и свертывает лагерь (бивак), разжигает костёр.", "педагогическое наблюдение за выбором места для привалов и ночлегов, развертыванием и свертыванием лагеря и разжиганием костра"),
     ("1.5", "проектно-практическое занятие", "Составляет план подготовки похода и план-график движения, подготавливает личное и общественное снаряжение.", "проверка плана подготовки похода и плана-графика движения; педагогическое наблюдение за подготовкой личного и общественного снаряжения"),
@@ -516,8 +516,11 @@ def test_multi_topic_week_keeps_independent_grounded_triads():
     merged = build_lesson_content_v2((_synthetic_week(first, second),))[0]
     assert alone_first.lesson_type == alone_second.lesson_type == merged.lesson_type
     assert alone_first.planned_result.rstrip(".") in merged.planned_result
-    assert alone_second.planned_result.rstrip(".") in merged.planned_result
-    assert merged.planned_result.casefold().count("характеризует") == 2
+    assert alone_second.planned_result.casefold().startswith("характеризует роль")
+    assert "Раскрывает роль" in merged.planned_result
+    assert alone_second.planned_result.split(" ", 1)[1].rstrip(".") in merged.planned_result
+    assert merged.planned_result.casefold().count("характеризует") == 1
+    assert merged.planned_result.casefold().count("раскрывает") == 1
     assert " и роль " not in merged.planned_result.casefold()
     assert alone_first.assessment_method in merged.assessment_method
     assert alone_second.assessment_method in merged.assessment_method

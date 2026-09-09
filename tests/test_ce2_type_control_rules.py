@@ -26,7 +26,7 @@ def test_audit_snapshot_preserves_results_and_untouched_rows():
     assert w01_type == "теоретическое занятие"
     assert w01_result == (
         "Характеризует историю развития туризма в г. Салават. "
-        "Характеризует роль туризма в подготовке к защите Родины, "
+        "Раскрывает роль туризма в подготовке к защите Родины, "
         "в выборе профессии и подготовке к предстоящей трудовой деятельности."
     )
     assert w01_control == (
@@ -35,7 +35,7 @@ def test_audit_snapshot_preserves_results_and_untouched_rows():
         "в выборе профессии и подготовке к предстоящей трудовой деятельности"
     )
     assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == (
-        "eb6687fe7c1d8a3a89bcafb139638087b6f813d991829ffbed2baa165a280259"
+        "cec2a3089eee17d85e1a547d9eef6823ba3b8e25654b42dd513c8914fe8040c8"
     )
     # Live W01 RESULT/CONTROL are excluded from the untouched digest.
     # The historical oracle restores the pre-mixed-week W01 RESULT and the

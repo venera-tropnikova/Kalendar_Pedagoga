@@ -5519,6 +5519,42 @@ def _merge_part_results(results: list[str]) -> str:
     return _normalize_spaces(" ".join(sentences))
 
 
+_REVEAL_SAFE_OBJECT_HEADS = ("роль", "значение", "назначение", "особенности")
+
+
+def _characterize_object_allows_reveal(text: str) -> bool:
+    """True when «Раскрывает» keeps the same knowledge sense as «Характеризует»."""
+
+    folded = _drop_leading_verb(_normalize_spaces(text)).rstrip(" .").casefold()
+    for head in _REVEAL_SAFE_OBJECT_HEADS:
+        if folded == head or folded.startswith(f"{head} ") or folded.startswith(f"{head},"):
+            return True
+    return False
+
+
+def _vary_repeated_independent_characterize(sentences: list[str]) -> list[str]:
+    """Do not rejoin independent Характеризует phrases; vary only a safe second object."""
+
+    characterize_at = [
+        index
+        for index, item in enumerate(sentences)
+        if _leading_finite_verb(item).casefold() == "характеризует"
+    ]
+    if len(characterize_at) < 2:
+        return sentences
+    second = characterize_at[1]
+    if not _characterize_object_allows_reveal(sentences[second]):
+        return sentences
+    rewritten = list(sentences)
+    rewritten[second] = re.sub(
+        r"(?i)^характеризует\b",
+        "Раскрывает",
+        rewritten[second],
+        count=1,
+    )
+    return rewritten
+
+
 def _merge_independent_part_results(results: list[str]) -> str:
     """Keep each topic's RESULT as its own sentence. Do not fold same verbs."""
 
@@ -5535,6 +5571,7 @@ def _merge_independent_part_results(results: list[str]) -> str:
             continue
         seen.add(key)
         sentences.append(text)
+    sentences = _vary_repeated_independent_characterize(sentences)
     return _normalize_spaces(" ".join(sentences))
 
 

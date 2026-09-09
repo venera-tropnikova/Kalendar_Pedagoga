@@ -2,6 +2,7 @@
 
 from calendar_pedagoga.content_engine_v2 import (
     _aggregate_week_lesson_type,
+    _merge_independent_part_results,
     _merge_part_results,
     build_lesson_content_v2,
 )
@@ -24,7 +25,7 @@ def test_two_theory_topics_keep_two_result_sentences_and_two_orals() -> None:
         if item.strip()
     ]
     assert first.startswith("Характеризует историю")
-    assert second.startswith("Характеризует роль")
+    assert second.startswith("Раскрывает роль")
     assert merged.planned_result.count(".") == 2
     chunks = [item.strip() for item in merged.assessment_method.split(";")]
     assert len(chunks) == 2
@@ -129,18 +130,74 @@ def test_same_topic_objects_still_join_with_and() -> None:
 
 
 def test_tp_w01_keeps_two_topic_triads() -> None:
-    lesson = build_lesson_content_v2(tp1_number_bound_content_rows())[0]
+    rows = tp1_number_bound_content_rows()
+    lesson = build_lesson_content_v2(rows)[0]
     assert lesson.source.week_number == 1
     assert lesson.lesson_type == "теоретическое занятие"
+    assert lesson.planned_result.startswith("Характеризует историю развития туризма в г. Салават.")
+    assert "Раскрывает роль туризма" in lesson.planned_result
+    assert lesson.planned_result.casefold().count("характеризует") == 1
+    assert lesson.planned_result.casefold().count("раскрывает") == 1
     assert lesson.planned_result == (
         "Характеризует историю развития туризма в г. Салават. "
-        "Характеризует роль туризма в подготовке к защите Родины, "
+        "Раскрывает роль туризма в подготовке к защите Родины, "
         "в выборе профессии и подготовке к предстоящей трудовой деятельности."
     )
-    assert lesson.assessment_method == (
-        "устный опрос по истории развития туризма в г. Салават; "
+    chunks = [item.strip() for item in lesson.assessment_method.split(";")]
+    assert chunks == [
+        "устный опрос по истории развития туризма в г. Салават",
         "устный опрос по роли туризма в подготовке к защите Родины, "
-        "в выборе профессии и подготовке к предстоящей трудовой деятельности"
-    )
+        "в выборе профессии и подготовке к предстоящей трудовой деятельности",
+    ]
     assert " и роль " not in lesson.planned_result
     assert " и роли " not in lesson.assessment_method
+    parts = lesson.source.week_parts
+    assert len(parts) == 2
+    assert {part.topic_number for part in parts} == {"1.1", "1.2"}
+    assert parts[0].topic_number != parts[1].topic_number
+
+
+def test_independent_characterize_role_uses_reveal_not_and() -> None:
+    folded = _merge_independent_part_results(
+        [
+            "Характеризует историю прибора в городе.",
+            "Характеризует роль прибора в обучении.",
+        ]
+    )
+    assert folded == (
+        "Характеризует историю прибора в городе. "
+        "Раскрывает роль прибора в обучении."
+    )
+    assert " и " not in folded
+
+
+def test_independent_characterize_keeps_unsafe_second_object() -> None:
+    folded = _merge_independent_part_results(
+        [
+            "Характеризует историю прибора в городе.",
+            "Характеризует строение прибора.",
+        ]
+    )
+    assert folded == (
+        "Характеризует историю прибора в городе. "
+        "Характеризует строение прибора."
+    )
+
+
+def test_independent_characterize_reveal_only_for_safe_objects() -> None:
+    for obj in ("значение леса.", "назначение прибора.", "особенности маршрута."):
+        folded = _merge_independent_part_results(
+            [
+                "Характеризует историю темы.",
+                f"Характеризует {obj}",
+            ]
+        )
+        assert folded == (
+            f"Характеризует историю темы. Раскрывает {obj}"
+        )
+
+
+def test_single_characterize_role_is_not_rewritten() -> None:
+    assert _merge_independent_part_results(
+        ["Характеризует роль туризма в выборе профессии."]
+    ) == "Характеризует роль туризма в выборе профессии."
