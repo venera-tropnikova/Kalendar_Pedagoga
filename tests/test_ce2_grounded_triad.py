@@ -1331,10 +1331,8 @@ def test_theory_characterizes_compass_knowledge_head():
     derived = _theory_fields(
         "Компас, его устройство и назначение, правила обращения."
     )
-    low = derived.planned_result.casefold()
-    assert low.startswith("характеризует")
-    assert "устройство" in low or "назначение" in low
-    assert not low.startswith("характеризует компас")
+    assert derived.planned_result == "Характеризует устройство и назначение компаса."
+    assert derived.assessment_method == "устный опрос по устройству и назначению компаса"
     assert not derived.planned_result.startswith("Характеризует материал по теме")
 
 

@@ -1499,7 +1499,17 @@ def _heading_with_needed_catalogue(text: str) -> str:
 
 def _characterize_head_ok(word: str) -> bool:
     core = _strip_punct_word(word)[1].casefold()
-    return bool(core and re.search(r"[ыиуюеь]$", core))
+    if not core:
+        return False
+    if re.search(r"[ыиуюеь]$", core):
+        return True
+    lemma = _verbal_noun_lemma(core).casefold()
+    # Closed knowledge heads whose nominative already equals accusative (neuter -о).
+    # Do not open arbitrary nouns that merely end in -о.
+    return (
+        core.endswith("о")
+        and (core in _THEORY_KNOWLEDGE_HEADS or lemma in _THEORY_KNOWLEDGE_HEADS)
+    )
 
 
 def _is_theory_knowledge_token(word: str) -> bool:
@@ -1542,9 +1552,22 @@ def _theory_object_token(word: str) -> str:
     return f"{prefix}{changed}{suffix}"
 
 
-def _theory_object_span_ok(tokens: list[str]) -> bool:
-    if not tokens or not _characterize_head_ok(tokens[0]):
+def _coordinated_knowledge_object_span(tokens: list[str]) -> bool:
+    """Allow a non-gated first conjunct when a later coordinated head is gated."""
+
+    if not any(_strip_punct_word(token)[1].casefold() == "и" for token in tokens):
         return False
+    return any(
+        _is_theory_knowledge_token(token) and _characterize_head_ok(token)
+        for token in tokens
+    )
+
+
+def _theory_object_span_ok(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    if not _characterize_head_ok(tokens[0]):
+        return _coordinated_knowledge_object_span(tokens)
     if _substantivized_head_without_complement(tokens):
         return False
     first_core = _strip_punct_word(tokens[0])[1].casefold()
@@ -1587,15 +1610,32 @@ def _knowledge_owner_tokens(after_head: list[str]) -> list[str]:
     """Non-head, non-PP tokens that prove an owner NP after a knowledge head."""
 
     owners: list[str] = []
-    for token in after_head:
+    late_knowledge_np = False
+    for index, token in enumerate(after_head):
         if _is_preposition(token):
             break
         core = _strip_punct_word(token)[1].casefold()
+        comma_break = "," in token
         if not core or core in {"и", "или", "а", "но"} | _POSSESSIVE_OR_DEICTIC:
+            late_knowledge_np = late_knowledge_np or comma_break
             continue
         if _is_theory_knowledge_token(token):
+            if late_knowledge_np:
+                break
+            late_knowledge_np = late_knowledge_np or comma_break
+            continue
+        if late_knowledge_np:
+            break
+        nxt = after_head[index + 1 :]
+        if (
+            nxt
+            and _strip_punct_word(nxt[0])[1].casefold() == "и"
+            and len(nxt) > 1
+            and _is_theory_knowledge_token(nxt[1])
+        ):
             continue
         owners.append(token)
+        late_knowledge_np = late_knowledge_np or comma_break
     return owners
 
 
@@ -1610,6 +1650,24 @@ def _chunk_looks_like_np(words: list[str]) -> bool:
     return False
 
 
+def _coordinated_owner_is_ambiguous(group: list[str]) -> bool:
+    """«Компас и линейка» is two owners; «имена и фамилии учеников» is one NP."""
+
+    parts: list[list[str]] = []
+    buf: list[str] = []
+    for token in group:
+        if _strip_punct_word(token)[1].casefold() == "и" and buf:
+            parts.append(buf)
+            buf = []
+            continue
+        buf.append(token)
+    if buf:
+        parts.append(buf)
+    if len(parts) < 2:
+        return False
+    return all(len(part) == 1 for part in parts)
+
+
 def _unique_possessive_antecedent(tokens: list[str], head_index: int) -> list[str] | None:
     """Unique in-clause antecedent of его/ее/их immediately before the head."""
 
@@ -1619,7 +1677,9 @@ def _unique_possessive_antecedent(tokens: list[str], head_index: int) -> list[st
     ):
         return None
     end = head_index - 1
-    while end >= 0 and _strip_punct_word(tokens[end])[1].casefold() in _POSSESSIVE_OR_DEICTIC:
+    while end >= 0 and _strip_punct_word(tokens[end])[1].casefold() in (
+        _POSSESSIVE_OR_DEICTIC | {"и", "или"}
+    ):
         end -= 1
     if end < 0:
         return None
@@ -1632,28 +1692,122 @@ def _unique_possessive_antecedent(tokens: list[str], head_index: int) -> list[st
     groups = [chunk for chunk in chunks if _chunk_looks_like_np(chunk)]
     if len(groups) != 1:
         return None
+    if _coordinated_owner_is_ambiguous(groups[0]):
+        return None
     return groups[0]
+
+
+def _possessive_before(tokens: list[str], index: int) -> bool:
+    return any(
+        _strip_punct_word(token)[1].casefold() in _POSSESSIVE_ONLY
+        for token in tokens[:index]
+    )
+
+
+def _is_possessive_coord_member(tokens: list[str], index: int) -> bool:
+    if index < 0 or index >= len(tokens):
+        return False
+    if _is_theory_knowledge_token(tokens[index]):
+        return True
+    if index > 0 and _strip_punct_word(tokens[index - 1])[1].casefold() in _POSSESSIVE_ONLY:
+        core = _strip_punct_word(tokens[index])[1].casefold()
+        return bool(core) and core not in _CLAUSE_NP_STOP and not _is_preposition(tokens[index])
+    return False
+
+
+def _expand_possessive_knowledge_span(
+    tokens: list[str], index: int
+) -> tuple[int, list[str], list[str]] | None:
+    """Expand «его Head и Head» into one span; leftover is not an owner."""
+
+    if not _is_theory_knowledge_token(tokens[index]):
+        return None
+    start = index
+    while start >= 2:
+        if (
+            _strip_punct_word(tokens[start - 1])[1].casefold() == "и"
+            and _is_possessive_coord_member(tokens, start - 2)
+        ):
+            start -= 2
+            continue
+        break
+    end = index
+    cursor = index + 1
+    while cursor + 1 < len(tokens):
+        if (
+            _strip_punct_word(tokens[cursor])[1].casefold() == "и"
+            and _is_possessive_coord_member(tokens, cursor + 1)
+        ):
+            end = cursor + 1
+            cursor += 2
+            continue
+        break
+    heads: list[str] = []
+    for pos in range(start, end + 1):
+        core = _strip_punct_word(tokens[pos])[1]
+        if core.casefold() in {"и", "или"}:
+            heads.append("и")
+        else:
+            heads.append(_theory_object_token(core))
+    return start, heads, list(tokens[end + 1 :])
+
+
+def _possessive_owner_genitive_tokens(words: list[str]) -> list[str]:
+    """Genitive of the in-clause owner via the existing phrase helper."""
+
+    cleaned: list[str] = []
+    for word in words:
+        core = _strip_punct_word(word)[1]
+        if core:
+            cleaned.append(_decap_lexical(core))
+    if not cleaned:
+        return []
+    converted = _phrase_to_genitive(" ".join(cleaned)).split()
+    if len(cleaned) != 1:
+        return converted
+    current = converted[0] if converted else cleaned[0]
+    if current.casefold() != cleaned[0].casefold():
+        return converted
+    if _is_adjective(cleaned[0]):
+        return [_adj_to_genitive(cleaned[0])]
+    low = cleaned[0].casefold()
+    if low.endswith(("а", "я")) and not low.endswith("ия"):
+        return [_head_noun_to_genitive(_noun_nom_to_acc(cleaned[0]))]
+    return converted
 
 
 def _knowledge_head_span(tokens: list[str], index: int) -> list[str] | None:
     """Knowledge-head NP with a proven same-clause owner, or None."""
 
-    after = list(tokens[index + 1 :])
-    head = _theory_object_token(tokens[index])
-    if _knowledge_owner_tokens(after):
-        rest = [head, *after]
-        return rest if _theory_object_span_ok(rest) else None
-    antecedent = _unique_possessive_antecedent(tokens, index)
-    if not antecedent:
+    expanded = _expand_possessive_knowledge_span(tokens, index)
+    if expanded is None:
         return None
-    rest = [head, *antecedent, *after]
-    return rest if _theory_object_span_ok(rest) else None
+    start, heads, leftover = expanded
+    if _possessive_before(tokens, start):
+        antecedent = _unique_possessive_antecedent(tokens, start)
+        if not antecedent:
+            return None
+        genitive = _possessive_owner_genitive_tokens(antecedent)
+        if not genitive:
+            return None
+        rest = [*heads, *genitive]
+        if leftover and _is_preposition(leftover[0]):
+            rest = [*rest, *leftover]
+        return rest if _theory_object_span_ok(rest) else None
+    if _knowledge_owner_tokens(leftover):
+        rest = [*heads, *leftover]
+        return rest if _theory_object_span_ok(rest) else None
+    return None
 
 
 def _knowledge_object_missing_owner(obj_text: str) -> bool:
     obj, _cond = _split_object_and_conditions(obj_text)
     tokens = obj.split()
-    if not tokens or not _is_theory_knowledge_token(tokens[0]):
+    if not tokens:
+        return False
+    if not _is_theory_knowledge_token(tokens[0]) and not any(
+        _is_theory_knowledge_token(token) for token in tokens
+    ):
         return False
     return not _knowledge_owner_tokens(tokens[1:])
 
@@ -1726,6 +1880,15 @@ def _proven_theory_object(heading: str) -> str | None:
             if rest:
                 return _normalize_spaces(" ".join(rest))
             continue
+    if (
+        any(
+            _strip_punct_word(token)[1].casefold() in _POSSESSIVE_ONLY
+            for token in tokens
+        )
+        and any(_is_theory_knowledge_token(token) for token in tokens)
+        and _strip_punct_word(tokens[0])[1].casefold() not in _POSSESSIVE_ONLY
+    ):
+        return None
     if _is_theory_knowledge_token(tokens[0]):
         return None
     led = [_theory_object_token(tokens[0]), *tokens[1:]]
@@ -4927,8 +5090,11 @@ def _quality_issue(
             return "missing_knowledge_owner"
         if first_word and _unproven_raw_colon_subject(first_word, clause):
             return "unproven_object_case"
-        if first_word and not re.search(r"[ыиуюеь]$", first_word):
-            if not _is_substantivized_role_object(obj_text.split()):
+        if first_word and not _characterize_head_ok(first_word):
+            obj_tokens = obj_text.split()
+            if not _is_substantivized_role_object(obj_tokens) and not (
+                _coordinated_knowledge_object_span(obj_tokens)
+            ):
                 return "unproven_object_case"
     # A surviving genitive modifier after these transitive predicates is not
     # evidence of a successfully converted direct object. Do not guess a repair.
