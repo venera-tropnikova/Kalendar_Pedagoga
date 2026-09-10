@@ -113,9 +113,20 @@ def _first_match(text: str, patterns: tuple[str, ...]) -> str | None:
     return None
 
 
+_SECTION_HEADING_RE = re.compile(r"(?i)^раздел\s+(\d+(?:\.\d+)*)\.?\s+(.+)$")
+
+
 def _number_title(value: str) -> tuple[str | None, str]:
-    match = re.match(r"^(\d+(?:\.\d+)*)\.?\s+(.+)$", _clean(value))
-    return (match.group(1), _clean(match.group(2))) if match else (None, _clean(value))
+    cleaned = _clean(value)
+    section = _SECTION_HEADING_RE.match(cleaned)
+    if section:
+        return section.group(1), _clean(section.group(2)).rstrip(".")
+    match = re.match(r"^(\d+(?:\.\d+)*)\.?\s+(.+)$", cleaned)
+    return (match.group(1), _clean(match.group(2))) if match else (None, cleaned)
+
+
+def _is_section_heading(text: str) -> bool:
+    return bool(_SECTION_HEADING_RE.match(_clean(text)))
 
 
 def _collect_after(
@@ -383,7 +394,7 @@ def _content_items(document, study_year: int | None = None) -> tuple[ProgramCont
         if re.search(r"^(?:ожидаемые|планируемые)\s+результаты", text, re.I):
             break
         number, title = _number_title(text)
-        if _is_bold_heading(paragraph):
+        if _is_bold_heading(paragraph) or _is_section_heading(text):
             flush()
             current_number, current_title, content = number, title, []
             if number and "." not in number:

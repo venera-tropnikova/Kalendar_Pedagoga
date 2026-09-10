@@ -92,6 +92,9 @@ _PRONOUN_TOKENS = frozenset(
         "свои",
     }
 )
+_SECTION_HEADING_PREFIX = re.compile(
+    r"(?i)^раздел\s+(\d+(?:\.\d+)*)\.?\s+"
+)
 _INFLECTION_ENDINGS = (
     "ями",
     "ами",
@@ -150,6 +153,60 @@ def normalize_title(value: str) -> str:
     value = value.lower().replace("ё", "е")
     value = re.sub(r"[^a-zа-я0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _heading_core(value: str) -> str:
+    """Название без префикса «Раздел N.» — номер программы не входит в ядро."""
+
+    cleaned = value.strip()
+    match = _SECTION_HEADING_PREFIX.match(cleaned)
+    if match:
+        return cleaned[match.end() :].strip().rstrip(".")
+    return cleaned
+
+
+def _looks_like_utp_section(topic: Topic) -> bool:
+    if topic.is_standalone_section:
+        return True
+    parent = (topic.parent_section or "").strip()
+    return bool(parent) and normalize_title(parent) == normalize_title(topic.title)
+
+
+def _looks_like_section_heading(item: ProgramContentItem) -> bool:
+    title = item.title.strip()
+    if _SECTION_HEADING_PREFIX.match(title):
+        return True
+    return bool(item.number) and "." not in item.number
+
+
+def _prefer_section_heading(
+    topic: Topic,
+    candidates: list[ProgramContentItem],
+) -> list[ProgramContentItem]:
+    """Для раздела УТП предпочесть заголовок раздела, а не упоминание в теме."""
+
+    if len(candidates) < 2 or not _looks_like_utp_section(topic):
+        return candidates
+    headings = [item for item in candidates if _looks_like_section_heading(item)]
+    return headings or candidates
+
+
+def _is_embedded_title_mention(section_title: str, item_title: str) -> bool:
+    """Короткое имя раздела упомянуто внутри другой (часто вводной) темы."""
+
+    core = normalize_title(_heading_core(section_title))
+    item_core = normalize_title(_heading_core(item_title))
+    if not core or not item_core or core == item_core:
+        return False
+    if core not in item_core:
+        return False
+    quoted = re.findall(r"[«\"']([^»\"]+)[»\"']", item_title)
+    if any(
+        normalize_title(_heading_core(part)) == core or normalize_title(part) == core
+        for part in quoted
+    ):
+        return True
+    return len(core.split()) >= 2
 
 
 def _ordered_tokens(value: str) -> tuple[str, ...]:
@@ -278,6 +335,10 @@ def _sections_compatible(topic_section: str | None, item_section: str | None) ->
         return True
     if normalize_title(topic_section) == normalize_title(item_section):
         return True
+    if normalize_title(_heading_core(topic_section)) == normalize_title(
+        _heading_core(item_section)
+    ):
+        return True
     topic_tokens = _title_tokens(topic_section)
     item_tokens = _title_tokens(item_section)
     return bool(topic_tokens and item_tokens) and (
@@ -355,29 +416,59 @@ def match_position(
         if _sections_compatible(topic.parent_section, item.parent_section)
     ]
     exact = [item for item in sectioned if item.title.strip() == topic.title.strip()]
+    if not exact:
+        core_raw = _heading_core(topic.title).strip()
+        exact = [
+            item
+            for item in sectioned
+            if core_raw and _heading_core(item.title).strip() == core_raw
+        ]
     if exact:
-        return _choose_unique(topic, exact, MatchStatus.EXACT, 1.0)
+        return _choose_unique(
+            topic,
+            _prefer_section_heading(topic, exact),
+            MatchStatus.EXACT,
+            1.0,
+        )
 
     normalized_topic = normalize_title(topic.title)
+    topic_core = normalize_title(_heading_core(topic.title))
     normalized = [
-        item for item in sectioned if normalize_title(item.title) == normalized_topic
+        item
+        for item in sectioned
+        if normalize_title(item.title) == normalized_topic
+        or (topic_core and normalize_title(_heading_core(item.title)) == topic_core)
     ]
     if normalized:
-        return _choose_unique(topic, normalized, MatchStatus.NORMALIZED, 0.95)
+        return _choose_unique(
+            topic,
+            _prefer_section_heading(topic, normalized),
+            MatchStatus.NORMALIZED,
+            0.95,
+        )
 
     titled = [
         item
         for item in sectioned
         if _titles_confirmed(topic.title, item.title)
+        or _titles_confirmed(_heading_core(topic.title), _heading_core(item.title))
     ]
     if titled:
+        preferred = _prefer_section_heading(topic, titled)
+        heading_preferred = [
+            item for item in preferred if _looks_like_section_heading(item)
+        ]
+        if _looks_like_utp_section(topic) and heading_preferred:
+            return _choose_unique(
+                topic, heading_preferred, MatchStatus.TEXT_MATCH, 0.85
+            )
         if topic.number:
-            numbered_titled = [item for item in titled if item.number == topic.number]
+            numbered_titled = [item for item in preferred if item.number == topic.number]
             if numbered_titled:
                 return _choose_unique(
                     topic, numbered_titled, MatchStatus.TEXT_MATCH, 0.85
                 )
-        return _choose_unique(topic, titled, MatchStatus.TEXT_MATCH, 0.85)
+        return _choose_unique(topic, preferred, MatchStatus.TEXT_MATCH, 0.85)
 
     if topic.number:
         numbered = [item for item in sectioned if item.number == topic.number]
@@ -388,6 +479,10 @@ def match_position(
         item
         for item in sectioned
         if _titles_similar(topic.title, item.title)
+        and not (
+            _looks_like_utp_section(topic)
+            and _is_embedded_title_mention(topic.title, item.title)
+        )
     ]
     if similar:
         return ContentMatch(

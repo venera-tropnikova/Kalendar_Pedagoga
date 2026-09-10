@@ -186,6 +186,56 @@ def test_single_token_containment_is_not_title_proof():
         assert match.utp_position.hours == Hours(2, 1, 1)
 
 
+def test_utp_section_heading_matches_when_program_numbers_differ():
+    topic = Topic("5", "Основы лазания", Hours(30, 4, 26), "Основы лазания", True)
+    heading = _item("4", "Основы лазания", "Техника передвижения.", "Основы лазания")
+    match = match_position(topic, (heading,))
+    assert match.status is MatchStatus.EXACT
+    assert bound_program_item(match) is heading
+    assert "Техника передвижения." in match.program_item.content
+
+
+def test_utp_section_prefers_section_heading_over_intro_mention():
+    from calendar_pedagoga.match_review import is_disputed_match, unresolved_disputed
+
+    topic = Topic("5", "Основы лазания", Hours(30, 4, 26), "Основы лазания", True)
+    intro = _item(
+        "5",
+        "Тема: Цели и задачи программы «Основы лазания»",
+        "Вводный инструктаж и цели.",
+        None,
+    )
+    heading = _item(
+        "4",
+        "Раздел 4. Основы лазания",
+        "Тема 1. Основы технической подготовки. Передвижение по рельефу.",
+        "Основы лазания",
+    )
+    match = match_utp_to_program((topic,), (intro, heading))[0]
+    assert bound_program_item(match) is heading
+    assert match.status is MatchStatus.EXACT
+    assert "технической подготовки" in match.program_item.content
+    assert not is_disputed_match(match)
+    assert unresolved_disputed((match,), {}) == ()
+
+
+def test_utp_section_intro_mention_is_not_a_disputed_candidate():
+    from calendar_pedagoga.match_review import is_disputed_match
+
+    topic = Topic("5", "Основы лазания", Hours(30, 4, 26), "Основы лазания", True)
+    intro = _item(
+        None,
+        "Тема: Цели и задачи программы «Основы лазания»",
+        "Цели программы.",
+        None,
+    )
+    match = match_position(topic, (intro,))
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(match) is None
+    assert match.ambiguous_candidates == ()
+    assert not is_disputed_match(match)
+
+
 def test_shared_generic_word_is_not_title_proof():
     topic = _topic("3.1", "Виды туризма", "Туризм")
     item = _item("3.9", "Пеший туризм", "Техника движения.", "Туризм")

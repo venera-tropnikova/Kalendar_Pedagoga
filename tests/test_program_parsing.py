@@ -87,6 +87,27 @@ def test_parse_program_docx_preserves_source_wording() -> None:
     assert result.attestation_statements == ()
 
 
+def test_unbolded_section_heading_becomes_content_item() -> None:
+    document = Document()
+    document.add_paragraph("Содержание программы")
+    intro = document.add_paragraph()
+    intro.add_run("Тема: Цели и задачи программы «Основы лазания»").bold = True
+    document.add_paragraph("Теория. Цели и задачи.")
+    document.add_paragraph("Раздел 4. Основы лазания")
+    document.add_paragraph("Тема 1. Основы технической подготовки")
+    document.add_paragraph("Передвижение по рельефу и работа ног.")
+    stream = BytesIO()
+    document.save(stream)
+    result = parse_program_docx(stream.getvalue())
+    section = next(item for item in result.content_items if item.title == "Основы лазания")
+    assert section.number == "4"
+    assert "технической подготовки" in section.content
+    intro_item = next(
+        item for item in result.content_items if "Цели и задачи" in item.title
+    )
+    assert "технической подготовки" not in intro_item.content
+
+
 def test_attestation_extracted_only_from_explicit_phrase() -> None:
     assert extract_attestation_statements(
         "Ожидаемые результаты:\nобучающийся знает правила."
