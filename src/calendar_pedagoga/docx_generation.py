@@ -1241,6 +1241,7 @@ def _enrich_diagnosis(diagnosis, rows: tuple[ResolvedLessonRow, ...]):
         result_len=result_len,
         control_len=control_len,
         detail=diagnosis.detail,
+        snapshots=getattr(diagnosis, "snapshots", ()),
     )
 
 

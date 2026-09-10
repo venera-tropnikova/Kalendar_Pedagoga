@@ -259,6 +259,74 @@ def test_pdf_mismatch_records_overflow_diagnosis(monkeypatch):
     assert diagnosis.field == "THEORY"
 
 
+def test_tables_zero_records_failing_and_last_success_page_snapshots(monkeypatch):
+    import pymupdf
+
+    class Pixmap:
+        def tobytes(self, _fmt):
+            return b"PNGPAGE"
+
+    def make_page(*, rows, table_count, text, drawings):
+        table = SimpleNamespace(col_count=3, extract=lambda rows=rows: [[], []] + rows)
+        found = [] if table_count == 0 else [table]
+        return SimpleNamespace(
+            find_tables=lambda found=found: SimpleNamespace(tables=found),
+            get_text=lambda: text,
+            get_drawings=lambda: [{}] * drawings,
+            rect=SimpleNamespace(width=595.0, height=842.0),
+            get_pixmap=lambda **kwargs: Pixmap(),
+        )
+
+    pages = [
+        make_page(
+            rows=[['Month', '19', 'abcdef'], ['Month', '20', 'gh']],
+            table_count=1,
+            text="19 20 abcdef gh",
+            drawings=4,
+        ),
+        make_page(rows=[], table_count=0, text="footer only", drawings=1),
+    ]
+
+    class Pdf:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            yield from pages
+
+    monkeypatch.setattr(pymupdf, "open", lambda **kwargs: Pdf())
+    assert qa._data_row_page_layout_pdf(_source(), b"pdf", 2) is None
+    diagnosis = qa.page_layout_diagnosis()
+    assert diagnosis is not None
+    assert diagnosis.reason == "spans is None"
+    assert diagnosis.detail == "tables=0"
+    assert diagnosis.page_after == 2
+    assert [snapshot.role for snapshot in diagnosis.snapshots] == [
+        "last_success",
+        "failing",
+    ]
+    success, failing = diagnosis.snapshots
+    assert success.page_number == 1
+    assert success.tables == 1
+    assert success.tables_matching == 1
+    assert success.drawings == 4
+    assert success.last_week_present is True
+    assert failing.page_number == 2
+    assert failing.tables == 0
+    assert failing.tables_matching == 0
+    assert failing.drawings == 1
+    assert failing.extracted_text == "footer only"
+    assert failing.last_week_present is False
+    assert failing.width == 595.0
+    assert failing.height == 842.0
+    assert failing.png == b"PNGPAGE"
+    assert "last_week=NO" in diagnosis.as_message()
+    assert "page 1 (last_success)" in diagnosis.as_message()
+
+
 def test_month_label_verification_uses_one_consistent_render(monkeypatch):
     word_calls = []
     libreoffice_calls = []

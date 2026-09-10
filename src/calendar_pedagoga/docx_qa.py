@@ -675,6 +675,40 @@ class DataRowPageLayout:
 
 
 @dataclass(frozen=True)
+class PagePdfSnapshot:
+    """Rendered PDF page captured only after page-segment already failed."""
+
+    page_number: int
+    role: str
+    extracted_text: str
+    drawings: int | None = None
+    tables: int | None = None
+    tables_matching: int | None = None
+    width: float | None = None
+    height: float | None = None
+    last_week_present: bool | None = None
+    png: bytes = b""
+
+    def as_message(self) -> str:
+        size = (
+            "—"
+            if self.width is None or self.height is None
+            else f"{self.width:.0f}x{self.height:.0f}"
+        )
+        last_week = (
+            "—"
+            if self.last_week_present is None
+            else ("YES" if self.last_week_present else "NO")
+        )
+        return (
+            f"page {self.page_number} ({self.role}): "
+            f"text_len={len(self.extracted_text)} drawings={self.drawings} "
+            f"tables={self.tables} matching={self.tables_matching} "
+            f"size={size} last_week={last_week}"
+        )
+
+
+@dataclass(frozen=True)
 class PageLayoutDiagnosis:
     """Exact failing calendar row for page-segment QA; never used to pass QA."""
 
@@ -688,6 +722,7 @@ class PageLayoutDiagnosis:
     result_len: int | None = None
     control_len: int | None = None
     detail: str = ""
+    snapshots: tuple[PagePdfSnapshot, ...] = ()
 
     def as_message(self) -> str:
         week = "—" if self.logical_week is None else str(self.logical_week)
@@ -695,6 +730,7 @@ class PageLayoutDiagnosis:
         page_before = "—" if self.page_before is None else str(self.page_before)
         page_after = "—" if self.page_after is None else str(self.page_after)
         field = self.field or "—"
+        extra = " ".join(snapshot.as_message() for snapshot in self.snapshots)
         return (
             "page-segment diagnostics: "
             f"week={week} row={row} page={page_before}→{page_after} "
@@ -702,6 +738,7 @@ class PageLayoutDiagnosis:
             f"TYPE_len={self.type_len} RESULT_len={self.result_len} "
             f"CONTROL_len={self.control_len}"
             + (f" ({self.detail})" if self.detail else "")
+            + (f" | {extra}" if extra else "")
         )
 
 
@@ -760,6 +797,72 @@ def _longest_triad_field(cells: list[str]) -> str | None:
     return max(triad, key=triad.get)
 
 
+def _last_week_on_page(text: str, last_week_cell: str) -> bool:
+    folded = (text or "").replace("\u00a0", " ")
+    if not folded.strip() or not (last_week_cell or "").strip():
+        return False
+    week = _week_from_week_cell(last_week_cell)
+    if week is not None and re.search(rf"(?<!\d){week}(?!\d)", folded):
+        return True
+    compact_cell = "".join(char for char in last_week_cell.casefold() if char.isalnum())
+    compact_page = "".join(char for char in folded.casefold() if char.isalnum())
+    return bool(compact_cell) and compact_cell in compact_page
+
+
+def _snapshot_pdf_page(
+    page,
+    page_number: int,
+    *,
+    role: str,
+    last_week_cell: str,
+    expected_columns: int,
+) -> PagePdfSnapshot:
+    try:
+        extracted = page.get_text() or ""
+    except Exception:
+        extracted = ""
+    try:
+        drawings = len(page.get_drawings())
+    except Exception:
+        drawings = None
+    tables = tables_matching = None
+    try:
+        found = list(page.find_tables().tables)
+        tables = len(found)
+        tables_matching = sum(
+            1 for table in found if getattr(table, "col_count", None) == expected_columns
+        )
+    except Exception:
+        pass
+    width = height = None
+    try:
+        rect = page.rect
+        width = float(rect.width)
+        height = float(rect.height)
+    except Exception:
+        pass
+    png = b""
+    try:
+        import pymupdf
+
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
+        png = pixmap.tobytes("png")
+    except Exception:
+        png = b""
+    return PagePdfSnapshot(
+        page_number=page_number,
+        role=role,
+        extracted_text=extracted,
+        drawings=drawings,
+        tables=tables,
+        tables_matching=tables_matching,
+        width=width,
+        height=height,
+        last_week_present=_last_week_on_page(extracted, last_week_cell),
+        png=png,
+    )
+
+
 def _slice_by_normalized_lengths(text: str, lengths: list[int]) -> tuple[str, ...] | None:
     """Partition *text* exactly at alphanumeric PDF-match boundaries."""
 
@@ -813,6 +916,10 @@ def _data_row_page_layout_pdf(
         })
         merged_rows.append(bool(row._tr.xpath('.//w:vMerge')))
 
+    last_week_cell = (
+        source_cells[-1][1] if source_cells and len(source_cells[-1]) > 1 else ""
+    )
+
     def fail(
         reason: str,
         *,
@@ -821,6 +928,7 @@ def _data_row_page_layout_pdf(
         page_after: int | None = None,
         field: str | None = None,
         detail: str = "",
+        snapshots: tuple[PagePdfSnapshot, ...] = (),
     ):
         cells = source_cells[row] if row is not None and 0 <= row < len(source_cells) else []
         type_len, result_len, control_len = _triad_lengths(cells) if cells else (None, None, None)
@@ -839,6 +947,7 @@ def _data_row_page_layout_pdf(
                 result_len=result_len,
                 control_len=control_len,
                 detail=detail,
+                snapshots=snapshots,
             )
         )
         return None
@@ -851,18 +960,43 @@ def _data_row_page_layout_pdf(
     start_page = None
     complete_identifiers: set[int] = set()
     fragments: list[tuple[int, list[str]]] = []
+    last_success_page = None
+    last_success_number: int | None = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
             tables = [table for table in page.find_tables().tables
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
+                snapshots: list[PagePdfSnapshot] = []
+                if last_success_page is not None and last_success_number is not None:
+                    snapshots.append(
+                        _snapshot_pdf_page(
+                            last_success_page,
+                            last_success_number,
+                            role="last_success",
+                            last_week_cell=last_week_cell,
+                            expected_columns=len(source.columns),
+                        )
+                    )
+                snapshots.append(
+                    _snapshot_pdf_page(
+                        page,
+                        page_number,
+                        role="failing",
+                        last_week_cell=last_week_cell,
+                        expected_columns=len(source.columns),
+                    )
+                )
                 return fail(
                     "spans is None",
                     row=len(layouts),
                     page_before=start_page,
                     page_after=page_number,
                     detail=f"tables={len(tables)}",
+                    snapshots=tuple(snapshots),
                 )
+            last_success_page = page
+            last_success_number = page_number
             for fragment in tables[0].extract()[2:]:
                 if len(layouts) >= total_rows:
                     return fail(

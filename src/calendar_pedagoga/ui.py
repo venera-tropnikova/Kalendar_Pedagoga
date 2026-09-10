@@ -144,7 +144,7 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
         "calendar_download", "calendar_warnings", "calendar_ai_usage",
         "calendar_generation_pending", "calendar_generation_error",
         "calendar_generation_succeeded", "calendar_resolved_lessons",
-        "calendar_plan_snapshot",
+        "calendar_plan_snapshot", "calendar_page_segment_snapshots",
     )
     if any(st.session_state.get(key) for key in keys):
         st.session_state["calendar_generation_invalidated"] = True
@@ -184,6 +184,7 @@ def _reset_analysis_state() -> None:
         "calendar_generation_succeeded",
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
+        "calendar_page_segment_snapshots",
         "calendar_context",
         "match_reviews",
         "match_reviews_scope",
@@ -2875,6 +2876,7 @@ def _invalidate_generated_plan() -> None:
         "calendar_generation_succeeded",
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
+        "calendar_page_segment_snapshots",
     ):
         st.session_state.pop(key, None)
     if had_result:
@@ -3455,6 +3457,14 @@ def _execute_calendar_generation(
             _set_work_status(_STATUS_READY)
     except (PipelineError, ScheduleValidationError, ValueError) as error:
         st.session_state["calendar_generation_error"] = str(error)
+        from calendar_pedagoga.docx_qa import page_layout_diagnosis
+
+        diagnosis = page_layout_diagnosis()
+        snapshots = getattr(diagnosis, "snapshots", ()) if diagnosis is not None else ()
+        if snapshots:
+            st.session_state["calendar_page_segment_snapshots"] = snapshots
+        else:
+            st.session_state.pop("calendar_page_segment_snapshots", None)
         _set_work_status("")
     else:
         st.session_state["calendar_generation_succeeded"] = True
@@ -3507,6 +3517,7 @@ def _show_generation_controls(
         st.session_state.pop("calendar_generation_succeeded", None)
         st.session_state.pop("calendar_resolved_lessons", None)
         st.session_state.pop("calendar_plan_snapshot", None)
+        st.session_state.pop("calendar_page_segment_snapshots", None)
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
@@ -3529,6 +3540,41 @@ def _show_generation_controls(
     _show_generation_result()
 
 
+def _show_page_segment_snapshots() -> None:
+    snapshots = st.session_state.get("calendar_page_segment_snapshots") or ()
+    if not snapshots:
+        return
+    st.markdown("**Диагностика page-segment PDF**")
+    for snapshot in snapshots:
+        title = (
+            "последняя страница с найденной таблицей"
+            if snapshot.role == "last_success"
+            else "страница без подходящей таблицы"
+        )
+        size = (
+            "—"
+            if snapshot.width is None or snapshot.height is None
+            else f"{snapshot.width:.0f}×{snapshot.height:.0f}"
+        )
+        last_week = (
+            "—"
+            if snapshot.last_week_present is None
+            else ("YES" if snapshot.last_week_present else "NO")
+        )
+        with st.expander(f"PDF page {snapshot.page_number}: {title}", expanded=True):
+            st.text(
+                f"extracted text length: {len(snapshot.extracted_text)}\n"
+                f"drawings: {snapshot.drawings}\n"
+                f"tables: {snapshot.tables}\n"
+                f"tables matching columns: {snapshot.tables_matching}\n"
+                f"page size: {size}\n"
+                f"W last week on page: {last_week}"
+            )
+            st.text(snapshot.extracted_text or "(no extracted text)")
+            if snapshot.png:
+                st.image(snapshot.png, caption=f"PDF page {snapshot.page_number}")
+
+
 @st.fragment(run_every="2s")
 def _show_generation_result() -> None:
     inputs = st.session_state.get("calendar_generation_inputs", "")
@@ -3539,6 +3585,7 @@ def _show_generation_result() -> None:
     generation_error = st.session_state.get("calendar_generation_error")
     if generation_error:
         st.error(f"Не удалось сформировать календарный план: {generation_error}")
+        _show_page_segment_snapshots()
 
     download = st.session_state.get("calendar_download")
     if download is not None and not generation_error:
@@ -3707,6 +3754,7 @@ def run_app() -> None:
             st.session_state.pop("calendar_generation_succeeded", None)
             st.session_state.pop("calendar_resolved_lessons", None)
             st.session_state.pop("calendar_plan_snapshot", None)
+            st.session_state.pop("calendar_page_segment_snapshots", None)
             st.session_state.pop("calendar_generation_invalidated", None)
             st.session_state["calendar_generate_after_check"] = True
             st.session_state["ui_edit_inputs"] = False
