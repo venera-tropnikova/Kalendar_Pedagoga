@@ -188,6 +188,8 @@ def _reset_analysis_state() -> None:
         "match_reviews",
         "match_reviews_scope",
         "calendar_generate_after_check",
+        "calendar_check_pending",
+        "calendar_check_error",
         "calendar_busy",
         "calendar_work_status",
     ):
@@ -2585,6 +2587,7 @@ def _form_is_open() -> bool:
 def _open_input_form() -> None:
     st.session_state["ui_edit_inputs"] = True
     st.session_state.pop("calendar_generate_after_check", None)
+    _clear_work_busy()
     _invalidate_generated_plan()
     st.rerun()
 
@@ -2666,6 +2669,8 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
             )
         st.markdown("</div>", unsafe_allow_html=True)
         fields = _render_upload_fields()
+        _refresh_generation_inputs(*fields)
+        _clear_stale_calendar_busy()
         st.markdown('<div class="kp-form-actions"></div>', unsafe_allow_html=True)
         st.markdown('<div class="kp-check-slot"></div>', unsafe_allow_html=True)
         check_clicked = st.button(
@@ -2674,6 +2679,9 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
             use_container_width=True,
             disabled=bool(st.session_state.get("calendar_busy")),
         )
+        work_status = str(st.session_state.get("calendar_work_status") or "").strip()
+        if form_open and st.session_state.get("calendar_busy") and work_status:
+            st.info(work_status)
         if not st.session_state.get("analysis_ready") or form_open:
             _render_year_calendar_card(str(fields[3]), owner="inputs")
         _render_normative_panel()
@@ -2838,6 +2846,30 @@ def _work_status_block(slot, label: str) -> Iterator[object]:
 def _clear_work_busy() -> None:
     st.session_state["calendar_busy"] = False
     st.session_state.pop("calendar_work_status", None)
+    st.session_state.pop("calendar_check_pending", None)
+
+
+def _work_is_in_flight() -> bool:
+    return bool(
+        st.session_state.get("calendar_check_pending")
+        or st.session_state.get("calendar_generate_after_check")
+    )
+
+
+def _clear_stale_calendar_busy() -> None:
+    if not st.session_state.get("calendar_busy"):
+        return
+    if _work_is_in_flight():
+        return
+    if not _form_is_open():
+        return
+    _clear_work_busy()
+
+
+def _abort_document_check(message: str) -> None:
+    st.session_state["calendar_check_error"] = message
+    _clear_work_busy()
+    st.rerun()
 
 
 def _match_review_scope_from_uploads(
@@ -3498,7 +3530,7 @@ def _show_generation_controls(
     )
     if generate_blocked or has_error or generated:
         if not should_generate:
-            st.session_state["calendar_busy"] = False
+            _clear_work_busy()
     if should_generate:
         st.session_state["calendar_generate_after_check"] = False
         st.session_state["calendar_busy"] = True
@@ -3575,10 +3607,9 @@ def run_app() -> None:
         check_clicked,
     ) = _render_upload_screen()
 
-    _refresh_generation_inputs(
-        utp_file, program_file, organization_template_file,
-        academic_year, group_number, class_name, teacher_name,
-    )
+    check_error = st.session_state.get("calendar_check_error")
+    if check_error and not st.session_state.get("calendar_busy"):
+        st.error(check_error)
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
 
@@ -3589,9 +3620,16 @@ def run_app() -> None:
         if program_file is None:
             st.error("Загрузите программу обучения.")
             return
-
+        st.session_state.pop("calendar_check_error", None)
         st.session_state["calendar_busy"] = True
+        st.session_state["calendar_check_pending"] = True
         _set_work_status(_STATUS_CHECK_DOCS)
+        st.rerun()
+
+    if st.session_state.get("calendar_check_pending"):
+        if program_file is None:
+            _abort_document_check("Загрузите программу обучения.")
+            return
         with _work_status_block(status_slot, _STATUS_CHECK_DOCS) as check_status:
             with TransientDocumentSession() as uploads:
                 uploads.replace(
@@ -3637,12 +3675,10 @@ def run_app() -> None:
                     )
                     resolved_utp = resolve_utp(validated_utp_upload, validated_program)
                 except UploadValidationError as error:
-                    _clear_work_busy()
-                    st.error(str(error))
+                    _abort_document_check(str(error))
                     return
                 except UtpResolutionError as error:
-                    _clear_work_busy()
-                    st.error(str(error))
+                    _abort_document_check(str(error))
                     return
 
             template_selection = select_calendar_template()
@@ -3653,8 +3689,7 @@ def run_app() -> None:
                         validated_template.content,
                     )
                 except OrganizationTemplateError:
-                    _clear_work_busy()
-                    st.error(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
+                    _abort_document_check(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
                     return
 
             validated_utp = ValidatedUpload(
@@ -3687,8 +3722,9 @@ def run_app() -> None:
             try:
                 build_schedule(utp, academic_year)
             except (ScheduleValidationError, ValueError) as error:
-                _clear_work_busy()
-                st.error(f"Не удалось построить календарное распределение: {error}")
+                _abort_document_check(
+                    f"Не удалось построить календарное распределение: {error}"
+                )
                 return
 
             _store_analysis_context(
@@ -3708,10 +3744,12 @@ def run_app() -> None:
             st.session_state.pop("calendar_resolved_lessons", None)
             st.session_state.pop("calendar_plan_snapshot", None)
             st.session_state.pop("calendar_generation_invalidated", None)
+            st.session_state.pop("calendar_check_error", None)
             st.session_state["calendar_generate_after_check"] = True
             st.session_state["ui_edit_inputs"] = False
             check_status.update(label=_STATUS_BUILD_PLAN, state="running")
             _set_work_status(_STATUS_BUILD_PLAN)
+        st.session_state.pop("calendar_check_pending", None)
         st.rerun()
 
     if (
@@ -3777,6 +3815,9 @@ def run_app() -> None:
                 lessons,
             )
             st.session_state["analysis_warnings"] = detail_warnings
+
+        if unresolved_disputed(matches, reviews):
+            _clear_work_busy()
 
         _render_teacher_analysis_screen(
             utp=utp,

@@ -150,6 +150,14 @@ def _analysis_ready(app: AppTest) -> bool:
     return "analysis_ready" in app.session_state and bool(app.session_state["analysis_ready"])
 
 
+def _session_flag(app: AppTest, key: str) -> bool:
+    return key in app.session_state and bool(app.session_state[key])
+
+
+def _has_info(app: AppTest, text: str) -> bool:
+    return any(text in (item.value or "") for item in getattr(app, "info", []))
+
+
 def _check_button(app: AppTest):
     return next(button for button in app.button if button.label == "Проверить документы")
 
@@ -872,8 +880,69 @@ def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
 def test_check_button_disabled_while_busy() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
     app.session_state["calendar_busy"] = True
+    app.session_state["calendar_generate_after_check"] = True
     app.run()
     assert _check_button(app).disabled
+
+
+def test_check_button_enabled_for_required_and_optional_uploads() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    program = _program_file()
+    utp = _utp_file()
+    template = _template_file()
+
+    _upload(app, 0, program)
+    app.run()
+    assert not _check_button(app).disabled
+
+    _upload(app, 1, utp)
+    app.run()
+    assert not _check_button(app).disabled
+    assert not _has_info(app, "Проверяем документы…")
+
+    _upload(app, 2, template)
+    app.run()
+    assert not _check_button(app).disabled
+    assert not _session_flag(app, "calendar_busy")
+
+
+def test_check_status_visible_while_in_flight() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    app.session_state["calendar_busy"] = True
+    app.session_state["calendar_generate_after_check"] = True
+    app.session_state["calendar_work_status"] = "Проверяем документы…"
+    app.run()
+    assert _check_button(app).disabled
+    assert _has_info(app, "Проверяем документы…")
+
+
+def test_check_error_reenables_button() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload(app, 0, _program_file())
+    _upload_bytes(app, 1, "wrong-utp.docx", _non_utp_docx())
+    app.run()
+    _check_button(app).click().run()
+    assert not app.exception
+    assert app.error
+    assert not _check_button(app).disabled
+    assert not _session_flag(app, "calendar_busy")
+    assert not _session_flag(app, "calendar_check_pending")
+
+
+def test_file_change_clears_stale_busy_and_enables_check() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload(app, 0, _program_file())
+    app.run()
+    app.session_state["calendar_busy"] = True
+    app.session_state["calendar_work_status"] = "Проверяем документы…"
+    _upload(app, 1, _utp_file())
+    app.run()
+    assert not app.exception
+    assert not _check_button(app).disabled
+    assert not _session_flag(app, "calendar_busy")
+    assert not _has_info(app, "Проверяем документы…")
 
 
 def test_second_click_while_busy_does_not_start_another_generation() -> None:
@@ -1035,6 +1104,8 @@ def test_year_conflict_block_does_not_generate() -> None:
 
     assert not app.exception
     assert any("противоречат" in (item.value or "") for item in app.error)
+    assert not _check_button(app).disabled
+    assert not _session_flag(app, "calendar_busy")
     assert len(app.get("download_button")) == 0
     assert not _generate_buttons(app)
     assert "calendar_download" not in app.session_state
