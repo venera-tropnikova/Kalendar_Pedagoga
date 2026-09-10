@@ -1187,6 +1187,113 @@ def _populate_calendar_table(
     return table, columns, months
 
 
+def _lesson_at(rows: tuple[ResolvedLessonRow, ...], *, week: int | None, index: int | None):
+    for row in rows:
+        if row is None:
+            continue
+        source = getattr(row, "source", None)
+        calendar = getattr(source, "source", None) if source is not None else None
+        if week is not None and getattr(calendar, "week_number", None) == week:
+            return row
+    if index is not None and 0 <= index < len(rows) and rows[index] is not None:
+        return rows[index]
+    return None
+
+
+def _lesson_triad_lengths(lesson: ResolvedLessonRow) -> tuple[int, int, int]:
+    return (
+        len(lesson.lesson_type or ""),
+        len(lesson.planned_result or ""),
+        len(lesson.assessment_method or ""),
+    )
+
+
+def _longest_lesson_field(lesson: ResolvedLessonRow) -> str:
+    lengths = {
+        "TYPE": len(lesson.lesson_type or ""),
+        "RESULT": len(lesson.planned_result or ""),
+        "CONTROL": len(lesson.assessment_method or ""),
+    }
+    return max(lengths, key=lengths.get)
+
+
+def _enrich_diagnosis(diagnosis, rows: tuple[ResolvedLessonRow, ...]):
+    from calendar_pedagoga.docx_qa import PageLayoutDiagnosis
+
+    lesson = _lesson_at(rows, week=diagnosis.logical_week, index=diagnosis.physical_row)
+    if lesson is None:
+        return diagnosis
+    week = diagnosis.logical_week
+    if week is None:
+        source = getattr(lesson, "source", None)
+        calendar = getattr(source, "source", None) if source is not None else None
+        week = getattr(calendar, "week_number", None)
+    type_len, result_len, control_len = _lesson_triad_lengths(lesson)
+    field = diagnosis.field or _longest_lesson_field(lesson)
+    return PageLayoutDiagnosis(
+        reason=diagnosis.reason,
+        logical_week=week,
+        physical_row=diagnosis.physical_row,
+        page_before=diagnosis.page_before,
+        page_after=diagnosis.page_after,
+        field=field,
+        type_len=type_len,
+        result_len=result_len,
+        control_len=control_len,
+        detail=diagnosis.detail,
+    )
+
+
+def _page_segment_failure_message(
+    spans,
+    continuation_rows: frozenset[int],
+    rows: tuple[ResolvedLessonRow, ...],
+    layouts,
+) -> str:
+    from calendar_pedagoga.docx_qa import PageLayoutDiagnosis, page_layout_diagnosis
+
+    recorded = page_layout_diagnosis()
+    if spans is None:
+        diagnosis = recorded or PageLayoutDiagnosis(reason="spans is None")
+        return _enrich_diagnosis(diagnosis, rows).as_message()
+
+    physical_to_logical: list[int] = []
+    for logical_index, layout in enumerate(layouts):
+        physical_to_logical.extend([logical_index] * len(layout.segments))
+
+    for index, span in enumerate(spans):
+        overflow = span.start_page != span.end_page
+        unsafe = index in continuation_rows and not span.split_safe
+        if not overflow and not unsafe:
+            continue
+        reason = "!split_safe" if unsafe else "overflow"
+        logical = physical_to_logical[index] if index < len(physical_to_logical) else index
+        lesson = rows[logical] if 0 <= logical < len(rows) else None
+        if lesson is not None and getattr(lesson, "source", None) is None:
+            lesson = None
+        week = lesson.source.source.week_number if lesson is not None else None
+        type_len = result_len = control_len = None
+        field = None
+        if lesson is not None:
+            type_len, result_len, control_len = _lesson_triad_lengths(lesson)
+            field = _longest_lesson_field(lesson)
+        diagnosis = PageLayoutDiagnosis(
+            reason=reason,
+            logical_week=week,
+            physical_row=index,
+            page_before=span.start_page,
+            page_after=span.end_page,
+            field=field,
+            type_len=type_len,
+            result_len=result_len,
+            control_len=control_len,
+        )
+        return diagnosis.as_message()
+    if recorded is not None:
+        return _enrich_diagnosis(recorded, rows).as_message()
+    return PageLayoutDiagnosis(reason="spans is None").as_message()
+
+
 def _save_document(document) -> bytes:
     buffer = BytesIO()
     document.save(buffer)
@@ -1269,7 +1376,10 @@ def _build_segmented_document(
     ):
         raise ValueError(
             "DOCX не прошёл QA: page-segment не помещается на одной странице "
-            "или его идентификаторы не подтверждены render-проверкой."
+            "или его идентификаторы не подтверждены render-проверкой. "
+            + _page_segment_failure_message(
+                spans, continuation_rows, rows, layouts
+            )
         )
 
     pages: dict[int, list[int]] = {}
@@ -1291,7 +1401,10 @@ def _build_segmented_document(
     ):
         raise ValueError(
             "DOCX не прошёл QA: финальная merge-структура нарушила "
-            "целостность page-segment или его идентификаторов."
+            "целостность page-segment или его идентификаторов. "
+            + _page_segment_failure_message(
+                final_spans, continuation_rows, rows, layouts
+            )
         )
     return output
 
@@ -1370,9 +1483,16 @@ def generate_calendar_docx(
 
     layouts = detect_data_row_page_layout(preview, total_rows=len(rows))
     if layouts is None:
+        from calendar_pedagoga.docx_qa import page_layout_diagnosis
+
+        extra = ""
+        diagnosis = page_layout_diagnosis()
+        if diagnosis is not None:
+            extra = " " + _enrich_diagnosis(diagnosis, rows).as_message()
         raise ValueError(
             "DOCX не прошёл QA: не удалось надёжно определить границы текста "
             "для page-segmentation."
+            + extra
         )
     return _build_segmented_document(
         _load_template(template), utp, rows, layouts, **header

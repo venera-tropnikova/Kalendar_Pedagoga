@@ -248,6 +248,17 @@ def test_pdf_refuses_missing_changed_or_duplicate_content(monkeypatch, fragments
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2) is None
 
 
+def test_pdf_mismatch_records_overflow_diagnosis(monkeypatch):
+    _pdf(monkeypatch, [[['Month', '19', 'wrong']]])
+    assert qa._data_row_page_layout_pdf(_source(), b'pdf', 2) is None
+    diagnosis = qa.page_layout_diagnosis()
+    assert diagnosis is not None
+    assert diagnosis.reason == "overflow"
+    assert diagnosis.logical_week == 19
+    assert diagnosis.physical_row == 0
+    assert diagnosis.field == "THEORY"
+
+
 def test_month_label_verification_uses_one_consistent_render(monkeypatch):
     word_calls = []
     libreoffice_calls = []

@@ -674,6 +674,92 @@ class DataRowPageLayout:
     segments: tuple[DataRowPageSegment, ...]
 
 
+@dataclass(frozen=True)
+class PageLayoutDiagnosis:
+    """Exact failing calendar row for page-segment QA; never used to pass QA."""
+
+    reason: str
+    logical_week: int | None = None
+    physical_row: int | None = None
+    page_before: int | None = None
+    page_after: int | None = None
+    field: str | None = None
+    type_len: int | None = None
+    result_len: int | None = None
+    control_len: int | None = None
+    detail: str = ""
+
+    def as_message(self) -> str:
+        week = "—" if self.logical_week is None else str(self.logical_week)
+        row = "—" if self.physical_row is None else str(self.physical_row)
+        page_before = "—" if self.page_before is None else str(self.page_before)
+        page_after = "—" if self.page_after is None else str(self.page_after)
+        field = self.field or "—"
+        return (
+            "page-segment diagnostics: "
+            f"week={week} row={row} page={page_before}→{page_after} "
+            f"reason={self.reason} field={field} "
+            f"TYPE_len={self.type_len} RESULT_len={self.result_len} "
+            f"CONTROL_len={self.control_len}"
+            + (f" ({self.detail})" if self.detail else "")
+        )
+
+
+_PAGE_LAYOUT_DIAGNOSIS: PageLayoutDiagnosis | None = None
+
+
+def page_layout_diagnosis() -> PageLayoutDiagnosis | None:
+    return _PAGE_LAYOUT_DIAGNOSIS
+
+
+def _set_page_layout_diagnosis(diagnosis: PageLayoutDiagnosis) -> None:
+    global _PAGE_LAYOUT_DIAGNOSIS
+    _PAGE_LAYOUT_DIAGNOSIS = diagnosis
+    logger.info("%s", diagnosis.as_message())
+
+
+def _week_from_week_cell(text: str) -> int | None:
+    first = (text or "").splitlines()[:1]
+    if not first:
+        return None
+    try:
+        return int(first[0].strip())
+    except ValueError:
+        return None
+
+
+def _triad_column_names(column_count: int) -> dict[int, str]:
+    if column_count >= 10:
+        return {5: "TYPE", 7: "RESULT", 9: "CONTROL", 2: "THEORY", 4: "PRACTICE"}
+    if column_count >= 8:
+        return {5: "TYPE", 6: "RESULT", 7: "CONTROL", 2: "THEORY", 4: "PRACTICE"}
+    return {2: "THEORY"}
+
+
+def _triad_lengths(cells: list[str]) -> tuple[int | None, int | None, int | None]:
+    names = _triad_column_names(len(cells))
+    type_i = next((index for index, name in names.items() if name == "TYPE"), None)
+    result_i = next((index for index, name in names.items() if name == "RESULT"), None)
+    control_i = next((index for index, name in names.items() if name == "CONTROL"), None)
+    return (
+        len(cells[type_i]) if type_i is not None and type_i < len(cells) else None,
+        len(cells[result_i]) if result_i is not None and result_i < len(cells) else None,
+        len(cells[control_i]) if control_i is not None and control_i < len(cells) else None,
+    )
+
+
+def _longest_triad_field(cells: list[str]) -> str | None:
+    names = _triad_column_names(len(cells))
+    triad = {
+        name: len(cells[index])
+        for index, name in names.items()
+        if name in {"TYPE", "RESULT", "CONTROL"} and index < len(cells)
+    }
+    if not triad:
+        return None
+    return max(triad, key=triad.get)
+
+
 def _slice_by_normalized_lengths(text: str, lengths: list[int]) -> tuple[str, ...] | None:
     """Partition *text* exactly at alphanumeric PDF-match boundaries."""
 
@@ -697,6 +783,8 @@ def _data_row_page_layout_pdf(
 
     import pymupdf
 
+    global _PAGE_LAYOUT_DIAGNOSIS
+    _PAGE_LAYOUT_DIAGNOSIS = None
     source = Document(BytesIO(content)).tables[0]
 
     def normalized(text):
@@ -724,8 +812,39 @@ def _data_row_page_layout_pdf(
             if cell._tc.xpath('./w:tcPr/w:textDirection | ./w:tcPr/w:vMerge')
         })
         merged_rows.append(bool(row._tr.xpath('.//w:vMerge')))
-    if len(expected) != total_rows:
+
+    def fail(
+        reason: str,
+        *,
+        row: int | None = None,
+        page_before: int | None = None,
+        page_after: int | None = None,
+        field: str | None = None,
+        detail: str = "",
+    ):
+        cells = source_cells[row] if row is not None and 0 <= row < len(source_cells) else []
+        type_len, result_len, control_len = _triad_lengths(cells) if cells else (None, None, None)
+        week = _week_from_week_cell(cells[1]) if len(cells) > 1 else None
+        if field is None and cells:
+            field = _longest_triad_field(cells)
+        _set_page_layout_diagnosis(
+            PageLayoutDiagnosis(
+                reason=reason,
+                logical_week=week,
+                physical_row=row,
+                page_before=page_before,
+                page_after=page_after,
+                field=field,
+                type_len=type_len,
+                result_len=result_len,
+                control_len=control_len,
+                detail=detail,
+            )
+        )
         return None
+
+    if len(expected) != total_rows:
+        return fail("spans is None", detail="row count mismatch")
 
     layouts: list[DataRowPageLayout] = []
     accumulated = [""] * len(source.columns)
@@ -737,10 +856,22 @@ def _data_row_page_layout_pdf(
             tables = [table for table in page.find_tables().tables
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
-                return None
+                return fail(
+                    "spans is None",
+                    row=len(layouts),
+                    page_before=start_page,
+                    page_after=page_number,
+                    detail=f"tables={len(tables)}",
+                )
             for fragment in tables[0].extract()[2:]:
                 if len(layouts) >= total_rows:
-                    return None
+                    return fail(
+                        "overflow",
+                        row=total_rows - 1,
+                        page_before=start_page,
+                        page_after=page_number,
+                        detail="extra PDF fragment",
+                    )
                 row_index = len(layouts)
                 target = expected[row_index]
                 protected = protected_columns[row_index]
@@ -749,12 +880,20 @@ def _data_row_page_layout_pdf(
                     if identifier(fragment[column]) == identifiers[row_index][column]:
                         complete_identifiers.add(column)
                 body_columns = set(range(len(target))) - protected
+                names = _triad_column_names(len(target))
                 normalized_fragment = [""] * len(target)
                 for column in body_columns:
                     normalized_fragment[column] = normalized(fragment[column])
                     accumulated[column] += normalized_fragment[column]
                     if not target[column].startswith(accumulated[column]):
-                        return None
+                        return fail(
+                            "overflow",
+                            row=row_index,
+                            page_before=start_page,
+                            page_after=page_number,
+                            field=names.get(column) or f"col{column}",
+                            detail="PDF text left source prefix",
+                        )
                 fragments.append((page_number, normalized_fragment))
                 if not all(accumulated[column] == target[column] for column in body_columns):
                     continue
@@ -766,7 +905,14 @@ def _data_row_page_layout_pdf(
                         [len(item[column]) for _page, item in fragments],
                     )
                     if pieces is None:
-                        return None
+                        return fail(
+                            "overflow",
+                            row=row_index,
+                            page_before=start_page,
+                            page_after=page_number,
+                            field=names.get(column) or f"col{column}",
+                            detail="cannot slice cell onto pages",
+                        )
                     exact_by_column[column] = pieces
                 segments = []
                 for segment_index, (segment_page, _fragment) in enumerate(fragments):
@@ -788,7 +934,12 @@ def _data_row_page_layout_pdf(
                 complete_identifiers = set()
                 fragments = []
     if len(layouts) != total_rows or start_page is not None:
-        return None
+        return fail(
+            "spans is None",
+            row=len(layouts) if len(layouts) < total_rows else total_rows - 1,
+            page_before=start_page,
+            detail="incomplete PDF coverage",
+        )
     return tuple(layouts)
 
 
@@ -805,17 +956,28 @@ def detect_data_row_page_layout(
 ) -> tuple[DataRowPageLayout, ...] | None:
     """Return exact page segments from one renderer, or fail closed."""
 
+    global _PAGE_LAYOUT_DIAGNOSIS
+    _PAGE_LAYOUT_DIAGNOSIS = None
     if total_rows == 0:
         return ()
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
         pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
     if pdf is None:
+        _set_page_layout_diagnosis(
+            PageLayoutDiagnosis(reason="spans is None", detail="pdf convert failed")
+        )
         return None
     try:
         return _data_row_page_layout_pdf(content, pdf, total_rows)
-    except Exception:
+    except Exception as error:
         logger.debug("PDF row-segment measurement unavailable", exc_info=False)
+        _set_page_layout_diagnosis(
+            PageLayoutDiagnosis(
+                reason="spans is None",
+                detail=type(error).__name__,
+            )
+        )
         return None
 
 
