@@ -2407,6 +2407,9 @@ def _inject_landing_styles() -> None:
             display: block !important;
             visibility: visible !important;
             height: auto !important;
+            min-height: 76px !important;
+            margin: 0.75rem 0 1rem !important;
+            padding: 0.9rem 1.1rem !important;
             background: #0867d5 !important;
             border: 1px solid #075bb9 !important;
             border-radius: 10px !important;
@@ -2416,12 +2419,49 @@ def _inject_landing_styles() -> None:
             color: #ffffff !important;
             font-weight: 700 !important;
         }
+        [data-testid="stStatusWidget"] summary,
+        [data-testid="stStatusWidget"] button,
+        [data-testid="stStatusWidget"] p {
+            font-size: 18px !important;
+            line-height: 1.45 !important;
+        }
         [data-testid="stStatusWidget"] svg {
             fill: #ffffff !important;
             stroke: #ffffff !important;
         }
         @keyframes kp-work-spin {
             to { transform: rotate(360deg); }
+        }
+        .kp-live-work-status {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            min-height: 76px;
+            margin: 0.75rem 0 1rem;
+            padding: 1.15rem 1.35rem;
+            background: #0867d5;
+            border: 1px solid #075bb9;
+            border-radius: 10px;
+            box-shadow: 0 8px 20px rgba(8, 103, 213, 0.24);
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1.45;
+        }
+        .kp-live-work-spinner {
+            flex: 0 0 auto;
+            width: 1.15rem;
+            height: 1.15rem;
+            border: 3px solid rgba(255, 255, 255, 0.42);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            animation: kp-work-spin 0.8s linear infinite;
+        }
+        .kp-live-work-done {
+            flex: 0 0 auto;
+            color: #ffffff;
+            font-size: 1.25rem;
+            font-weight: 800;
         }
         [data-testid="stElementContainer"]:has(.kp-work-status-anchor)
         + [data-testid="stElementContainer"] [data-testid="stAlert"],
@@ -2432,7 +2472,11 @@ def _inject_landing_styles() -> None:
             border: 1px solid #075bb9 !important;
             color: #ffffff !important;
             font-weight: 700 !important;
-            padding-left: 3.1rem !important;
+            min-height: 76px !important;
+            margin: 0.75rem 0 1rem !important;
+            padding: 1.15rem 1.2rem 1.15rem 3.6rem !important;
+            font-size: 18px !important;
+            line-height: 1.45 !important;
             box-shadow: 0 8px 20px rgba(8, 103, 213, 0.22) !important;
         }
         [data-testid="stElementContainer"]:has(.kp-work-status-anchor)
@@ -2894,12 +2938,37 @@ def _set_work_status(label: str) -> None:
     st.session_state["calendar_work_status"] = label
 
 
+def _work_status_markup(label: str, *, state: str = "running") -> str:
+    safe_label = html.escape(label)
+    indicator = (
+        '<span class="kp-live-work-spinner" aria-hidden="true"></span>'
+        if state == "running"
+        else '<span class="kp-live-work-done" aria-hidden="true">✓</span>'
+    )
+    return (
+        '<div class="kp-live-work-status" role="status" aria-live="polite">'
+        f"{indicator}<span>{safe_label}</span></div>"
+    )
+
+
+class _WorkStatusWidget:
+    def __init__(self, placeholder) -> None:
+        self._placeholder = placeholder
+
+    def update(self, *, label: str, state: str = "running") -> None:
+        self._placeholder.markdown(
+            _work_status_markup(label, state=state),
+            unsafe_allow_html=True,
+        )
+
+
 @contextmanager
 def _work_status_block(slot, label: str) -> Iterator[object]:
     host = slot.container() if slot is not None else st.container()
     with host:
-        with st.status(label, expanded=True) as widget:
-            yield widget
+        widget = _WorkStatusWidget(st.empty())
+        widget.update(label=label, state="running")
+        yield widget
 
 
 def _clear_work_busy() -> None:

@@ -247,7 +247,7 @@ def test_broken_genitive_plural_conversion_falls_back_to_week_topic() -> None:
     assert "действий страховщик" not in result.planned_result.casefold()
 
 
-def test_broken_genitive_object_after_study_falls_back_to_week_topic() -> None:
+def test_different_objects_keep_only_grounded_practice_action() -> None:
     result = derive_fields_v2(
         topic_title="Взаимодействие спортсмена и страховщика",
         theory_text="",
@@ -263,9 +263,12 @@ def test_broken_genitive_object_after_study_falls_back_to_week_topic() -> None:
         practice_hours=2,
     )
 
+    assert result.lesson_type == "практикум по страховке"
     assert result.planned_result == (
-        "Выполняет практическое задание по теме "
-        "„Взаимодействие спортсмена и страховщика“."
+        "Отрабатывает взаимодействие спортсмена и страховщика."
+    )
+    assert result.assessment_method == (
+        "педагогическое наблюдение за отработкой взаимодействия спортсмена и страховщика"
     )
     assert "голосовых команд" not in result.planned_result.casefold()
 
@@ -511,3 +514,80 @@ def test_docx_uses_source_clause_that_matches_the_week_result() -> None:
     )
 
     assert practice == "Игры на развитие внимания (2)"
+def test_training_nominal_produces_observable_grounded_triad() -> None:
+    result = derive_fields_v2(
+        topic_title="Постановка ног",
+        theory_text="",
+        practice_text="Тренировка постановки ног при помощи игр на равновесие.",
+        program_content="Тренировка постановки ног при помощи игр на равновесие.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert result.lesson_type == "учебно-тренировочное занятие"
+    assert result.planned_result == (
+        "Отрабатывает постановку ног при помощи игр на равновесие."
+    )
+    assert result.assessment_method == (
+        "педагогическое наблюдение за отработкой постановки ног "
+        "при помощи игр на равновесие"
+    )
+
+
+def test_practical_study_of_technique_becomes_observable_rehearsal() -> None:
+    result = derive_fields_v2(
+        topic_title="Техника лазания",
+        theory_text="",
+        practice_text="Изучение техники лазания в упор и распор.",
+        program_content="Изучение техники лазания в упор и распор.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert result.lesson_type == "учебно-тренировочное занятие"
+    assert result.planned_result == "Отрабатывает технику лазания в упор и распор."
+    assert result.assessment_method == "педагогическое наблюдение за техникой лазания"
+
+
+def test_nominal_climbing_actions_keep_concrete_source_activity() -> None:
+    climbing = derive_fields_v2(
+        topic_title="Лазание по активам",
+        theory_text="",
+        practice_text="Лазание по трассам с активными зацепами.",
+        program_content="Лазание по трассам с активными зацепами.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    hangs = derive_fields_v2(
+        topic_title="Висы",
+        theory_text="",
+        practice_text="Висы на зацепках, планках, турнике.",
+        program_content="Висы на зацепках, планках, турнике.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert climbing.lesson_type == "учебно-тренировочное занятие"
+    assert climbing.planned_result == "Выполняет лазание по трассам с активными зацепами."
+    assert climbing.assessment_method == (
+        "педагогическое наблюдение за выполнением лазания по трассам с активными зацепами"
+    )
+    assert hangs.lesson_type == "учебно-тренировочное занятие"
+    assert hangs.planned_result == "Выполняет висы на зацепках, планках, турнике."
+    assert hangs.assessment_method == (
+        "педагогическое наблюдение за выполнением висов на зацепках, планках, турнике"
+    )
+
+def test_compound_diary_product_gets_grounded_product_type() -> None:
+    result = derive_fields_v2(
+        topic_title="Дневник тренировок",
+        theory_text="",
+        practice_text="Составление и ведение дневника тренировок.",
+        program_content="Составление и ведение дневника тренировок.",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert result.lesson_type == "проектно-практическое занятие"
+    assert result.planned_result == "Составляет и ведёт дневник тренировок."
+    assert result.assessment_method == "проверка дневника тренировок"

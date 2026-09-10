@@ -283,7 +283,7 @@ def _strip_punct_word(word: str) -> tuple[str, str, str]:
 
 def _is_adjective(word: str) -> bool:
     core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE)
-    if re.search(r"(?i)(?:ение|ание|яние|ений|аний|яний|ций)$", core):
+    if re.search(r"(?i)(?:ение|ание|яние|ствие|ений|аний|яний|ствий|ций)$", core):
         return False
     if re.search(r"(?i)(?:ностей|телей|ателей)$", core):
         return False
@@ -340,7 +340,7 @@ def _noun_gen_to_acc(word: str) -> str:
         return stem + "и"
     if low.endswith("ения") and len(word) > 5:
         return word[:-1] + "е"
-    if low.endswith("ния") and len(word) > 5:
+    if low.endswith("ия") and len(word) > 5:
         return word[:-1] + "е"
     if low.endswith("ости") and len(word) > 5:
         return word[:-1] + "ь"
@@ -810,7 +810,7 @@ def _is_leading_form_activity(token: str) -> bool:
 # Closed nominal-activity frames: the source names an observable activity NP,
 # but that lemma has no proven finite conjugation. Map only onto verbs that
 # are already in the proven predicate set. Never invent a verb from a suffix.
-_NOMINAL_PERFORM_LEMMAS = frozenset({"закаливание", "катание"})
+_NOMINAL_PERFORM_LEMMAS = frozenset({"висы", "закаливание", "катание", "лазание", "сдача", "тренировка"})
 _ACTIVITY_GLOSS_RE = re.compile(r"\s+[–—−]\s+|\s+-\s+")
 
 
@@ -891,7 +891,27 @@ def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
         )
         return phrase, "помощь", obj, cond
     if lemma in _NOMINAL_PERFORM_LEMMAS:
-        np_words = [_decap_lexical(mod) for mod in mods] + [_decap_lexical(head)]
+        if lemma == "сдача" and re.match(r"(?i)^норматив\w*", remainder):
+            obj_acc, cond = _complements_after_finite(remainder)
+            phrase = "выполняет"
+            if obj_acc:
+                phrase += f" {obj_acc}"
+            if cond:
+                phrase += f" {cond}"
+            obj, _split_cond = _split_object_and_conditions(remainder)
+            return _normalize_spaces(phrase), "выполнение", obj, cond
+        if lemma == "тренировка":
+            obj_acc, cond = _complements_after_finite(remainder)
+            phrase = "отрабатывает"
+            if obj_acc:
+                phrase += f" {obj_acc}"
+            if cond:
+                phrase += f" {cond}"
+            obj, _split_cond = _split_object_and_conditions(remainder)
+            return _normalize_spaces(phrase), "отработка", obj, cond
+        np_words = [_decap_lexical(mod) for mod in mods] + [
+            _decap_lexical(_noun_nom_to_acc(head))
+        ]
         phrase = _append_remainder("выполняет " + " ".join(np_words), remainder)
         obj, cond = _split_object_and_conditions(remainder)
         return phrase, lemma, obj, cond
@@ -917,6 +937,15 @@ def _nominal_activity_result(text: str) -> tuple[str, str, str, str] | None:
     direct = _match_nominal_activity_np(text)
     if direct:
         return direct
+    label, separator, tail = text.partition(":")
+    if (
+        separator
+        and tail.strip()
+        and _line_form_scores(label).get("тестирование", 0) >= 2
+    ):
+        diagnosed = _match_nominal_activity_np(tail.strip())
+        if diagnosed:
+            return diagnosed
     gloss = _ACTIVITY_GLOSS_RE.search(text)
     if gloss:
         tail = text[gloss.end() :].strip(" ,")
@@ -1382,6 +1411,19 @@ def _transform_segment(
         verb = _conjugate_verbal_noun(head)
         if verb:
             remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
+            if (
+                not theory_only
+                and head.casefold() == "изучение"
+                and not re.search(r"(?i)\bи\s+отработ\w*\b", remainder)
+                and re.search(
+                    r"(?i)\b(?:комплекс\w*\s+упражнен|упражнен|техник|"
+                    r"выполнен|при[её]м|страхов|самострах|лазани|движен)\w*",
+                    remainder,
+                )
+            ):
+                # A practical clause with this object proves rehearsal of an
+                # observable technique/action, not only passive acquaintance.
+                verb = "отрабатывает"
             if mods and mods[0].casefold().endswith("ое"):
                 verb = "практически " + verb
             obj_acc, cond = _complements_after_finite(remainder)
@@ -2895,7 +2937,7 @@ def _observation_for_action_verb(verb: str, obj: str) -> str:
     noun = _VERB_TO_VERBAL_NOUN.get(verb)
     if not noun:
         return ""
-    focus = _phrase_to_genitive(obj) if obj else ""
+    focus = _coordinated_phrase_to_genitive(obj) if obj else ""
     return _normalize_spaces(
         f"педагогическое наблюдение за {_verbal_noun_to_instrumental(noun)} {focus}"
     )
@@ -3142,6 +3184,8 @@ def _head_noun_to_genitive(word: str) -> str:
     elif low.endswith("ения") or low.endswith("ания") or low.endswith("яния"):
         changed = core[:-1] + "й"
     elif low.endswith("ение") or low.endswith("ание") or low.endswith("яние"):
+        changed = core[:-1] + "я"
+    elif low.endswith("ие") and len(core) > 3:
         changed = core[:-1] + "я"
     elif low.endswith("ства"):
         changed = core[:-1]
@@ -3685,6 +3729,27 @@ def _practice_activity_type(result: str, clause: str) -> str:
     """Leading practical activity, not a copied CONTROL label."""
     result_low = result.casefold()
     selected = _selected_activity(result, clause)
+    clause_low = clause.casefold().strip()
+    if "норматив" in selected and result_low.startswith("выполняет норматив"):
+        return "тестирование"
+    if "игровой форме" in selected:
+        return "игровое занятие"
+    if re.search(
+        r"(?i)(?:^|\bи\s+)(?:отработка|выполнение|применение|изучение)\s+"
+        r"(?:\w+\s+){0,3}(?:страховк|страховщик|страховочн|самострах)\w*",
+        clause_low,
+    ) or re.match(
+        r"(?i)^(?:надевание|использование)\s+"
+        r"(?:\w+\s+){0,3}страховочн\w*",
+        clause_low,
+    ):
+        return "практикум по страховке"
+    if re.search(r"(?i)\b(?:узл|вязани)\w*", selected):
+        return "практикум по вязанию узлов"
+    if result_low.startswith("составляет и ведёт дневник"):
+        return "проектно-практическое занятие"
+    if re.search(r"(?i)\b(?:лазани|трасс|вис|тактик)\w*", selected):
+        return "учебно-тренировочное занятие"
     if "развертывает" in result_low and any(stem in selected for stem in ("лагер", "бивак")):
         return "практикум по организации бивака"
     if "обязанност" in result_low and "должност" in selected:
@@ -3739,7 +3804,7 @@ def _short_object(text: str, *, keep_first_prep: bool = True) -> str:
         for word in content[:-1]
     ):
         content = content[-1:]
-    return _normalize_spaces(" ".join((*content, *prep_phrase)))
+    return _normalize_spaces(" ".join((*content, *prep_phrase))).strip(" ,;:")
 
 
 def _result_actions(result: str) -> list[tuple[str, str]]:
@@ -3968,6 +4033,14 @@ def _skill_control(result: str) -> str:
         return "педагогическое наблюдение за " + _join_and(parts)
     if len(actions) == 1:
         verb, obj = actions[0]
+        if verb == "выполняет" and "норматив" in obj.casefold():
+            return "тестирование"
+        leading = _nominal_activity_lemma(obj.split()[0]) if obj.split() else ""
+        if verb == "выполняет" and leading in _NOMINAL_PERFORM_LEMMAS:
+            return (
+                "педагогическое наблюдение за выполнением "
+                + _coordinated_phrase_to_genitive(obj)
+            )
         low = obj.casefold()
         if verb == "выполняет" and "обязанност" in low:
             return "педагогическое наблюдение за выполнением " + _phrase_to_genitive(obj)
@@ -4270,6 +4343,9 @@ def type_from_frame(
         if result.startswith(("проводит наблюдения", "проводит краеведческие наблюдения", "наблюдает")):
             return "занятие-наблюдение"
         if result.startswith(("выполняет упражнения", "отрабатывает", "разучивает")):
+            activity_type = _practice_activity_type(planned_result, frame.clause)
+            if activity_type:
+                return activity_type
             if "движени" in result and "местности" in result:
                 return "учебно-тренировочное занятие на местности"
             return "учебно-тренировочное занятие"
@@ -5129,6 +5205,15 @@ def _quality_issue(
     first = result.split()[0].casefold()
     if first not in allowed:
         return "unproven_predicate"
+    broken_genitive_plural = re.match(
+        r"(?i)^(?:изучает|отрабатывает|выполняет|применяет)\s+([а-яё-]+ий)\b",
+        result.rstrip("."),
+    )
+    if broken_genitive_plural and re.search(
+        rf"(?i)\b(?:изучение|отработка|выполнение|применение)\s+{re.escape(broken_genitive_plural.group(1))}\b",
+        clause,
+    ):
+        return "unproven_object_case"
     broken_genitive_object = re.match(
         r"(?i)^изучает\s+([а-яё-]+(?:ых|их))\s+([а-яё-]+)",
         result.rstrip("."),
@@ -5353,7 +5438,9 @@ def _triad_from_selected_frame(
         program_content=selected,
         planned_result=planned_result,
     )
-    control = control_from_frame(
+    control = _control_from_proven_result(planned_result, lesson_type=lesson_type)
+    if not control:
+        control = control_from_frame(
         candidate.frame,
         lesson_type=lesson_type,
         theory_hours=theory_hours,
@@ -5392,6 +5479,19 @@ def _closed_candidate(
         return replace(candidate, planned_result=result, assessment_method=control)
     if issue == "unproven_verb_valency" and re.match(r"(?i)^ориентирование\s+(?:на|по|в)\s", candidate.frame.clause):
         return replace(candidate, planned_result=re.sub(r"(?i)\bориентирует\b", "Ориентируется", candidate.planned_result))
+    if issue == "unproven_object_case":
+        grounded_action = re.search(
+            r"(?i)\bи\s+((?:отработка|выполнение|применение)\s+.+)$",
+            candidate.frame.clause,
+        )
+        if grounded_action:
+            phrase, _action, _object, _conditions = _transform_segment(
+                grounded_action.group(1),
+                theory_only=False,
+                full_source=candidate.frame.clause,
+            )
+            if phrase and _is_finite_result_phrase(phrase):
+                return replace(candidate, planned_result=_cap_sentence(phrase))
     if issue == "unproven_coordinated_predicate":
         salvaged = _salvage_proven_finite_result(candidate.planned_result)
         if salvaged:
@@ -5419,6 +5519,11 @@ def derive_fields_v2(
         program_content=context, theory_hours=theory_hours, practice_hours=practice_hours,
         occurrence_index=occurrence_index, practice_appearance_count=practice_appearance_count,
     )
+    candidate = replace(
+        candidate,
+        planned_result=re.sub(r"(?<=\d)(?=[А-Яа-яЁё])", " ", candidate.planned_result),
+        assessment_method=re.sub(r"(?<=\d)(?=[А-Яа-яЁё])", " ", candidate.assessment_method),
+    )
     grounded_source = f"{context} {topic_title}"
     issue = _quality_issue(candidate.planned_result, candidate.assessment_method,
                            source=grounded_source, clause=candidate.frame.clause)
@@ -5426,7 +5531,11 @@ def derive_fields_v2(
         return candidate
     repaired = _closed_candidate(candidate, issue=issue, topic_title=topic_title, practical=practical)
     if repaired is not None:
-        if issue in {"unproven_coordinated_predicate", "tautological_predicate_object"}:
+        if issue in {
+            "unproven_coordinated_predicate",
+            "unproven_object_case",
+            "tautological_predicate_object",
+        }:
             repaired = _triad_from_selected_frame(
                 repaired,
                 planned_result=repaired.planned_result,
