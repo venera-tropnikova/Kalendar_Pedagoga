@@ -560,8 +560,12 @@ def infer_study_year_number(value: str | None) -> int | None:
     ):
         if token in text:
             return number
-    found = re.search(r"\d+", value)
-    return int(found.group()) if found else None
+    found = re.search(
+        r"(?<!\d)([1-8])\s*(?:[-–—]?\s*(?:й|ый|ой|ий)\s*)?"
+        r"(?:год(?:а)?|г\.?)(?=\s|$)",
+        text,
+    )
+    return int(found.group(1)) if found else None
 
 
 def study_year_label(

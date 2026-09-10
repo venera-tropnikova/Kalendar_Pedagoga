@@ -1189,7 +1189,7 @@ def _inject_landing_styles() -> None:
             display: none !important;
         }
         #MainMenu, footer, .stAppDeployButton, [data-testid="stToolbar"],
-        [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+        [data-testid="stDecoration"],
         [data-testid="stSkillsNudgeAnchor"], [data-testid="stSkillsNudge"],
         [data-testid="stAppDeployButton"], .stDeployButton,
         .stAppHeader, header {
@@ -2403,6 +2403,61 @@ def _inject_landing_styles() -> None:
         .kp-check-slot + [data-testid="stElementContainer"] {
             margin-top: 0.35rem;
         }
+        [data-testid="stStatusWidget"] {
+            display: block !important;
+            visibility: visible !important;
+            height: auto !important;
+            background: #0867d5 !important;
+            border: 1px solid #075bb9 !important;
+            border-radius: 10px !important;
+            box-shadow: 0 8px 20px rgba(8, 103, 213, 0.22) !important;
+        }
+        [data-testid="stStatusWidget"] * {
+            color: #ffffff !important;
+            font-weight: 700 !important;
+        }
+        [data-testid="stStatusWidget"] svg {
+            fill: #ffffff !important;
+            stroke: #ffffff !important;
+        }
+        @keyframes kp-work-spin {
+            to { transform: rotate(360deg); }
+        }
+        [data-testid="stElementContainer"]:has(.kp-work-status-anchor)
+        + [data-testid="stElementContainer"] [data-testid="stAlert"],
+        .element-container:has(.kp-work-status-anchor)
+        + .element-container [data-testid="stAlert"] {
+            position: relative;
+            background: #0867d5 !important;
+            border: 1px solid #075bb9 !important;
+            color: #ffffff !important;
+            font-weight: 700 !important;
+            padding-left: 3.1rem !important;
+            box-shadow: 0 8px 20px rgba(8, 103, 213, 0.22) !important;
+        }
+        [data-testid="stElementContainer"]:has(.kp-work-status-anchor)
+        + [data-testid="stElementContainer"] [data-testid="stAlert"]::before,
+        .element-container:has(.kp-work-status-anchor)
+        + .element-container [data-testid="stAlert"]::before {
+            content: "";
+            position: absolute;
+            left: 1.15rem;
+            top: 50%;
+            width: 1rem;
+            height: 1rem;
+            margin-top: -0.5rem;
+            border: 3px solid rgba(255, 255, 255, 0.42);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            animation: kp-work-spin 0.8s linear infinite;
+        }
+        [data-testid="stElementContainer"]:has(.kp-work-status-anchor)
+        + [data-testid="stElementContainer"] [data-testid="stAlert"] *,
+        .element-container:has(.kp-work-status-anchor)
+        + .element-container [data-testid="stAlert"] * {
+            color: #ffffff !important;
+            font-weight: 700 !important;
+        }
 
         /* Readability pass: explicit component hierarchy without scaling the calendar grid. */
         .kp-badge {
@@ -2681,6 +2736,10 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         )
         work_status = str(st.session_state.get("calendar_work_status") or "").strip()
         if form_open and st.session_state.get("calendar_busy") and work_status:
+            st.markdown(
+                '<div class="kp-work-status-anchor"></div>',
+                unsafe_allow_html=True,
+            )
             st.info(work_status)
         if not st.session_state.get("analysis_ready") or form_open:
             _render_year_calendar_card(str(fields[3]), owner="inputs")

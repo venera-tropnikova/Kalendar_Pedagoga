@@ -661,15 +661,26 @@ def _topic_part_key(part: WeekTopicPart) -> tuple[str | None, str, str]:
     return (part.topic_number, part.topic_title, part.section)
 
 
+def _content_occurrence_key(
+    part: WeekTopicPart,
+) -> tuple[str | None, str, str, str]:
+    return (
+        part.topic_number,
+        part.topic_title,
+        part.section,
+        (part.program_topic or "").strip(),
+    )
+
+
 def _practice_appearance_counts(
     rows: tuple[ResolvedLessonRow, ...],
-) -> dict[tuple[str | None, str, str], int]:
-    counts: dict[tuple[str | None, str, str], int] = {}
+) -> dict[tuple[str | None, str, str, str], int]:
+    counts: dict[tuple[str | None, str, str, str], int] = {}
     for lesson in rows:
         for part in _week_topic_parts(lesson.source.source):
             if part.practice_hours <= 0:
                 continue
-            key = _topic_part_key(part)
+            key = _content_occurrence_key(part)
             counts[key] = counts.get(key, 0) + 1
     return counts
 
@@ -678,19 +689,20 @@ def _topic_cells_for_lesson(
     lesson: ResolvedLessonRow,
     display_numbers: dict[tuple[str | None, str, str], str],
     *,
-    topic_counts: dict[tuple[str | None, str, str], int],
-    topic_occurrences: dict[tuple[str | None, str, str], int],
+    topic_counts: dict[tuple[str | None, str, str, str], int],
+    topic_occurrences: dict[tuple[str | None, str, str, str], int],
 ) -> tuple[str, str]:
     source_row = lesson.source.source
     theory_lines: list[str] = []
     practice_lines: list[str] = []
     for part in _week_topic_parts(source_row):
-        key = _topic_part_key(part)
+        display_key = _topic_part_key(part)
+        occurrence_key = _content_occurrence_key(part)
         occurrence_index = 0
         if part.practice_hours:
-            occurrence_index = topic_occurrences.get(key, 0)
-            topic_occurrences[key] = occurrence_index + 1
-        display_number = display_numbers.get(key, part.topic_number or "?")
+            occurrence_index = topic_occurrences.get(occurrence_key, 0)
+            topic_occurrences[occurrence_key] = occurrence_index + 1
+        display_number = display_numbers.get(display_key, part.topic_number or "?")
         theory_cell = format_theory_cell(
             display_number,
             part.topic_title,
@@ -698,8 +710,11 @@ def _topic_cells_for_lesson(
             part.theory_hours,
         )
         selected_clause = ""
-        appearance_count = topic_counts.get(key, 0)
-        if appearance_count > 1 and part.practice_hours:
+        appearance_count = topic_counts.get(occurrence_key, 0)
+        if (
+            part.practice_hours
+            and (appearance_count > 1 or part.weekly_content_assigned)
+        ):
             selected_clause = practice_clause_for_repeated_topic(
                 topic_title=part.topic_title,
                 content=part.program_content_full,
@@ -707,7 +722,7 @@ def _topic_cells_for_lesson(
                 practice_hours=part.practice_hours,
                 occurrence_index=occurrence_index,
                 planned_result=lesson.planned_result,
-                appearance_count=appearance_count,
+                appearance_count=max(appearance_count, 1),
             )
         practice_cell = format_practice_cell(
             display_number,
@@ -716,6 +731,21 @@ def _topic_cells_for_lesson(
             part.practice_hours,
             selected_clause,
         )
+        generic_practice_cell = (
+            f"{display_number}. {part.topic_title} ({part.practice_hours})"
+        )
+        if (
+            part.weekly_content_assigned
+            and practice_cell == generic_practice_cell
+            and part.program_topic.strip()
+        ):
+            practice_cell = format_practice_cell(
+                display_number,
+                part.topic_title,
+                part.program_content_full,
+                part.practice_hours,
+                part.program_topic.strip(),
+            )
         if theory_cell:
             theory_lines.append(theory_cell)
         if practice_cell:
@@ -1365,6 +1395,11 @@ def generate_calendar_docx(
     # The unmerged preview is the semantic source for exact page segmentation.
     preview_document = _load_template(template)
     preview_table, _, _ = _populate_calendar_table(preview_document, utp, rows, **header)
+    # Measure the production rule first: a logical week that fits on a page
+    # moves there as one row. A genuinely over-height row may still be
+    # segmented by the existing fail-closed renderer path.
+    for row in preview_table.rows[2:]:
+        _prevent_row_split(row)
     preview = _save_document(preview_document)
     from calendar_pedagoga.docx_qa import detect_data_row_page_layout
 

@@ -138,6 +138,7 @@ _KNOWLEDGE_NOUNS = {
 # Knowledge heads that already satisfy the characterize-object case heuristic
 # or name a closed pedagogical object, never a topic/programme label.
 _THEORY_KNOWLEDGE_HEADS = _KNOWLEDGE_NOUNS | {
+    "составляющие",
     "устройство",
     "назначение",
     "требования",
@@ -460,6 +461,10 @@ def _noun_acc_features(original: str, acc: str) -> tuple[bool, str]:
 
 def _noun_to_prepositional(word: str) -> str:
     low = word.casefold()
+    if "-" in word:
+        parts = word.split("-")
+        if all(_participation_lemma(part) is not None for part in parts):
+            return "-".join(_noun_to_prepositional(part) for part in parts)
     if low.endswith(("ах", "ях", "е", "и")):
         return word
     if low.endswith("ы"):
@@ -1306,6 +1311,18 @@ def _transform_segment(
         return text, "", "", ""
     head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
 
+    if re.match(r"(?i)^(?:игра-)?викторин\w*$", head):
+        named_form = _normalize_spaces(" ".join(rest))
+        inflected = _inflect_object_phrase(named_form, case="prep")
+        if inflected:
+            inflected = inflected[:1].lower() + inflected[1:]
+            return (
+                _normalize_spaces(f"участвует в {inflected}"),
+                "участие в викторине",
+                named_form,
+                "",
+            )
+
     if _is_exercise_word(head):
         remainder = " ".join(rest[1:]).strip()
         phrase = "выполняет упражнения"
@@ -1570,7 +1587,12 @@ def _theory_object_span_ok(tokens: list[str]) -> bool:
     if _substantivized_head_without_complement(tokens):
         return False
     first_core = _strip_punct_word(tokens[0])[1].casefold()
-    if first_core.endswith(("ые", "ие")) and len(tokens) > 1 and _is_adjective(tokens[0]):
+    if (
+        first_core.endswith(("ые", "ие"))
+        and len(tokens) > 1
+        and _is_adjective(tokens[0])
+        and not _is_theory_knowledge_token(tokens[0])
+    ):
         raw_next = tokens[1]
         if _is_preposition(raw_next):
             return True
@@ -1890,6 +1912,20 @@ def _proven_theory_object(heading: str) -> str | None:
         return None
     if _is_theory_knowledge_token(tokens[0]):
         return None
+    first_core = _strip_punct_word(tokens[0])[1]
+    second_core = _strip_punct_word(tokens[1])[1] if len(tokens) > 1 else ""
+    if first_core.casefold().endswith(("ая", "яя")) and second_core:
+        noun_acc = _proven_feminine_acc(second_core)
+        if noun_acc is not None:
+            led = [
+                _decap_lexical(
+                    _adj_to_acc(first_core, plural=False, gender="f")
+                ),
+                _decap_lexical(noun_acc),
+                *tokens[2:],
+            ]
+            if _theory_object_span_ok(led):
+                return _normalize_spaces(" ".join(led))
     led = [_theory_object_token(tokens[0]), *tokens[1:]]
     if not _theory_object_span_ok(led):
         return None
@@ -2814,6 +2850,8 @@ def _result_control_segments(result: str) -> list[tuple[str, str]]:
         obj = text[match.end() : end].strip(" ,.;")
         obj = re.sub(r"^(и|а|но)\s+", "", obj, flags=re.IGNORECASE)
         obj = re.sub(r"\s+(и|а|но)$", "", obj, flags=re.IGNORECASE)
+        if obj.casefold() in {"и", "а", "но"}:
+            obj = ""
         segments.append((match.group(1).casefold(), obj))
     return segments
 
@@ -3158,8 +3196,26 @@ def _phrase_to_genitive(phrase: str) -> str:
     head, tail = _split_prep_tail(words)
     if not head:
         return _normalize_spaces(phrase)
-    if len(head) >= 2 and all(_is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая")) for word in head[:-1]):
-        head = [_adj_to_genitive(word) for word in head[:-1]] + [_head_noun_to_genitive(head[-1])]
+    leading_adjectives = 0
+    for word in head:
+        if _is_adjective(word) or word.casefold().endswith(("ую", "юю", "ая")):
+            leading_adjectives += 1
+            continue
+        break
+    if (
+        leading_adjectives
+        and leading_adjectives < len(head)
+        and head[leading_adjectives].casefold() not in {"и", "или"}
+    ):
+        # One or more adjectives + direct noun + untouched dependent tail.
+        head = [
+            *[
+                _adj_to_genitive(word)
+                for word in head[:leading_adjectives]
+            ],
+            _head_noun_to_genitive(head[leading_adjectives]),
+            *head[leading_adjectives + 1 :],
+        ]
     elif (
         len(head) >= 3
         and _is_adjective(head[0])
@@ -3392,7 +3448,10 @@ def _noun_to_dative(word: str) -> str:
     elif low.endswith("ии"):
         changed = core
     elif low.endswith("и") and len(core) > 3:
-        changed = core[:-1] + "ам"
+        stem = core[:-1]
+        changed = stem + (
+            "ам" if stem[-1:].casefold() in "гкхжчшщц" else "ям"
+        )
     elif low.endswith("а") and len(core) > 3:
         if _regular_feminine_a_noun(low):
             changed = core[:-1] + "е"
@@ -3441,6 +3500,12 @@ def _dative_np(phrase: str) -> str:
         # его/её/их as determiners are indeclinable; the following NP head takes the case.
         if not seen_noun and _strip_punct_word(word)[1].casefold() in _POSSESSIVE_ONLY:
             converted.append(word)
+            continue
+        if not seen_noun and _is_theory_knowledge_token(word) and _is_adjective(word):
+            # A substantivized knowledge head (for example, «составляющие»)
+            # is the NP head.  Its following genitive owner must stay intact.
+            converted.append(_adj_to_dative(word))
+            seen_noun = True
             continue
         if not seen_noun and _is_adjective(word) and not _looks_like_verbal_noun(word):
             converted.append(_adj_to_dative(word))
@@ -3784,6 +3849,13 @@ def _process_control(result: str, lesson_type: str) -> str:
         remainder = _normalize_spaces(
             re.sub(r"(?i)^выполняет упражнения\s*", "", result)
         ).rstrip(".")
+        conjunct = re.search(r"(?i)\sи\s+([а-яё-]+)(.*)$", remainder)
+        if conjunct and _looks_like_verbal_noun(conjunct.group(1)):
+            tail = _phrase_to_genitive(
+                _normalize_spaces(conjunct.group(1) + conjunct.group(2))
+            )
+            remainder = remainder[: conjunct.start(1)] + tail
+            return "проверка выполнения упражнений " + remainder
         if remainder:
             return "педагогическое наблюдение за выполнением упражнений " + remainder
         return "педагогическое наблюдение за выполнением упражнений"
@@ -3991,6 +4063,7 @@ def _skill_control(result: str) -> str:
             "измеряет",
             "рисует",
             "составляет",
+            "выполняет",
         }:
             short = _phrase_to_genitive(short)
         if noun and short:
@@ -4199,6 +4272,11 @@ def type_from_frame(
         if result.startswith(("выполняет упражнения", "отрабатывает", "разучивает")):
             if "движени" in result and "местности" in result:
                 return "учебно-тренировочное занятие на местности"
+            return "учебно-тренировочное занятие"
+        if result.startswith("изучает") and re.search(
+            r"(?i)\b(?:упражнен|техник|при[её]м)\w*",
+            f"{planned_result} {frame.clause}",
+        ):
             return "учебно-тренировочное занятие"
         if _result_as_task(planned_result):
             if "снаряжени" in result or "рюкзак" in result:
@@ -5051,6 +5129,16 @@ def _quality_issue(
     first = result.split()[0].casefold()
     if first not in allowed:
         return "unproven_predicate"
+    broken_genitive_object = re.match(
+        r"(?i)^изучает\s+([а-яё-]+(?:ых|их))\s+([а-яё-]+)",
+        result.rstrip("."),
+    )
+    if broken_genitive_object and re.search(
+        rf"(?i)\bизучение\s+{re.escape(broken_genitive_object.group(1))}\s+"
+        rf"{re.escape(broken_genitive_object.group(2))}\b",
+        clause,
+    ):
+        return "unproven_object_case"
     for left, right in re.findall(r"(?i)\b(\w+)\s+и\s+(\w+)", result):
         if left.casefold() in allowed and right.casefold() not in allowed:
             return "unproven_coordinated_predicate"
@@ -5058,7 +5146,15 @@ def _quality_issue(
         words = match.group(1).casefold().split()
         while words and _is_adjective(words[0]):
             words.pop(0)
-        if not words or words[0] not in _PARTICIPATION_CASES:
+        compound_parts = (
+            re.sub(r"[^а-яё-]", "", words[0]).split("-") if words else []
+        )
+        compound_case = bool(compound_parts) and all(
+            _participation_lemma(part) is not None for part in compound_parts
+        )
+        if not words or (
+            words[0] not in _PARTICIPATION_CASES and not compound_case
+        ):
             loc_np = match.group(1).casefold()
             if clause and loc_np in clause.casefold():
                 continue
@@ -5086,6 +5182,27 @@ def _quality_issue(
             return "unbalanced_delimiters"
         if re.search(r"[.!?]\s*[,;]|[,;]\s*[,;]", text):
             return "broken_clause_join"
+    result_words = [
+        word.strip(".,;:!?()[]{}«»„“\"")
+        for word in _word_tokens(result.casefold())
+        if word.strip() and word.strip()[0].isalpha()
+    ]
+    grounded = f"{clause} {source}".casefold()
+    for first_word, second_word in zip(result_words, result_words[1:]):
+        if (
+            first_word.endswith("ий")
+            and not re.search(
+                rf"(?i)\b{re.escape(first_word)}\s+"
+                rf"{re.escape(second_word)}\b",
+                grounded,
+            )
+            and re.search(
+                rf"(?i)\b{re.escape(first_word)}\s+"
+                rf"{re.escape(second_word)}[ая]\b",
+                grounded,
+            )
+        ):
+            return "unproven_object_case"
     # Structural damage has priority over uncertain case diagnostics.
     nominal = re.match(r"(?i)^характеризует\s+(.+)$", result.rstrip("."))
     if nominal:
@@ -5781,7 +5898,7 @@ def _derive_week_part(
 ) -> ContentEngineV2Result:
     theory_text, practice_text = _part_texts(part, topic_totals)
     return derive_fields_v2(
-        topic_title=part.topic_title,
+        topic_title=_weekly_source_topic(part),
         theory_text=theory_text,
         practice_text=practice_text,
         program_content=part.program_content_full or "",
@@ -5792,17 +5909,40 @@ def _derive_week_part(
     )
 
 
+def _weekly_source_topic(part: WeekTopicPart | CalendarContentRow) -> str:
+    source_topic = (part.program_topic or "").strip()
+    if (
+        source_topic
+        and part.topic_title.strip().casefold() == part.section.strip().casefold()
+    ):
+        return source_topic
+    return part.topic_title
+
+
 def _practice_appearance_counts(
     rows: tuple[CalendarContentRow, ...],
-) -> dict[tuple[str | None, str, str], int]:
-    counts: dict[tuple[str | None, str, str], int] = {}
+) -> dict[tuple[str | None, str, str, str], int]:
+    counts: dict[tuple[str | None, str, str, str], int] = {}
     for row in rows:
         for part in _row_week_parts(row):
             if part.practice_hours <= 0:
                 continue
-            key = (part.topic_number, part.topic_title, part.section)
+            key = _content_occurrence_key(part)
             counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _content_occurrence_key(
+    part: WeekTopicPart | CalendarContentRow,
+) -> tuple[str | None, str, str, str]:
+    """Keep an already assigned weekly source block independent of its section."""
+
+    return (
+        part.topic_number,
+        part.topic_title,
+        part.section,
+        (part.program_topic or "").strip(),
+    )
 
 
 def build_lesson_content_v2(
@@ -5815,14 +5955,14 @@ def build_lesson_content_v2(
 
     result: list[LessonContentV2Row] = []
     practice_counts = _practice_appearance_counts(rows)
-    practice_occurrences: dict[tuple[str | None, str, str], int] = {}
+    practice_occurrences: dict[tuple[str | None, str, str, str], int] = {}
     for row in rows:
         parts = _row_week_parts(row)
         theory_text, practice_text, warnings = _split_row_texts(row)
         if len(parts) > 1:
             derived_parts: list[ContentEngineV2Result] = []
             for part in parts:
-                key = (part.topic_number, part.topic_title, part.section)
+                key = _content_occurrence_key(part)
                 occurrence_index = 0
                 count = practice_counts.get(key, 0)
                 if part.practice_hours:
@@ -5847,14 +5987,14 @@ def build_lesson_content_v2(
                 warning for item in derived_parts for warning in item.warnings
             )
         else:
-            key = (row.topic_number, row.topic_title, row.section)
+            key = _content_occurrence_key(row)
             occurrence_index = 0
             count = practice_counts.get(key, 0)
             if row.practice_hours:
                 occurrence_index = practice_occurrences.get(key, 0)
                 practice_occurrences[key] = occurrence_index + 1
             derived = derive_fields_v2(
-                topic_title=row.topic_title,
+                topic_title=_weekly_source_topic(row),
                 theory_text=theory_text,
                 practice_text=practice_text,
                 program_content=row.program_content_full or "",

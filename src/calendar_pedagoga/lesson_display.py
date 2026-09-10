@@ -117,7 +117,11 @@ def _clause_units_from_practice(content: str, *, theory_hours: int, practice_hou
 
 def _distinctive_clause_tail(clause: str) -> str:
     text = _normalize_spaces(clause).casefold().rstrip(" .")
-    return re.sub(r"(?i)^(выполняет\s+)?упражнен\w*\s+", "", text)
+    return re.sub(
+        r"(?i)^(?:(?:выполняет\s+)?упражнен\w*|игр\w*)\s+",
+        "",
+        text,
+    )
 
 
 def clause_is_week_result(clause: str, planned_result: str, units: list[str]) -> bool:
@@ -230,14 +234,15 @@ def practice_clause_for_repeated_topic(
         practice_hours=practice_hours,
         occurrence_index=occurrence_index,
     )
-    if not selected:
-        return ""
     units = _clause_units_from_practice(
         content, theory_hours=theory_hours, practice_hours=practice_hours
     )
-    if not clause_is_week_result(selected, planned_result, units):
-        return ""
-    return selected
+    if selected and clause_is_week_result(selected, planned_result, units):
+        return selected
+    for unit in units:
+        if clause_is_week_result(unit, planned_result, units):
+            return _normalize_spaces(unit)
+    return ""
 
 
 def format_practice_cell(
