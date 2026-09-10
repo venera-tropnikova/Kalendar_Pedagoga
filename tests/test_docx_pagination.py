@@ -121,6 +121,56 @@ def _source():
     return result.getvalue()
 
 
+def _source_weeks(count: int) -> bytes:
+    doc = Document()
+    table = doc.add_table(rows=2 + count, cols=3)
+    for index in range(count):
+        week = index + 1
+        row = table.rows[2 + index]
+        row.cells[0].text = 'Month'
+        row.cells[1].text = str(week)
+        row.cells[2].text = f'topic{week}'
+    result = BytesIO()
+    doc.save(result)
+    return result.getvalue()
+
+
+def _week_rows(count: int, start: int = 1) -> list[list[str]]:
+    return [
+        ['Month', str(week), f'topic{week}']
+        for week in range(start, start + count)
+    ]
+
+
+def _layout_page(*, rows=None, table_count=1, text='', drawings=0):
+    rows = list(rows or [])
+    table = SimpleNamespace(col_count=3, extract=lambda rows=rows: [[], []] + rows)
+    found = [] if table_count == 0 else [table]
+    return SimpleNamespace(
+        find_tables=lambda found=found: SimpleNamespace(tables=found),
+        get_text=lambda: text,
+        get_drawings=lambda: [{}] * drawings,
+        rect=SimpleNamespace(width=595.0, height=842.0),
+        get_pixmap=lambda **kwargs: SimpleNamespace(tobytes=lambda _fmt: b'PNGPAGE'),
+    )
+
+
+def _open_pages(monkeypatch, pages):
+    import pymupdf
+
+    class Pdf:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            yield from pages
+
+    monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
+
+
 def _pdf(monkeypatch, fragments):
     import pymupdf
     class Pdf:
@@ -325,6 +375,55 @@ def test_tables_zero_records_failing_and_last_success_page_snapshots(monkeypatch
     assert failing.png == b"PNGPAGE"
     assert "last_week=NO" in diagnosis.as_message()
     assert "page 1 (last_success)" in diagnosis.as_message()
+
+
+def test_trailing_empty_page_after_all_36_rows_is_ignored(monkeypatch):
+    rows = _week_rows(36)
+    _open_pages(monkeypatch, [
+        _layout_page(rows=rows, text=' '.join(str(week) for week in range(1, 37)), drawings=18),
+        _layout_page(rows=[], table_count=0, text='2\n', drawings=0),
+    ])
+    layouts = qa._data_row_page_layout_pdf(_source_weeks(36), b'pdf', 36)
+    assert layouts is not None
+    assert len(layouts) == 36
+
+
+def test_empty_page_before_all_rows_matched_still_fails(monkeypatch):
+    _open_pages(monkeypatch, [
+        _layout_page(rows=_week_rows(10), text='1 10', drawings=8),
+        _layout_page(rows=[], table_count=0, text='2', drawings=0),
+        _layout_page(rows=_week_rows(26, start=11), text='11 36', drawings=8),
+    ])
+    assert qa._data_row_page_layout_pdf(_source_weeks(36), b'pdf', 36) is None
+    diagnosis = qa.page_layout_diagnosis()
+    assert diagnosis is not None
+    assert diagnosis.reason == 'spans is None'
+    assert diagnosis.detail == 'tables=0'
+    assert diagnosis.page_after == 2
+
+
+def test_trailing_page_with_calendar_text_still_fails(monkeypatch):
+    _open_pages(monkeypatch, [
+        _layout_page(rows=_week_rows(36), text='1 36', drawings=18),
+        _layout_page(rows=[], table_count=0, text='Итоговое занятие', drawings=0),
+    ])
+    assert qa._data_row_page_layout_pdf(_source_weeks(36), b'pdf', 36) is None
+    diagnosis = qa.page_layout_diagnosis()
+    assert diagnosis is not None
+    assert diagnosis.reason == 'spans is None'
+    assert diagnosis.detail == 'tables=0'
+
+
+def test_trailing_page_with_drawings_still_fails(monkeypatch):
+    _open_pages(monkeypatch, [
+        _layout_page(rows=_week_rows(36), text='1 36', drawings=18),
+        _layout_page(rows=[], table_count=0, text='2', drawings=1),
+    ])
+    assert qa._data_row_page_layout_pdf(_source_weeks(36), b'pdf', 36) is None
+    diagnosis = qa.page_layout_diagnosis()
+    assert diagnosis is not None
+    assert diagnosis.reason == 'spans is None'
+    assert diagnosis.detail == 'tables=0'
 
 
 def test_month_label_verification_uses_one_consistent_render(monkeypatch):

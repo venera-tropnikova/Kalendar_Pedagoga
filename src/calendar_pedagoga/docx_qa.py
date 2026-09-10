@@ -797,6 +797,42 @@ def _longest_triad_field(cells: list[str]) -> str | None:
     return max(triad, key=triad.get)
 
 
+def _page_has_only_page_number(text: str, page_number: int) -> bool:
+    stripped = (text or "").replace("\u00a0", " ").strip()
+    return stripped == "" or stripped == str(page_number)
+
+
+def _is_blank_trailing_pdf_page(
+    page,
+    page_number: int,
+    *,
+    layouts_done: int,
+    total_rows: int,
+    last_success_number: int | None,
+) -> bool:
+    """Ignore an empty page only after every logical row is already matched."""
+
+    if last_success_number is None or page_number <= last_success_number:
+        return False
+    if layouts_done != total_rows:
+        return False
+    try:
+        if list(page.find_tables().tables):
+            return False
+    except Exception:
+        return False
+    try:
+        if page.get_drawings():
+            return False
+    except Exception:
+        return False
+    try:
+        text = page.get_text() or ""
+    except Exception:
+        return False
+    return _page_has_only_page_number(text, page_number)
+
+
 def _last_week_on_page(text: str, last_week_cell: str) -> bool:
     folded = (text or "").replace("\u00a0", " ")
     if not folded.strip() or not (last_week_cell or "").strip():
@@ -967,6 +1003,14 @@ def _data_row_page_layout_pdf(
             tables = [table for table in page.find_tables().tables
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
+                if _is_blank_trailing_pdf_page(
+                    page,
+                    page_number,
+                    layouts_done=len(layouts),
+                    total_rows=total_rows,
+                    last_success_number=last_success_number,
+                ):
+                    continue
                 snapshots: list[PagePdfSnapshot] = []
                 if last_success_page is not None and last_success_number is not None:
                     snapshots.append(
