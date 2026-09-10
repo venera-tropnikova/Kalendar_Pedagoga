@@ -265,3 +265,16 @@ def test_parse_program_and_matching_receive_selected_year() -> None:
         match.program_item is None or match.program_item.study_year in {None, 2}
         for match in matches
     )
+
+
+def test_unlabeled_single_embedded_table_is_used_with_requested_year() -> None:
+    totals = Hours(72, 11, 61)
+    program = _program_upload(
+        _multi_year_program((None, totals, "Введение в тему"))
+    )
+    separate = _separate_utp(1, totals)
+    result = resolve_utp(separate, program)
+    assert result.table_totals == totals
+    assert result.topics == separate.parsed.topics
+    assert infer_study_year_number(result.metadata.study_year) == 1
+    assert RECONCILE_LEAD not in result.warnings

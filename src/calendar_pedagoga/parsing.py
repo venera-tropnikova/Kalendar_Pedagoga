@@ -343,23 +343,40 @@ def _parse_compact_table(
     return sections, topics, totals
 
 
+def _is_placeholder_label(value: str) -> bool:
+    return value.casefold() in {"тема", "№ п/п", "№ пп"}
+
+
 def _looks_like_valid_utp(
     sections: list[Section],
     topics: list[Topic],
     table_totals: Hours | None,
 ) -> bool:
-    if not sections or not topics:
+    titled_sections = [
+        section
+        for section in sections
+        if section.title and not _is_placeholder_label(section.title)
+    ]
+    if not titled_sections:
         return False
-    titled = [
+    titled_topics = [
         topic
         for topic in topics
-        if topic.title and topic.title.casefold() not in {"тема", "№ п/п", "№ пп"}
+        if topic.title and not _is_placeholder_label(topic.title)
     ]
-    if len(titled) < 3:
+    if titled_topics:
+        if len(titled_topics) < 3:
+            return False
+        if table_totals is not None and table_totals.total > 0:
+            return True
+        return any(topic.hours.total > 0 for topic in titled_topics)
+    if len(titled_sections) < 3:
+        return False
+    if not any(section.hours.total > 0 for section in titled_sections):
         return False
     if table_totals is not None and table_totals.total > 0:
         return True
-    return any(topic.hours.total > 0 for topic in titled)
+    return True
 
 
 def _parse_table_structure(
@@ -487,12 +504,14 @@ def _select_utp_candidate(
 
     if study_year is not None:
         matched = [item for item in candidates if item.study_year == study_year]
-        if not matched:
-            raise UtpYearSelectionError(
-                f"В программе нет учебно-тематического плана {study_year}-го "
-                "года обучения."
-            )
-        return matched[0]
+        if matched:
+            return matched[0]
+        if len(candidates) == 1 and candidates[0].study_year is None:
+            return candidates[0]
+        raise UtpYearSelectionError(
+            f"В программе нет учебно-тематического плана {study_year}-го "
+            "года обучения."
+        )
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) > 1:

@@ -66,6 +66,49 @@ def test_calendar_plan_is_rejected_outside_template_slot() -> None:
         (UploadPurpose.PROGRAM, "УТП КЛЮЧ 2 г. 2ч.docx"),
     ],
 )
+def _section_only_utp_docx() -> bytes:
+    document = Document()
+    document.add_paragraph("Учебно-тематический план на 2026-2027 учебный год")
+    table = document.add_table(rows=6, cols=5)
+    headers = ("№", "Тема", "всего", "теория", "практика")
+    for cell, value in zip(table.rows[0].cells, headers, strict=True):
+        cell.text = value
+    rows = (
+        ("1", "Раздел первый", "20", "4", "16"),
+        ("2", "Раздел второй", "24", "4", "20"),
+        ("3", "Раздел третий", "28", "3", "25"),
+        ("Итого", "", "72", "11", "61"),
+    )
+    for index, values in enumerate(rows, start=1):
+        for cell, value in zip(table.rows[index].cells, values, strict=True):
+            cell.text = value
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def test_section_only_utp_is_accepted() -> None:
+    uploaded = validate_upload(
+        UploadPurpose.UTP,
+        "plan.docx",
+        _section_only_utp_docx(),
+    )
+    assert uploaded.parsed is not None
+    assert uploaded.parsed.table_totals.total == 72
+    assert uploaded.parsed.table_totals.theory == 11
+    assert uploaded.parsed.table_totals.practice == 61
+    assert len(uploaded.parsed.sections) == 3
+    assert len(uploaded.parsed.topics) == 3
+
+
+@pytest.mark.parametrize(
+    ("purpose", "reference_name"),
+    [
+        (UploadPurpose.UTP, "Календарный план Образец.docx"),
+        (UploadPurpose.CALENDAR_TEMPLATE, "УТП КЛЮЧ 2 г. 2ч.docx"),
+        (UploadPurpose.PROGRAM, "УТП КЛЮЧ 2 г. 2ч.docx"),
+    ],
+)
 def test_wrong_document_type_is_rejected(
     purpose: UploadPurpose, reference_name: str
 ) -> None:

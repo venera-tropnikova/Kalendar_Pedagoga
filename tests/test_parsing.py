@@ -154,6 +154,64 @@ def _compact_utp_docx(
     return stream.getvalue()
 
 
+def _section_only_five_column_utp_docx() -> bytes:
+    document = Document()
+    document.add_paragraph(
+        "Учебно-тематический план на 2026-2027 учебный год составлен в соответствии с программой «Пример»"
+    )
+    document.add_paragraph("Год обучения: первый")
+    document.add_paragraph("Количество часов в неделю: 2 часа")
+    document.add_paragraph("Общее количество часов в год: 72 часа")
+    document.add_paragraph("на 36 учебных недель на 72 часа")
+    table = document.add_table(rows=9, cols=5)
+    headers = ("№ п/п", "Наименование разделов и тем", "всего", "теория", "практика")
+    for cell, value in zip(table.rows[0].cells, ("№ п/п", "Наименование разделов и тем", "Количество часов", "Количество часов", "Количество часов"), strict=True):
+        cell.text = value
+    for cell, value in zip(table.rows[1].cells, headers, strict=True):
+        cell.text = value
+    rows = (
+        ("1.", "Вводный раздел", "2", "1", "1"),
+        ("2.", "Основной раздел", "8", "2", "6"),
+        ("3.", "Практический раздел", "12", "-", "12"),
+        ("4.", "Специальный раздел", "10", "-", "10"),
+        ("5.", "Базовый раздел", "30", "4", "26"),
+        ("6.", "Итоговый раздел", "10", "4", "6"),
+        ("", "ИТОГО", "72", "11", "61"),
+    )
+    for index, values in enumerate(rows, start=2):
+        for cell, value in zip(table.rows[index].cells, values, strict=True):
+            cell.text = value
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def _compact_section_only_utp_docx() -> bytes:
+    document = Document()
+    document.add_paragraph("Учебно-тематический план на 2026-2027 учебный год")
+    table = document.add_table(rows=6, cols=4)
+    headers = ("Тема", "Всего", "Теория", "Практика")
+    for cell, value in zip(table.rows[0].cells, headers, strict=True):
+        cell.text = value
+    for cell, value in zip(table.rows[1].cells, headers, strict=True):
+        cell.text = value
+    rows = (
+        ("1. Первый раздел", "20", "4", "16"),
+        ("2. Второй раздел", "24", "4", "20"),
+        ("3. Третий раздел", "28", "3", "25"),
+    )
+    for index, values in enumerate(rows, start=2):
+        for cell, value in zip(table.rows[index].cells, values, strict=True):
+            cell.text = value
+    table.rows[5].cells[0].text = "Всего часов:"
+    table.rows[5].cells[1].text = "72"
+    table.rows[5].cells[2].text = "11"
+    table.rows[5].cells[3].text = "61"
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
 def test_five_column_parser_reads_theory_practice() -> None:
     result = parse_utp(_five_column_utp_docx())
     assert result.table_totals == Hours(10, 4, 6)
@@ -196,6 +254,38 @@ def test_compact_parser_rejects_ambiguous_row_alignment() -> None:
         match=r"Второй раздел.*названий=2, строк часов=3",
     ):
         parse_utp(_compact_utp_docx(ambiguous_rows=True))
+
+
+def test_five_column_section_only_utp_is_accepted() -> None:
+    result = parse_utp(_section_only_five_column_utp_docx())
+    assert result.metadata.academic_year == "2026–2027"
+    assert result.table_totals == Hours(72, 11, 61)
+    assert [section.title for section in result.sections] == [
+        "Вводный раздел",
+        "Основной раздел",
+        "Практический раздел",
+        "Специальный раздел",
+        "Базовый раздел",
+        "Итоговый раздел",
+    ]
+    assert [topic.hours for topic in result.topics] == [
+        Hours(2, 1, 1),
+        Hours(8, 2, 6),
+        Hours(12, 0, 12),
+        Hours(10, 0, 10),
+        Hours(30, 4, 26),
+        Hours(10, 4, 6),
+    ]
+    assert all(topic.is_standalone_section for topic in result.topics)
+
+
+def test_compact_section_only_utp_is_accepted() -> None:
+    result = parse_utp(_compact_section_only_utp_docx())
+    assert result.metadata.academic_year == "2026–2027"
+    assert result.table_totals == Hours(72, 11, 61)
+    assert len(result.sections) == 3
+    assert [topic.hours.total for topic in result.topics] == [20, 24, 28]
+    assert all(topic.is_standalone_section for topic in result.topics)
 
 
 def test_selects_utp_table_among_calendar_and_other_tables() -> None:
