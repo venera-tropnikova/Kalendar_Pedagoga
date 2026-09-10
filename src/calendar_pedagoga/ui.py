@@ -2659,6 +2659,7 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
         st.markdown('<div class="kp-form-park"></div>', unsafe_allow_html=True)
         st.markdown('<div class="kp-hero-top">', unsafe_allow_html=True)
         st.title("Календарь педагога")
+        st.caption("QA DIAG: tail-page-v3")
         if form_open:
             st.markdown(
                 '<p class="kp-hero-subtitle">Загрузите документы — приложение проверит часы, '
@@ -3544,6 +3545,7 @@ def _show_page_segment_snapshots() -> None:
     snapshots = st.session_state.get("calendar_page_segment_snapshots") or ()
     if not snapshots:
         return
+    st.markdown("**QA DIAG: tail-page-v3**")
     st.markdown("**Диагностика page-segment PDF**")
     for snapshot in snapshots:
         title = (

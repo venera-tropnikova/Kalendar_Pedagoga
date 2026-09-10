@@ -708,6 +708,9 @@ class PagePdfSnapshot:
         )
 
 
+QA_TAIL_PAGE_DIAG_MARKER = "QA DIAG: tail-page-v3"
+
+
 @dataclass(frozen=True)
 class PageLayoutDiagnosis:
     """Exact failing calendar row for page-segment QA; never used to pass QA."""
@@ -732,6 +735,7 @@ class PageLayoutDiagnosis:
         field = self.field or "—"
         extra = " ".join(snapshot.as_message() for snapshot in self.snapshots)
         return (
+            f"{QA_TAIL_PAGE_DIAG_MARKER} | "
             "page-segment diagnostics: "
             f"week={week} row={row} page={page_before}→{page_after} "
             f"reason={self.reason} field={field} "
@@ -820,6 +824,7 @@ def _blank_trailing_page_probe(
     """Explain why a page is or is not an ignorable trailing blank. Does not pass QA."""
 
     leftover = ""
+    raw_text = ""
     drawings_n: int | None = None
     try:
         tables = list(found_tables) if found_tables is not None else list(page.find_tables().tables)
@@ -828,7 +833,8 @@ def _blank_trailing_page_probe(
         tables = []
         tables_n = None
         info = _trailing_page_info(
-            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n,
+            leftover, raw_text=raw_text,
         )
         return False, f"tables_exc={type(error).__name__}", info
     try:
@@ -837,30 +843,50 @@ def _blank_trailing_page_probe(
         drawings_truthy = bool(drawings_raw)
     except Exception as error:
         info = _trailing_page_info(
-            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n,
+            leftover, raw_text=raw_text,
         )
         return False, f"drawings_exc={type(error).__name__}", info
     try:
-        leftover = _page_text_after_removing_page_number(page.get_text() or "", page_number)
+        raw_text = page.get_text() or ""
+        leftover = _page_text_after_removing_page_number(raw_text, page_number)
     except Exception as error:
         info = _trailing_page_info(
-            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n,
+            leftover, raw_text=raw_text,
         )
         return False, f"text_exc={type(error).__name__}", info
-    info = _trailing_page_info(
-        page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+    last_success_set = last_success_number is not None
+    page_after_last_success = (
+        last_success_number is not None and page_number > last_success_number
     )
-    if last_success_number is None:
+    matched_eq_expected = layouts_done == total_rows
+    tables_empty = not tables
+    drawings_empty = not drawings_truthy
+    leftover_empty = leftover == ""
+    guards = {
+        "last_success_set": last_success_set,
+        "page_after_last_success": page_after_last_success,
+        "matched_eq_expected": matched_eq_expected,
+        "tables_empty": tables_empty,
+        "drawings_empty": drawings_empty,
+        "leftover_empty": leftover_empty,
+    }
+    info = _trailing_page_info(
+        page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n,
+        leftover, raw_text=raw_text, guards=guards,
+    )
+    if not last_success_set:
         return False, "last_success_number is None", info
-    if page_number <= last_success_number:
+    if not page_after_last_success:
         return False, f"page {page_number} <= last_success {last_success_number}", info
-    if layouts_done != total_rows:
+    if not matched_eq_expected:
         return False, f"matched_rows {layouts_done} != expected_rows {total_rows}", info
-    if tables:
+    if not tables_empty:
         return False, f"tables={tables_n}", info
-    if drawings_truthy:
+    if not drawings_empty:
         return False, f"drawings={drawings_n}", info
-    if leftover:
+    if not leftover_empty:
         return False, f"leftover_text={leftover!r}", info
     return True, "pass", info
 
@@ -873,6 +899,9 @@ def _trailing_page_info(
     tables: int | None,
     drawings: int | None,
     leftover: str,
+    *,
+    raw_text: str = "",
+    guards: dict[str, bool] | None = None,
 ) -> dict[str, object]:
     is_last = (
         "—" if total_pages is None else ("YES" if page_number == total_pages else "NO")
@@ -886,7 +915,44 @@ def _trailing_page_info(
         "tables": tables,
         "drawings": drawings,
         "leftover_text": leftover,
+        "raw_text": raw_text,
+        "guards": guards or {},
     }
+
+
+def _format_tail_page_none_detail(
+    *,
+    matching_tables: int | None,
+    probe: dict[str, object],
+    guard_miss: str,
+    return_none: str,
+    extra: str = "",
+) -> str:
+    guards = probe.get("guards") or {}
+    guard_txt = " ".join(
+        f"guard.{name}={'YES' if value else 'NO'}"
+        for name, value in guards.items()
+    )
+    parts = []
+    if matching_tables is not None:
+        parts.append(f"tables={matching_tables}")
+    parts.append(QA_TAIL_PAGE_DIAG_MARKER)
+    if extra:
+        parts.append(extra)
+    parts.extend((
+        f"page_index={probe['page_index']}/{probe['total_pages']}",
+        f"is_last_page={probe['is_last_page']}",
+        f"matched_rows={probe['matched_rows_before_page']}",
+        f"expected_rows={probe['expected_rows']}",
+        f"drawings={probe['drawings']}",
+        f"raw_text={probe.get('raw_text', '')!r}",
+        f"leftover={probe.get('leftover_text', '')!r}",
+    ))
+    if guard_txt:
+        parts.append(guard_txt)
+    parts.append(f"guard_miss={guard_miss}")
+    parts.append(f"return_None={return_none}")
+    return " ".join(parts)
 
 
 def _is_blank_trailing_pdf_page(
@@ -1067,7 +1133,13 @@ def _data_row_page_layout_pdf(
         return None
 
     if len(expected) != total_rows:
-        return fail("spans is None", detail="row count mismatch")
+        return fail(
+            "spans is None",
+            detail=(
+                f"row count mismatch {QA_TAIL_PAGE_DIAG_MARKER} "
+                "return_None=_data_row_page_layout_pdf:row_count_mismatch"
+            ),
+        )
 
     layouts: list[DataRowPageLayout] = []
     accumulated = [""] * len(source.columns)
@@ -1076,6 +1148,10 @@ def _data_row_page_layout_pdf(
     fragments: list[tuple[int, list[str]]] = []
     last_success_page = None
     last_success_number: int | None = None
+    page = None
+    page_number = None
+    found_tables = None
+    tables = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         total_pages = getattr(document, "page_count", None)
         if total_pages is None:
@@ -1119,24 +1195,18 @@ def _data_row_page_layout_pdf(
                         expected_columns=len(source.columns),
                     )
                 )
-                return_none = (
-                    "_data_row_page_layout_pdf:len(matching_tables)!=1"
-                )
                 return fail(
                     "spans is None",
                     row=len(layouts),
                     page_before=start_page,
                     page_after=page_number,
-                    detail=(
-                        f"tables={len(tables)} "
-                        f"page_index={probe['page_index']}/{probe['total_pages']} "
-                        f"is_last_page={probe['is_last_page']} "
-                        f"matched_rows_before_page={probe['matched_rows_before_page']} "
-                        f"expected_rows={probe['expected_rows']} "
-                        f"drawings={probe['drawings']} "
-                        f"leftover_text={probe['leftover_text']!r} "
-                        f"guard_miss={guard_miss} "
-                        f"return_None={return_none}"
+                    detail=_format_tail_page_none_detail(
+                        matching_tables=len(tables),
+                        probe=probe,
+                        guard_miss=guard_miss,
+                        return_none=(
+                            "_data_row_page_layout_pdf:len(matching_tables)!=1"
+                        ),
                     ),
                     snapshots=tuple(snapshots),
                 )
@@ -1144,12 +1214,29 @@ def _data_row_page_layout_pdf(
             last_success_number = page_number
             for fragment in tables[0].extract()[2:]:
                 if len(layouts) >= total_rows:
+                    _, extra_miss, extra_probe = _blank_trailing_page_probe(
+                        page,
+                        page_number,
+                        layouts_done=len(layouts),
+                        total_rows=total_rows,
+                        last_success_number=last_success_number,
+                        found_tables=found_tables,
+                        total_pages=total_pages,
+                    )
                     return fail(
                         "overflow",
                         row=total_rows - 1,
                         page_before=start_page,
                         page_after=page_number,
-                        detail="extra PDF fragment",
+                        detail=_format_tail_page_none_detail(
+                            matching_tables=len(tables),
+                            probe=extra_probe,
+                            guard_miss=extra_miss,
+                            return_none=(
+                                "_data_row_page_layout_pdf:overflow_extra_fragment"
+                            ),
+                            extra="extra PDF fragment",
+                        ),
                     )
                 row_index = len(layouts)
                 target = expected[row_index]
@@ -1165,13 +1252,30 @@ def _data_row_page_layout_pdf(
                     normalized_fragment[column] = normalized(fragment[column])
                     accumulated[column] += normalized_fragment[column]
                     if not target[column].startswith(accumulated[column]):
+                        _, prefix_miss, extra_probe = _blank_trailing_page_probe(
+                            page,
+                            page_number,
+                            layouts_done=len(layouts),
+                            total_rows=total_rows,
+                            last_success_number=last_success_number,
+                            found_tables=found_tables,
+                            total_pages=total_pages,
+                        )
                         return fail(
                             "overflow",
                             row=row_index,
                             page_before=start_page,
                             page_after=page_number,
                             field=names.get(column) or f"col{column}",
-                            detail="PDF text left source prefix",
+                            detail=_format_tail_page_none_detail(
+                                matching_tables=len(tables),
+                                probe=extra_probe,
+                                guard_miss=prefix_miss,
+                                return_none=(
+                                    "_data_row_page_layout_pdf:overflow_prefix"
+                                ),
+                                extra="PDF text left source prefix",
+                            ),
                         )
                 fragments.append((page_number, normalized_fragment))
                 if not all(accumulated[column] == target[column] for column in body_columns):
@@ -1184,13 +1288,30 @@ def _data_row_page_layout_pdf(
                         [len(item[column]) for _page, item in fragments],
                     )
                     if pieces is None:
+                        _, slice_miss, extra_probe = _blank_trailing_page_probe(
+                            page,
+                            page_number,
+                            layouts_done=len(layouts),
+                            total_rows=total_rows,
+                            last_success_number=last_success_number,
+                            found_tables=found_tables,
+                            total_pages=total_pages,
+                        )
                         return fail(
                             "overflow",
                             row=row_index,
                             page_before=start_page,
                             page_after=page_number,
                             field=names.get(column) or f"col{column}",
-                            detail="cannot slice cell onto pages",
+                            detail=_format_tail_page_none_detail(
+                                matching_tables=len(tables),
+                                probe=extra_probe,
+                                guard_miss=slice_miss,
+                                return_none=(
+                                    "_data_row_page_layout_pdf:overflow_slice"
+                                ),
+                                extra="cannot slice cell onto pages",
+                            ),
                         )
                     exact_by_column[column] = pieces
                 segments = []
@@ -1212,13 +1333,35 @@ def _data_row_page_layout_pdf(
                 start_page = None
                 complete_identifiers = set()
                 fragments = []
-    if len(layouts) != total_rows or start_page is not None:
-        return fail(
-            "spans is None",
-            row=len(layouts) if len(layouts) < total_rows else total_rows - 1,
-            page_before=start_page,
-            detail="incomplete PDF coverage",
-        )
+        if len(layouts) != total_rows or start_page is not None:
+            incomplete = (
+                f"incomplete PDF coverage {QA_TAIL_PAGE_DIAG_MARKER} "
+                "return_None=_data_row_page_layout_pdf:incomplete_coverage"
+            )
+            if page is not None:
+                _, incomplete_miss, extra_probe = _blank_trailing_page_probe(
+                    page,
+                    page_number,
+                    layouts_done=len(layouts),
+                    total_rows=total_rows,
+                    last_success_number=last_success_number,
+                    found_tables=found_tables,
+                    total_pages=total_pages,
+                )
+                incomplete = _format_tail_page_none_detail(
+                    matching_tables=len(tables) if tables is not None else None,
+                    probe=extra_probe,
+                    guard_miss=incomplete_miss,
+                    return_none="_data_row_page_layout_pdf:incomplete_coverage",
+                    extra="incomplete PDF coverage",
+                )
+            return fail(
+                "spans is None",
+                row=len(layouts) if len(layouts) < total_rows else total_rows - 1,
+                page_before=start_page,
+                page_after=page_number if page is not None else None,
+                detail=incomplete,
+            )
     return tuple(layouts)
 
 
