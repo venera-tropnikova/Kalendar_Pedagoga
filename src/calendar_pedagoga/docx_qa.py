@@ -798,8 +798,9 @@ def _longest_triad_field(cells: list[str]) -> str | None:
 
 
 def _page_has_only_page_number(text: str, page_number: int) -> bool:
-    stripped = (text or "").replace("\u00a0", " ").strip()
-    return stripped == "" or stripped == str(page_number)
+    cleaned = (text or "").replace("\u00a0", " ").replace("\u200b", "")
+    leftover = re.sub(rf"(?<!\d){re.escape(str(page_number))}(?!\d)", " ", cleaned)
+    return leftover.strip() == ""
 
 
 def _is_blank_trailing_pdf_page(
@@ -809,6 +810,7 @@ def _is_blank_trailing_pdf_page(
     layouts_done: int,
     total_rows: int,
     last_success_number: int | None,
+    found_tables: list | None = None,
 ) -> bool:
     """Ignore an empty page only after every logical row is already matched."""
 
@@ -817,9 +819,10 @@ def _is_blank_trailing_pdf_page(
     if layouts_done != total_rows:
         return False
     try:
-        if list(page.find_tables().tables):
-            return False
+        tables = list(found_tables) if found_tables is not None else list(page.find_tables().tables)
     except Exception:
+        return False
+    if tables:
         return False
     try:
         if page.get_drawings():
@@ -1000,7 +1003,8 @@ def _data_row_page_layout_pdf(
     last_success_number: int | None = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
-            tables = [table for table in page.find_tables().tables
+            found_tables = list(page.find_tables().tables)
+            tables = [table for table in found_tables
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
                 if _is_blank_trailing_pdf_page(
@@ -1009,6 +1013,7 @@ def _data_row_page_layout_pdf(
                     layouts_done=len(layouts),
                     total_rows=total_rows,
                     last_success_number=last_success_number,
+                    found_tables=found_tables,
                 ):
                     continue
                 snapshots: list[PagePdfSnapshot] = []
@@ -1147,6 +1152,9 @@ def detect_data_row_page_layout(
         )
         return None
     try:
+        # First stage: trailing blank PDF pages are ignored only after every
+        # data row is already matched; later stages keep the same fail-closed
+        # layout parser and are not loosened separately.
         return _data_row_page_layout_pdf(content, pdf, total_rows)
     except Exception as error:
         logger.debug("PDF row-segment measurement unavailable", exc_info=False)

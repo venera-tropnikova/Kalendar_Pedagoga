@@ -388,6 +388,28 @@ def test_trailing_empty_page_after_all_36_rows_is_ignored(monkeypatch):
     assert len(layouts) == 36
 
 
+def test_detect_data_row_page_layout_ignores_blank_page_8(monkeypatch):
+    remaining = _week_rows(36)
+    chunks = [remaining[index:index + 5] for index in range(0, 30, 5)] + [remaining[30:]]
+    assert len(chunks) == 7
+    assert sum(len(chunk) for chunk in chunks) == 36
+    pages = [
+        _layout_page(
+            rows=chunk,
+            text=' '.join(row[1] for row in chunk),
+            drawings=8,
+        )
+        for chunk in chunks
+    ]
+    pages.append(_layout_page(rows=[], table_count=0, text='8\n', drawings=0))
+    _open_pages(monkeypatch, pages)
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', lambda _content: b'pdf')
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', lambda _content: None)
+    layouts = qa.detect_data_row_page_layout(_source_weeks(36), total_rows=36)
+    assert layouts is not None
+    assert len(layouts) == 36
+
+
 def test_empty_page_before_all_rows_matched_still_fails(monkeypatch):
     _open_pages(monkeypatch, [
         _layout_page(rows=_week_rows(10), text='1 10', drawings=8),
