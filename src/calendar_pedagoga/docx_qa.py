@@ -797,10 +797,96 @@ def _longest_triad_field(cells: list[str]) -> str | None:
     return max(triad, key=triad.get)
 
 
-def _page_has_only_page_number(text: str, page_number: int) -> bool:
+def _page_text_after_removing_page_number(text: str, page_number: int) -> str:
     cleaned = (text or "").replace("\u00a0", " ").replace("\u200b", "")
     leftover = re.sub(rf"(?<!\d){re.escape(str(page_number))}(?!\d)", " ", cleaned)
-    return leftover.strip() == ""
+    return leftover.strip()
+
+
+def _page_has_only_page_number(text: str, page_number: int) -> bool:
+    return _page_text_after_removing_page_number(text, page_number) == ""
+
+
+def _blank_trailing_page_probe(
+    page,
+    page_number: int,
+    *,
+    layouts_done: int,
+    total_rows: int,
+    last_success_number: int | None,
+    found_tables: list | None = None,
+    total_pages: int | None = None,
+) -> tuple[bool, str, dict[str, object]]:
+    """Explain why a page is or is not an ignorable trailing blank. Does not pass QA."""
+
+    leftover = ""
+    drawings_n: int | None = None
+    try:
+        tables = list(found_tables) if found_tables is not None else list(page.find_tables().tables)
+        tables_n = len(tables)
+    except Exception as error:
+        tables = []
+        tables_n = None
+        info = _trailing_page_info(
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+        )
+        return False, f"tables_exc={type(error).__name__}", info
+    try:
+        drawings_raw = page.get_drawings()
+        drawings_n = len(drawings_raw)
+        drawings_truthy = bool(drawings_raw)
+    except Exception as error:
+        info = _trailing_page_info(
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+        )
+        return False, f"drawings_exc={type(error).__name__}", info
+    try:
+        leftover = _page_text_after_removing_page_number(page.get_text() or "", page_number)
+    except Exception as error:
+        info = _trailing_page_info(
+            page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+        )
+        return False, f"text_exc={type(error).__name__}", info
+    info = _trailing_page_info(
+        page_number, total_pages, layouts_done, total_rows, tables_n, drawings_n, leftover
+    )
+    if last_success_number is None:
+        return False, "last_success_number is None", info
+    if page_number <= last_success_number:
+        return False, f"page {page_number} <= last_success {last_success_number}", info
+    if layouts_done != total_rows:
+        return False, f"matched_rows {layouts_done} != expected_rows {total_rows}", info
+    if tables:
+        return False, f"tables={tables_n}", info
+    if drawings_truthy:
+        return False, f"drawings={drawings_n}", info
+    if leftover:
+        return False, f"leftover_text={leftover!r}", info
+    return True, "pass", info
+
+
+def _trailing_page_info(
+    page_number: int,
+    total_pages: int | None,
+    matched_rows: int,
+    expected_rows: int,
+    tables: int | None,
+    drawings: int | None,
+    leftover: str,
+) -> dict[str, object]:
+    is_last = (
+        "—" if total_pages is None else ("YES" if page_number == total_pages else "NO")
+    )
+    return {
+        "page_index": page_number,
+        "total_pages": total_pages if total_pages is not None else "—",
+        "is_last_page": is_last,
+        "matched_rows_before_page": matched_rows,
+        "expected_rows": expected_rows,
+        "tables": tables,
+        "drawings": drawings,
+        "leftover_text": leftover,
+    }
 
 
 def _is_blank_trailing_pdf_page(
@@ -814,26 +900,15 @@ def _is_blank_trailing_pdf_page(
 ) -> bool:
     """Ignore an empty page only after every logical row is already matched."""
 
-    if last_success_number is None or page_number <= last_success_number:
-        return False
-    if layouts_done != total_rows:
-        return False
-    try:
-        tables = list(found_tables) if found_tables is not None else list(page.find_tables().tables)
-    except Exception:
-        return False
-    if tables:
-        return False
-    try:
-        if page.get_drawings():
-            return False
-    except Exception:
-        return False
-    try:
-        text = page.get_text() or ""
-    except Exception:
-        return False
-    return _page_has_only_page_number(text, page_number)
+    ok, _reason, _info = _blank_trailing_page_probe(
+        page,
+        page_number,
+        layouts_done=layouts_done,
+        total_rows=total_rows,
+        last_success_number=last_success_number,
+        found_tables=found_tables,
+    )
+    return ok
 
 
 def _last_week_on_page(text: str, last_week_cell: str) -> bool:
@@ -1002,19 +1077,27 @@ def _data_row_page_layout_pdf(
     last_success_page = None
     last_success_number: int | None = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        total_pages = getattr(document, "page_count", None)
+        if total_pages is None:
+            try:
+                total_pages = len(document)
+            except Exception:
+                total_pages = None
         for page_number, page in enumerate(document, start=1):
             found_tables = list(page.find_tables().tables)
             tables = [table for table in found_tables
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
-                if _is_blank_trailing_pdf_page(
+                ignorable, guard_miss, probe = _blank_trailing_page_probe(
                     page,
                     page_number,
                     layouts_done=len(layouts),
                     total_rows=total_rows,
                     last_success_number=last_success_number,
                     found_tables=found_tables,
-                ):
+                    total_pages=total_pages,
+                )
+                if ignorable:
                     continue
                 snapshots: list[PagePdfSnapshot] = []
                 if last_success_page is not None and last_success_number is not None:
@@ -1036,12 +1119,25 @@ def _data_row_page_layout_pdf(
                         expected_columns=len(source.columns),
                     )
                 )
+                return_none = (
+                    "_data_row_page_layout_pdf:len(matching_tables)!=1"
+                )
                 return fail(
                     "spans is None",
                     row=len(layouts),
                     page_before=start_page,
                     page_after=page_number,
-                    detail=f"tables={len(tables)}",
+                    detail=(
+                        f"tables={len(tables)} "
+                        f"page_index={probe['page_index']}/{probe['total_pages']} "
+                        f"is_last_page={probe['is_last_page']} "
+                        f"matched_rows_before_page={probe['matched_rows_before_page']} "
+                        f"expected_rows={probe['expected_rows']} "
+                        f"drawings={probe['drawings']} "
+                        f"leftover_text={probe['leftover_text']!r} "
+                        f"guard_miss={guard_miss} "
+                        f"return_None={return_none}"
+                    ),
                     snapshots=tuple(snapshots),
                 )
             last_success_page = page

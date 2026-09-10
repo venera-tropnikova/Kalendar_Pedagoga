@@ -168,6 +168,13 @@ def _open_pages(monkeypatch, pages):
         def __iter__(self):
             yield from pages
 
+        def __len__(self):
+            return len(pages)
+
+        @property
+        def page_count(self):
+            return len(pages)
+
     monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
 
 
@@ -352,7 +359,7 @@ def test_tables_zero_records_failing_and_last_success_page_snapshots(monkeypatch
     diagnosis = qa.page_layout_diagnosis()
     assert diagnosis is not None
     assert diagnosis.reason == "spans is None"
-    assert diagnosis.detail == "tables=0"
+    assert diagnosis.detail.startswith("tables=0")
     assert diagnosis.page_after == 2
     assert [snapshot.role for snapshot in diagnosis.snapshots] == [
         "last_success",
@@ -420,7 +427,7 @@ def test_empty_page_before_all_rows_matched_still_fails(monkeypatch):
     diagnosis = qa.page_layout_diagnosis()
     assert diagnosis is not None
     assert diagnosis.reason == 'spans is None'
-    assert diagnosis.detail == 'tables=0'
+    assert diagnosis.detail.startswith("tables=0")
     assert diagnosis.page_after == 2
 
 
@@ -433,7 +440,7 @@ def test_trailing_page_with_calendar_text_still_fails(monkeypatch):
     diagnosis = qa.page_layout_diagnosis()
     assert diagnosis is not None
     assert diagnosis.reason == 'spans is None'
-    assert diagnosis.detail == 'tables=0'
+    assert diagnosis.detail.startswith("tables=0")
 
 
 def test_trailing_page_with_drawings_still_fails(monkeypatch):
@@ -445,7 +452,7 @@ def test_trailing_page_with_drawings_still_fails(monkeypatch):
     diagnosis = qa.page_layout_diagnosis()
     assert diagnosis is not None
     assert diagnosis.reason == 'spans is None'
-    assert diagnosis.detail == 'tables=0'
+    assert diagnosis.detail.startswith("tables=0")
 
 
 def test_month_label_verification_uses_one_consistent_render(monkeypatch):
