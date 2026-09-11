@@ -16,6 +16,50 @@ SLOT_CONTINUE_WARNING = (
 
 _CONTINUATION_MARK = "Продолжение."
 
+# Lexical action heads, not topic names. Only a semicolon continuation in
+# the same sentence may inherit one; a new sentence/action resets the scope.
+_SHARED_HEAD_RE = re.compile(
+    r"^(?P<head>выполнение|проведение|изготовление|изучение|отработка|"
+    r"составление|подготовка|освоение|разучивание|создание|"
+    r"наблюдение|исследование|обсуждение|организация|сбор|описание|"
+    r"сравнение|измерение|определение|знакомство)(?:\s+|$)", re.I
+)
+_DEPENDENT_START_RE = re.compile(
+    r"^(?:[а-яё-]+(?:ых|их|ого|его|ов|ей)\b)", re.I
+)
+
+
+def _inherit_split_heads(source: str) -> str:
+    """Restore a source head on proven lower-case list continuations only.
+
+    Keep punctuation and quoted titles intact. Never carry a head across a
+    sentence boundary, or supply a head to an independent nominal action.
+    Ambiguous fragments remain unchanged rather than acquiring a guessed verb.
+    """
+    parts = []
+    start = 0
+    for boundary in re.finditer(r'«[^»]*»|“[^”]*”|"[^"]*"|;\s*', source):
+        if boundary.group().startswith(";"):
+            parts.extend((source[start:boundary.start()], boundary.group()))
+            start = boundary.end()
+    parts.append(source[start:])
+    head = ""
+    for index in range(0, len(parts), 2):
+        part = parts[index]
+        stripped = part.lstrip()
+        match = _SHARED_HEAD_RE.match(stripped)
+        if match:
+            head = match.group("head")
+        elif head and stripped and stripped[0].islower() and _DEPENDENT_START_RE.match(stripped):
+            parts[index] = part[:len(part) - len(stripped)] + head + " " + stripped
+        else:
+            head = ""
+        # Punctuation in quoted names is not a sentence boundary.
+        unquoted = re.sub(r'«[^»]*»|“[^”]*”|"[^"]*"', "", part)
+        if re.search(r"[.!?](?:\s|$)", unquoted):
+            head = ""
+    return "".join(parts)
+
 
 def practice_units_from_text(text: str) -> list[str]:
     """Клаузы уже выделенного практического текста или полного блока с маркером."""
@@ -24,7 +68,7 @@ def practice_units_from_text(text: str) -> list[str]:
         return []
     explicit = _split_explicit_practice(text)
     source = explicit[1] if explicit else text
-    return _clause_units(source) if source.strip() else []
+    return _clause_units(_inherit_split_heads(source)) if source.strip() else []
 
 
 def practice_units_from_content(

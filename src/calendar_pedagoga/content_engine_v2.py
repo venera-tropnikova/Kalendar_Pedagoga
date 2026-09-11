@@ -4678,7 +4678,44 @@ def _coalesce_activity_units(units: list[str]) -> list[str]:
     return coalesced
 
 
+def _conducted_event_result(clause: str) -> str | None:
+    """A pupil participates in source-named events; retain the complete list.
+
+    Convert only attested event nouns with known locatives. An unknown list
+    member rejects the entire conversion, never silently dropping that member.
+    Quoted names after a colon are source text and are not inflected.
+    """
+    # Simple one-object conduct actions already have a closed repair below.
+    # This path is only for catalogues whose members must survive intact.
+    if ":" not in clause and "," not in clause:
+        return None
+    match = re.match(r"(?i)^проведение\s+(.+)$", _normalize_spaces(clause))
+    if not match:
+        return None
+    body, colon, names = match.group(1).partition(":")
+    locatives = {"игр": "играх", "праздников": "праздниках",
+                 "соревнований": "соревнованиях", "викторин": "викторинах",
+                 "эстафет": "эстафетах", "экскурсий": "экскурсиях"}
+    converted = []
+    for item in body.split(","):
+        event = re.fullmatch(
+            r"(?i)\s*((?:(?:[а-яё-]+(?:ых|их)|и)\s+)*)"
+            r"(" + "|".join(locatives) + r")((?:\s+(?:с|со|для|по|на|в)\s+.+)?)\s*",
+            item,
+        )
+        if not event:
+            return None
+        converted.append(event.group(1) + locatives[event.group(2).casefold()] + event.group(3))
+    result = "участвует в " + ", ".join(converted)
+    if colon:
+        result += ": " + names.strip()
+    return result
+
+
 def _finite_other_slot_result(clause: str) -> str:
+    event_result = _conducted_event_result(clause)
+    if event_result:
+        return event_result
     phrase, _frame = transform_clause_to_result(
         clause,
         theory_only=False,
@@ -5261,6 +5298,8 @@ def _quality_issue(
         words = match.group(1).casefold().split()
         while words and _is_adjective(words[0]):
             words.pop(0)
+            if len(words) > 1 and words[0] == "и" and _is_adjective(words[1]):
+                words.pop(0)
         compound_parts = (
             re.sub(r"[^а-яё-]", "", words[0]).split("-") if words else []
         )
