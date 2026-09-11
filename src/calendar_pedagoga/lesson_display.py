@@ -9,7 +9,11 @@ import re
 _PRACTICE_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:^|\n)\s*Практические занятия\.?\s*", re.IGNORECASE), "block"),
     (re.compile(r"\bПрактика\.\s*", re.IGNORECASE), "split"),
+    # «Практика» отдельной строкой — тот же раздел, точка в источнике не обязательна.
+    (re.compile(r"(?:^|\n)[ \t]*Практика[ \t]*(?:\n|$)", re.IGNORECASE), "split"),
 )
+
+_PRACTICE_MARKER_WORDS = frozenset({"практика", "практические занятия"})
 
 _PRACTICE_SENTENCE_RE = re.compile(
     r"(?:составлен|разработ|отработ|подбор|выбор|выполн|изучен|определ|"
@@ -51,6 +55,15 @@ def _practice_marker_match(content: str) -> tuple[re.Match[str], str] | None:
     return earliest[1], earliest[2]
 
 
+def _without_marker_lines(text: str) -> str:
+    """Служебные строки «Практика»/«Практические занятия» не идут в ячейку."""
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if line.strip().casefold().strip(" .") not in _PRACTICE_MARKER_WORDS
+    )
+
+
 def brief_theory_fragment(content: str) -> str:
     """Теоретический фрагмент до явной границы практики."""
     match_info = _practice_marker_match(content)
@@ -70,7 +83,7 @@ def brief_practice_summary(content: str) -> tuple[str, str]:
     match_info = _practice_marker_match(content)
     if match_info is not None:
         match, kind = match_info
-        practice_block = _normalize_spaces(content[match.end() :])
+        practice_block = _normalize_spaces(_without_marker_lines(content[match.end() :]))
         sentences = _split_sentences(practice_block)
         if sentences:
             return _join_sentences(sentences), kind
@@ -115,33 +128,22 @@ def _clause_units_from_practice(content: str, *, theory_hours: int, practice_hou
     return _clause_units(practice_text) if practice_text else []
 
 
-def _distinctive_clause_tail(clause: str) -> str:
-    text = _normalize_spaces(clause).casefold().rstrip(" .")
-    return re.sub(
-        r"(?i)^(?:(?:выполняет\s+)?упражнен\w*|игр\w*)\s+",
-        "",
-        text,
-    )
+def week_practice_content(
+    content: str,
+    *,
+    theory_hours: int,
+    practice_hours: int,
+) -> str:
+    """Всё практическое содержание недели без служебного маркера «Практика»."""
 
-
-def clause_is_week_result(clause: str, planned_result: str, units: list[str]) -> bool:
-    """True when RESULT is this practice unit, not the whole practice block."""
-
-    result = _normalize_spaces(planned_result).casefold()
-    selected = _normalize_spaces(clause).casefold().rstrip(" .")
-    if not result or not selected:
-        return False
-    tail = _distinctive_clause_tail(clause)
-    if selected not in result and (not tail or tail not in result):
-        return False
-    for other in units:
-        other_norm = _normalize_spaces(other).casefold().rstrip(" .")
-        if other_norm == selected:
-            continue
-        other_tail = _distinctive_clause_tail(other)
-        if other_tail and other_tail in result:
-            return False
-    return True
+    units = [
+        unit
+        for unit in _clause_units_from_practice(
+            content, theory_hours=theory_hours, practice_hours=practice_hours
+        )
+        if unit.casefold().strip(" .") not in _PRACTICE_MARKER_WORDS
+    ]
+    return ". ".join(unit.rstrip(" .") for unit in units)
 
 
 def selected_practice_clause(
@@ -203,46 +205,6 @@ def selected_practice_clause(
     if theory_only:
         return ""
     return _normalize_spaces(clause)
-
-
-def practice_clause_for_repeated_topic(
-    *,
-    topic_title: str,
-    content: str,
-    theory_hours: int,
-    practice_hours: int,
-    occurrence_index: int,
-    planned_result: str,
-    appearance_count: int = 0,
-) -> str:
-    """Assigned slot text for a repeated topic; empty if theory-led."""
-
-    if appearance_count > 1:
-        return selected_practice_clause(
-            topic_title=topic_title,
-            content=content,
-            theory_hours=theory_hours,
-            practice_hours=practice_hours,
-            occurrence_index=occurrence_index,
-            appearance_count=appearance_count,
-        )
-
-    selected = selected_practice_clause(
-        topic_title=topic_title,
-        content=content,
-        theory_hours=theory_hours,
-        practice_hours=practice_hours,
-        occurrence_index=occurrence_index,
-    )
-    units = _clause_units_from_practice(
-        content, theory_hours=theory_hours, practice_hours=practice_hours
-    )
-    if selected and clause_is_week_result(selected, planned_result, units):
-        return selected
-    for unit in units:
-        if clause_is_week_result(unit, planned_result, units):
-            return _normalize_spaces(unit)
-    return ""
 
 
 def format_practice_cell(

@@ -20,7 +20,8 @@ from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
 from calendar_pedagoga.lesson_display import (
     format_practice_cell,
     format_theory_cell,
-    practice_clause_for_repeated_topic,
+    selected_practice_clause,
+    week_practice_content,
 )
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
@@ -714,18 +715,16 @@ def _topic_cells_for_lesson(
         )
         selected_clause = ""
         appearance_count = topic_counts.get(occurrence_key, 0)
-        if (
-            part.practice_hours
-            and (appearance_count > 1 or part.weekly_content_assigned)
-        ):
-            selected_clause = practice_clause_for_repeated_topic(
+        if part.practice_hours and appearance_count > 1:
+            # Слоты распределяются только между повторами темы: неделя с одним
+            # вхождением показывает всё назначенное практическое содержание.
+            selected_clause = selected_practice_clause(
                 topic_title=part.topic_title,
                 content=part.program_content_full,
                 theory_hours=part.theory_hours,
                 practice_hours=part.practice_hours,
                 occurrence_index=occurrence_index,
-                planned_result=lesson.planned_result,
-                appearance_count=max(appearance_count, 1),
+                appearance_count=appearance_count,
             )
         practice_cell = format_practice_cell(
             display_number,
@@ -737,18 +736,21 @@ def _topic_cells_for_lesson(
         generic_practice_cell = (
             f"{display_number}. {part.topic_title} ({part.practice_hours})"
         )
-        if (
-            part.weekly_content_assigned
-            and practice_cell == generic_practice_cell
-            and part.program_topic.strip()
-        ):
-            practice_cell = format_practice_cell(
-                display_number,
-                part.topic_title,
+        if part.weekly_content_assigned and practice_cell == generic_practice_cell:
+            # Заголовок программы — только когда содержания недели нет совсем.
+            body = week_practice_content(
                 part.program_content_full,
-                part.practice_hours,
-                part.program_topic.strip(),
-            )
+                theory_hours=part.theory_hours,
+                practice_hours=part.practice_hours,
+            ) or part.program_topic.strip()
+            if body:
+                practice_cell = format_practice_cell(
+                    display_number,
+                    part.topic_title,
+                    part.program_content_full,
+                    part.practice_hours,
+                    body,
+                )
         if theory_cell:
             theory_lines.append(theory_cell)
         if practice_cell:
