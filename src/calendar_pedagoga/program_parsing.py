@@ -551,7 +551,10 @@ def infer_study_year_number(value: str | None) -> int | None:
     """Преобразовать «второй», «2 год» и т.п. в номер года обучения."""
     if not value:
         return None
-    text = value.casefold()
+    # В «1 г.docx» маркер года стоит перед расширением файла, поэтому оно
+    # отделяется. Сам маркер «год»/«г.» остаётся обязательным, и копия вида
+    # «(2).docx» годом по-прежнему не считается.
+    text = re.sub(r"\.docx?(?=\W|$)", " ", value.casefold())
     for token, number in (
         ("перв", 1),
         ("втор", 2),
