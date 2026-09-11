@@ -4,6 +4,7 @@ from calendar_pedagoga.content_engine_v2 import (
     _aggregate_week_lesson_type,
     _merge_independent_part_results,
     _merge_part_results,
+    _proven_finite_predicates,
     build_lesson_content_v2,
 )
 from calendar_pedagoga.content_generation import WeekTopicPart
@@ -110,7 +111,24 @@ def test_same_topic_objects_still_join_with_and() -> None:
     derived = _fill_tp_topic("1.2")
     assert derived.planned_result.startswith("Характеризует роль туризма")
     assert " и " in derived.planned_result
-    assert derived.planned_result.casefold().count("характеризует") == 1
+    low = derived.planned_result.casefold()
+    # Каждая назначенная клауза сохраняет своё действие: плотность недели
+    # не основание опустить его. Число предложений не фиксируется.
+    for marker in (
+        "роль туризма",
+        "значение туристско-краеведческой деятельности",
+        "воспитание волевых качеств",
+    ):
+        assert marker in low, f"missing {marker!r} in {derived.planned_result!r}"
+    # Предикаты только доказанные: объединение объектов не создаёт действия.
+    # «характеризует»/«раскрывает» — знаниевая пара самого гейта результата.
+    allowed = set(_proven_finite_predicates()) | {"характеризует", "раскрывает"}
+    for sentence in derived.planned_result.split(". "):
+        assert sentence.casefold().split()[0] in allowed, sentence
+    # Недоказанная клауза остаётся видимой как NEEDS_REVIEW, а не удаляется.
+    for clause, status in derived.clause_coverage:
+        if status == "NEEDS_REVIEW":
+            assert any(clause in warning for warning in derived.warnings), clause
     assert derived.assessment_method.startswith("устный опрос по роли туризма")
     assert derived.assessment_method.count("устный опрос") == 1
     folded = _merge_part_results(

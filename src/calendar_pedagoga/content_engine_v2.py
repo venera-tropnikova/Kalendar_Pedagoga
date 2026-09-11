@@ -6035,15 +6035,84 @@ def _derive_week_fields_v2(
     )
 
 
+# Accusative proven by the form itself: neuter -ние/-тие/-ствие/-ье repeats the
+# nominative, feminine -а/-я is already realised as -у/-ю. Animacy stays unknown
+# for bare masculine and plural heads, so those remain unproven.
+_PROVEN_NEUTER_ACC_RE = re.compile(r"(?i)(?:ние|тие|ствие|ье|ьё)$")
+_NEUTER_DATIVE_RE = re.compile(r"(?i)(?:нию|тию|стию)$")
+_NOMINATIVE_FEMININE_ADJ_RE = re.compile(r"(?i)(?:ая|яя)$")
+
+
+def _proven_feminine_acc_form(low: str) -> bool:
+    """-у/-ю that can only be a feminine accusative, not a neuter dative."""
+
+    if low.endswith("ию"):
+        return not _NEUTER_DATIVE_RE.search(low)
+    if low.endswith("у"):
+        return _regular_feminine_a_noun(low[:-1] + "а")
+    return False
+
+
+def _proven_accusative_noun(word: str) -> bool:
+    core = _strip_punct_word(word)[1].casefold()
+    if len(core) < 4:
+        return False
+    if _is_theory_knowledge_token(word):
+        return True
+    if _PROVEN_NEUTER_ACC_RE.search(core):
+        return True
+    return _proven_feminine_acc_form(core)
+
+
+def _proven_characterize_object(sentence: str) -> bool:
+    """Object case proven by its own form, not by a closed list of lemmas."""
+
+    tokens = _normalize_spaces(sentence).split()[1:]
+    index = 0
+    while (
+        index < len(tokens)
+        and _is_adjective(tokens[index])
+        and not _proven_accusative_noun(tokens[index])
+    ):
+        # A nominative feminine modifier cannot agree with an accusative head.
+        if _NOMINATIVE_FEMININE_ADJ_RE.search(_strip_punct_word(tokens[index])[1]):
+            return False
+        index += 1
+    if index >= len(tokens) or not _proven_accusative_noun(tokens[index]):
+        return False
+    return not _unproven_object_conjunct(tokens, index)
+
+
+def _unproven_object_conjunct(tokens: list[str], head: int) -> bool:
+    """An «и» conjunct that cannot carry the case of the object group."""
+
+    for position in range(head + 1, len(tokens) - 1):
+        if _is_preposition(tokens[position]):
+            # A prepositional complement ends the object group.
+            return False
+        if _strip_punct_word(tokens[position])[1].casefold() != "и":
+            continue
+        following = tokens[position + 1]
+        if _is_adjective(following) or _proven_accusative_noun(following):
+            continue
+        if position == head + 1:
+            # Directly coordinated with the object: the case must be proven.
+            return True
+        if _regular_feminine_a_noun(_strip_punct_word(following)[1].casefold()):
+            # A nominative -а cannot continue the accusative object group.
+            return True
+    return False
+
+
 def _result_grammar_issue(sentence: str) -> str:
     """Conservative case evidence, not a suffix-based grammar repair."""
     words = re.findall(r"[а-яё-]+", sentence.casefold())
     if not words:
         return ""
     if words[0] in {"характеризует", "раскрывает"}:
-        # A nominal topic is not proof of accusative case or animacy.
-        # Only existing closed knowledge heads are safe without a parser.
-        if len(words) < 2 or words[1] not in _THEORY_KNOWLEDGE_HEADS:
+        # A nominal topic is not proof of accusative case or animacy, but a
+        # morphologically proven object form does not need a lemma list.
+        if not _proven_characterize_object(sentence):
             return "unproven_knowledge_object_case"
     # Plural genitive adjectives cannot agree with a singular -а/-я noun.
     # Do not try to guess an animate plural or repair it by endings.
