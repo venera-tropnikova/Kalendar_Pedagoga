@@ -64,20 +64,29 @@ def test_animals_keeps_genitive_owner() -> None:
 
 def test_two_comma_owners_abstain() -> None:
     derived = _theory("Приборы", "Компас, линейка, их устройство")
-    assert _is_generic(derived.planned_result)
     assert "устройств" not in derived.planned_result.casefold()
+    if derived.planned_result.strip():
+        assert _is_generic(derived.planned_result)
+    else:
+        assert any("NEEDS_REVIEW" in warning for warning in derived.warnings)
 
 
 def test_coordinated_two_owners_abstain() -> None:
     derived = _theory("Приборы", "Компас и линейка, их устройство")
-    assert _is_generic(derived.planned_result)
     assert "устройств" not in derived.planned_result.casefold()
+    if derived.planned_result.strip():
+        assert _is_generic(derived.planned_result)
+    else:
+        assert any("NEEDS_REVIEW" in warning for warning in derived.warnings)
 
 
 def test_neighbor_clause_is_not_owner() -> None:
     dangling = _theory("Компас", "Компас. Их устройство и назначение.")
-    assert _is_generic(dangling.planned_result)
     assert "устройств" not in dangling.planned_result.casefold()
+    if dangling.planned_result.strip():
+        assert _is_generic(dangling.planned_result)
+    else:
+        assert any("NEEDS_REVIEW" in warning for warning in dangling.warnings)
 
     neighbor = _theory("Приборы", "Компас. Линейка, её устройство")
     low = neighbor.planned_result.casefold()

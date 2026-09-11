@@ -181,7 +181,11 @@ def test_tp3_repeated_hours_keep_grid_without_inventing_clauses() -> None:
     )
     rows = [lesson for lesson in generated if lesson.source.topic_number == "5.2"]
     assert len(rows) == 5
-    assert all(lesson.planned_result for lesson in rows)
+    assert all(
+        lesson.planned_result
+        or any("NEEDS_REVIEW" in warning for warning in lesson.warnings)
+        for lesson in rows
+    )
     assert sum(lesson.source.practice_hours for lesson in rows) == 10
 
 

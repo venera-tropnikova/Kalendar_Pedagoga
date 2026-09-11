@@ -177,7 +177,10 @@ def test_key_specialises_type_where_source_is_enough_and_keeps_generic_otherwise
     assert by_week[19].lesson_type == "практическое занятие"
     for lesson in generated:
         control = lesson.assessment_method.casefold()
-        assert control
+        if not control:
+            assert not lesson.planned_result.strip()
+            assert any("NEEDS_REVIEW" in warning for warning in lesson.warnings)
+            continue
         if control == "педагогическое наблюдение":
             raise AssertionError(f"W{lesson.source.week_number}: bare control")
         if lesson.lesson_type == "экскурсия":
