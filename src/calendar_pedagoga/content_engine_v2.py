@@ -54,6 +54,8 @@ class ContentEngineV2Result:
     theory_text: str
     practice_text: str
     warnings: tuple[str, ...] = ()
+    type_result: str | None = None
+    clause_coverage: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class LessonContentV2Row:
     object: str
     conditions: str
     warnings: tuple[str, ...]
+    clause_coverage: tuple[tuple[str, str], ...] = ()
 
 
 # Универсальные отглагольные пары (морфология, не предмет).
@@ -4180,7 +4183,7 @@ def _skill_control(result: str) -> str:
     return "проверка " + " и ".join(pieces)
 
 
-def control_from_frame(
+def _selected_control_from_frame(
     frame: ActionFrame,
     *,
     lesson_type: str,
@@ -4215,6 +4218,78 @@ def control_from_frame(
     if skill:
         return skill
     return _oral_quiz_control(frame, planned_result)
+
+
+def _control_result_obligations(result: str) -> list[tuple[str, str]]:
+    """Read finite operations without changing RESULT or adding source actions."""
+    verbs = "|".join(map(re.escape, _PROVEN_FINITE_VERBS))
+    pattern = rf"(?i)(?<![а-яё])({verbs}|[а-яё]+(?:ивает|ывает|ает|яет))\b"
+    matches = list(re.finditer(pattern, result))
+    operations = []
+    for i, match in enumerate(matches):
+        # Unknown regular finites must be at a clause/coordination boundary.
+        prefix = result[:match.start()].rstrip()
+        if match.group(1).casefold() not in _PROVEN_FINITE_VERBS and prefix and not re.search(r"(?i)(?:[.;]|\bи|\bа)$", prefix):
+            continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(result)
+        obj = result[match.end():end].strip(" ,.;")
+        obj = re.sub(r"(?i)\s+(?:и|а|но)$", "", obj)
+        operations.append((match.group(1), "" if obj.casefold() in {"и", "а", "но"} else obj))
+    # «Изучает и отрабатывает X»: X belongs to both coordinated verbs.
+    for i in range(len(operations) - 2, -1, -1):
+        if not operations[i][1]:
+            operations[i] = (operations[i][0], operations[i + 1][1])
+    operations = [(v, o) for v, o in operations if o]
+    return operations
+
+
+def _control_covers_operation(control: str, verb: str, obj: str) -> bool:
+    """Require an operation anchor with its object, not an object alone."""
+    noun = _FINITE_TO_NOUN.get(verb.casefold()) or _VERB_TO_VERBAL_NOUN.get(verb.casefold())
+    anchor_word = (noun or verb).casefold()
+    if len(anchor_word) <= 6 and anchor_word.endswith(("а", "я", "и")):
+        anchor_word = anchor_word[:-1]
+    anchor = anchor_word[:5]
+    object_words = [w for w in re.findall(r"[а-яё]+", obj.casefold())
+                    if len(w) >= 3 and not _is_adjective(w) and w not in _PREPOSITIONS
+                    and w not in {"свой", "свою", "свои", "него", "ним", "его"}]
+    # Keep anchors inside one control clause. Coordinated nominal operations
+    # can share the following object («изучением и отработкой приёмов»).
+    for part in re.split(r"[;.]", control.casefold()):
+        # Inspecting a created product may verify its creation, but never a
+        # second operation such as placing, transporting or using it.
+        if object_words and verb.casefold() in {"изготавливает", "составляет", "строит", "подготавливает"} and "проверка" in part:
+            if re.search(r"\b" + re.escape(object_words[0][:4]) + r"[а-яё]*\b", part):
+                return True
+        match = re.search(r"\b" + re.escape(anchor) + r"[а-яё]*\b", part)
+        if not match:
+            continue
+        tail = part[match.end():]
+        if not object_words or re.search(r"\b" + re.escape(object_words[0][:3]) + r"[а-яё]*\b", tail):
+            return True
+    return False
+
+
+def control_from_frame(
+    frame: ActionFrame, *, lesson_type: str, theory_hours: int,
+    practice_hours: int, planned_result: str = "",
+) -> str:
+    control = _selected_control_from_frame(
+        frame, lesson_type=lesson_type, theory_hours=theory_hours,
+        practice_hours=practice_hours, planned_result=planned_result,
+    )
+    if not planned_result.strip():
+        return control
+    if re.search(r"(?i)\bили\b|\bпо выбору\b", planned_result) and not re.search(
+        r"(?i)\bили\b|\bпо выбору\b|\bвыбранн", control,
+    ):
+        control = "проверка выбранного варианта действия: «" + planned_result.rstrip(".") + "»"
+    operations = _control_result_obligations(planned_result)
+    if len(operations) > 1:
+        for verb, obj in operations:
+            if not _control_covers_operation(control, verb, obj):
+                control += "; проверка действия «" + verb + " " + obj + "»"
+    return control
 
 
 _DISCOURSE_HEAD_RE = re.compile(
@@ -5676,7 +5751,7 @@ def _pupil_observes_demonstration(source: str) -> tuple[str, str] | None:
     )
 
 
-def derive_fields_v2(
+def _derive_selected_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
     occurrence_index: int = 0, practice_appearance_count: int = 0,
@@ -5763,6 +5838,275 @@ def derive_fields_v2(
         candidate, frame=ActionFrame(candidate.frame.clause, "", "", ""),
         lesson_type=lesson_type, planned_result=result, assessment_method=control,
         warnings=(*candidate.warnings, f"Безопасный шаблон CE2: {issue}."),
+    )
+
+
+def _nonempty_result_in(candidate: str, result: str) -> bool:
+    candidate = _normalize_spaces(candidate).strip(" .").casefold()
+    return bool(candidate and candidate in _normalize_spaces(result).casefold())
+
+
+def _retained_complement_covered(clause: str, original: ContentEngineV2Result) -> bool:
+    """Recognise provenance already established by the complement mechanism."""
+    parts = _focus_complement_parts(clause)
+    if parts == [clause] or not original.planned_result.strip():
+        return False
+    for part in parts:
+        if not _nonempty_result_in(part, original.frame.clause):
+            return False
+        phrase, _frame = transform_clause_to_result(
+            part, theory_only=False, full_source=original.frame.clause, topic_title="",
+        )
+        if not _nonempty_result_in(phrase, original.planned_result):
+            return False
+    return True
+
+
+def _derive_week_fields_v2(
+    *, topic_title: str, theory_text: str, practice_text: str,
+    program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
+    occurrence_index: int = 0, practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    """Retain independently proven clauses of the already assigned week."""
+    original = _derive_selected_fields_v2(
+        topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
+        program_content=program_content, theory_hours=theory_hours,
+        practice_hours=practice_hours, occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+    source = _week_result_source(
+        theory_hours=theory_hours, practice_hours=practice_hours,
+        theory_text=theory_text, practice_text=practice_text,
+        program_content=program_content,
+    )
+    if _pupil_observes_demonstration(source) or _prohibition_only_source(source):
+        status = "COVERED" if original.planned_result.strip() else "NEEDS_REVIEW"
+        return replace(original, clause_coverage=tuple(
+            (c, status) for c in _clause_units(source)
+            if c.casefold().strip(" .:") not in {"теория", "практика"}
+        ))
+    if practice_hours and practice_appearance_count > 1:
+        units = _coalesce_activity_units(practice_units_from_text(practice_text))
+        slots, _flags = assign_distributed_practice_slots(units, practice_appearance_count)
+        if not slots:
+            return original
+        clauses = list(slots[min(occurrence_index, len(slots) - 1)])
+    else:
+        clauses = _clause_units(source)
+    clauses = [c for c in clauses if c.casefold().strip(" .:") not in {"теория", "практика"}]
+    if len(clauses) < 2:
+        status = (
+            "COVERED" if original.planned_result.strip()
+            and "по теме" not in original.planned_result.casefold()
+            and not any("NEEDS_REVIEW" in w or w.startswith("Безопасный шаблон CE2:") for w in original.warnings)
+            else "NEEDS_REVIEW"
+        )
+        return replace(original, clause_coverage=tuple((c, status) for c in clauses))
+    results: list[str] = []
+    controls: list[str] = []
+    uncovered: list[str] = []
+    retained = (
+        bool(original.planned_result and original.assessment_method)
+        and not any(w.startswith("Безопасный шаблон CE2:") for w in original.warnings)
+        and "по теме" not in original.planned_result.casefold()
+    )
+    retained_added = False
+    for clause in clauses:
+        if retained and _normalize_spaces(clause).casefold() in _normalize_spaces(original.frame.clause).casefold():
+            if not retained_added:
+                results.append(original.planned_result)
+                controls.append(original.assessment_method)
+                retained_added = True
+            proof = _derive_selected_fields_v2(
+                topic_title=topic_title,
+                theory_text=clause if not practice_hours else "",
+                practice_text=clause if practice_hours else "",
+                program_content=clause,
+                theory_hours=theory_hours if not practice_hours else 0,
+                practice_hours=practice_hours,
+            )
+            phrase = proof.planned_result
+            if not _nonempty_result_in(phrase, original.planned_result):
+                uncovered.append(clause)
+            continue
+        if (_prohibition_only_source(clause) or _bare_list_without_action(clause)
+                or re.search(r"(?i)\b(?:педагог|учитель|инструктор|тренер)\b", clause)):
+            uncovered.append(clause)
+            continue
+        local = _derive_selected_fields_v2(
+            topic_title=topic_title,
+            theory_text=clause if not practice_hours else "",
+            practice_text=clause if practice_hours else "",
+            program_content=clause,
+            theory_hours=theory_hours if not practice_hours else 0,
+            practice_hours=practice_hours,
+        )
+        if retained and _nonempty_result_in(local.planned_result, original.planned_result):
+            continue
+        # Topic fallback and its warnings cannot certify the clause.
+        if (not local.planned_result or not local.assessment_method
+                or local.warnings
+                or "по теме" in local.planned_result.casefold()
+                or "по теме" in local.assessment_method.casefold()
+                or _quality_issue(local.planned_result, local.assessment_method,
+                                  source=clause, clause=local.frame.clause)):
+            uncovered.append(clause)
+            continue
+        # New additions have not passed the protected, contextual path.
+        # Abstain on unsupported object grammar rather than exposing raw
+        # genitives or nominal fragments as completed pupil actions.
+        if not practice_hours and not _proven_theory_object(clause):
+            uncovered.append(clause)
+            continue
+        if re.match(r"(?i)^(?:измеряет|строит|ремонтирует|оценивает|изготавливает)\s+"
+                    r"(?:[а-яё-]+(?:ых|их)\b|[а-яё-]+(?:ушек|аря)\b)", local.planned_result):
+            uncovered.append(clause)
+            continue
+        if local.planned_result not in results:
+            results.append(local.planned_result)
+        # Retain the proven finite wording: re-inflecting the concatenated
+        # objects can lose conditions or attach them to a different action.
+        control = (
+            ("Устный опрос" if not practice_hours else "Педагогическое наблюдение")
+            + ": проверяется действие «" + local.planned_result.rstrip(".") + "»"
+        )
+        if control not in controls:
+            controls.append(control)
+        # A successful local repair may keep only one coordinated operation.
+        # Do not certify the original clause as fully covered in that case.
+        for head, verb in _VERBAL_NOUN_TO_VERB.items():
+            if re.search(r"(?i)\b" + re.escape(head) + r"\b", clause):
+                if re.search(r"(?i)\s+и\s+" + re.escape(head) + r"\b", clause) or clause.casefold().startswith(head + " "):
+                    if verb not in local.planned_result.casefold() and " и " in clause:
+                        uncovered.append(clause)
+                        break
+    if retained and not retained_added:
+        results.insert(0, original.planned_result)
+        controls.insert(0, original.assessment_method)
+    if retained:
+        uncovered = [c for c in uncovered if not _retained_complement_covered(c, original)]
+    warnings = tuple(w for w in original.warnings if not w.startswith("Безопасный шаблон CE2:"))
+    warnings += tuple("NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + c for c in uncovered)
+    return replace(
+        original,
+        planned_result=_merge_independent_part_results(results),
+        assessment_method="; ".join(controls),
+        warnings=tuple(dict.fromkeys(warnings)),
+        type_result=original.planned_result,
+        clause_coverage=tuple(
+            (c, "NEEDS_REVIEW" if c in uncovered else "COVERED") for c in clauses
+        ),
+    )
+
+
+def _result_grammar_issue(sentence: str) -> str:
+    """Conservative case evidence, not a suffix-based grammar repair."""
+    words = re.findall(r"[а-яё-]+", sentence.casefold())
+    if not words:
+        return ""
+    if words[0] in {"характеризует", "раскрывает"}:
+        # A nominal topic is not proof of accusative case or animacy.
+        # Only existing closed knowledge heads are safe without a parser.
+        if len(words) < 2 or words[1] not in _THEORY_KNOWLEDGE_HEADS:
+            return "unproven_knowledge_object_case"
+    # Plural genitive adjectives cannot agree with a singular -а/-я noun.
+    # Do not try to guess an animate plural or repair it by endings.
+    if re.search(r"(?i)\b[а-яё-]+(?:ых|их)\s+[а-яё-]{3,}[ая]\b", sentence):
+        return "unproven_number_agreement"
+    # A prepositional adjunct does not license a genitive direct object.
+    if re.match(
+        r"(?i)^(?:строит|измеряет|изготавливает|ремонтирует|оценивает)\s+"
+        r"(?:(?:на|в|по)\s+[а-яё-]+\s+)?[а-яё-]+(?:ых|их)\s+[а-яё-]+(?:ов|ев|ей)\b",
+        sentence,
+    ):
+        return "unproven_direct_object_case"
+    # Mixed cases in a coordinated object are outside the supported grammar.
+    if re.match(r"(?i)^(?:изготавливает|строит|составляет)\b", sentence) and re.search(
+        r"(?i),\s+[а-яё-]+(?:ок|ов|ев)\s*[,;]", sentence,
+    ):
+        return "unproven_coordinated_object_case"
+    return ""
+
+
+def _safe_operation_result(clause: str, *, practical: bool) -> str:
+    """Keep the source's nominal government for two approved operations."""
+    text = _normalize_spaces(clause).strip(" .")
+    if not practical or not re.match(r"(?i)^(?:изготовление|построение)\s+\S", text):
+        return ""
+    if re.match(r"(?i)^(?:изготовление|построение)\s+(?:и|или)\b", text):
+        return ""
+    # A bare action noun does not override a prohibition, another actor,
+    # hypothetical description, or coordinated/embedded independent clause.
+    if re.search(
+        r"(?i)\b(?:не|нельзя|запрещ\w*|недопуст\w*|педагог\w*|учител\w*|"
+        r"инструктор\w*|тренер\w*|родител\w*|демонстр\w*|показ\w*|"
+        r"наблюд\w*|теори\w*|если|возможно|может|допуска\w*)\b|[;!?]", text,
+    ):
+        return ""
+    if re.search(r"(?i)\bи\s+(?:" + "|".join(map(re.escape, _VERBAL_NOUN_TO_VERB)) + r")\b", text):
+        return ""
+    return "Выполняет " + text[0].lower() + text[1:] + "."
+
+
+def derive_fields_v2(
+    *, topic_title: str, theory_text: str, practice_text: str,
+    program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
+    occurrence_index: int = 0, practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    """Gate finished RESULT only; keep source, TYPE inputs and CONTROL intact."""
+    original = _derive_week_fields_v2(
+        topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
+        program_content=program_content, theory_hours=theory_hours,
+        practice_hours=practice_hours, occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+    predicates = "|".join(re.escape(v) for v in _proven_finite_predicates())
+    sentences = re.split(rf"(?i)(?<=[.!?])\s+(?=(?:{predicates})\b)", original.planned_result)
+    rejected = [s for s in sentences if _result_grammar_issue(s)]
+    if not rejected:
+        return original
+    replacements: dict[str, str] = {}
+    restored: set[str] = set()
+    for clause, status in original.clause_coverage:
+        safe = _safe_operation_result(
+            clause, practical=bool(practice_hours and _nonempty_result_in(clause, practice_text)),
+        )
+        if status != "COVERED" or not safe:
+            continue
+        proof = _derive_selected_fields_v2(
+            topic_title=topic_title, theory_text="", practice_text=clause,
+            program_content=clause, practice_hours=practice_hours,
+        )
+        for sentence in rejected:
+            if _normalize_spaces(proof.planned_result).casefold() == _normalize_spaces(sentence).casefold():
+                replacements[sentence] = safe
+                restored.add(clause)
+    retained = " ".join(replacements.get(s, s) for s in sentences if s not in rejected or s in replacements)
+    coverage = []
+    for clause, status in original.clause_coverage:
+        if status == "COVERED" and clause not in restored:
+            proof = _derive_selected_fields_v2(
+                topic_title=topic_title, theory_text=clause if not practice_hours else "",
+                practice_text=clause if practice_hours else "", program_content=clause,
+                theory_hours=theory_hours, practice_hours=practice_hours,
+            )
+            # The existing mixed-week join can vary this predicate without
+            # changing its object; do not invalidate that established proof.
+            proof_text = proof.planned_result.casefold().replace("раскрывает", "характеризует")
+            retained_text = retained.casefold().replace("раскрывает", "характеризует")
+            if not _nonempty_result_in(proof_text, retained_text):
+                status = "NEEDS_REVIEW"
+        coverage.append((clause, status))
+    warnings = list(original.warnings)
+    if any(s not in replacements for s in rejected):
+        warnings.append("NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: " + original.frame.clause)
+    for clause, status in coverage:
+        if status == "NEEDS_REVIEW":
+            warnings.append("NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: " + clause)
+    return replace(
+        original, planned_result=retained,
+        type_result=original.type_result if original.type_result is not None else original.planned_result,
+        clause_coverage=tuple(coverage), warnings=tuple(dict.fromkeys(warnings)),
     )
 
 
@@ -6122,7 +6466,8 @@ def _aggregate_week_lesson_type(
     # TYPE уточняется после RESULT/CONTROL: их прежний контракт неизменен.
     derived_parts = [
         replace(item, lesson_type=refine_selected_activity_type(
-            item.lesson_type, item.frame.clause, item.planned_result
+            item.lesson_type, item.frame.clause,
+            item.type_result if item.type_result is not None else item.planned_result
         ))
         for item in derived_parts
     ]
@@ -6298,6 +6643,9 @@ def build_lesson_content_v2(
             extra_warnings = tuple(
                 warning for item in derived_parts for warning in item.warnings
             )
+            clause_coverage = tuple(
+                entry for item in derived_parts for entry in item.clause_coverage
+            )
         else:
             key = _content_occurrence_key(row)
             occurrence_index = 0
@@ -6324,6 +6672,7 @@ def build_lesson_content_v2(
             planned_result = derived.planned_result
             assessment = derived.assessment_method
             extra_warnings = derived.warnings
+            clause_coverage = derived.clause_coverage
         result.append(
             LessonContentV2Row(
                 source=row,
@@ -6336,6 +6685,7 @@ def build_lesson_content_v2(
                 object=derived.frame.object,
                 conditions=derived.frame.conditions,
                 warnings=tuple(dict.fromkeys((*warnings, *extra_warnings))),
+                clause_coverage=clause_coverage,
             )
         )
     return tuple(result)

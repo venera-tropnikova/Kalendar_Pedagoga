@@ -80,6 +80,7 @@ class _SectionContentBlock:
 class _AssignedSectionContent:
     title: str
     content: str
+    warnings: tuple[str, ...] = ()
 
 
 _SECTION_MODE_MARKERS = {"теория": "theory", "практика": "practice"}
@@ -92,13 +93,11 @@ _EXPLICIT_ACTIVITY_FORM_RE = re.compile(
 )
 
 
-def _first_source_sentence(lines: list[str]) -> str:
+def _complete_source_text(lines: list[str]) -> str:
     text = re.sub(r"\s+", " ", " ".join(lines)).strip()
     if not text:
         return ""
-    match = re.match(r"^.+?(?:[.!?](?=\s|$)|$)", text)
-    sentence = (match.group(0) if match else text).strip()
-    return sentence if sentence.endswith((".", "!", "?")) else sentence + "."
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _section_blocks_from_item(
@@ -120,9 +119,9 @@ def _section_blocks_from_item(
 
     def flush() -> None:
         nonlocal theory, practice, untyped
-        theory_text = _first_source_sentence(theory)
-        practice_text = _first_source_sentence(practice)
-        untyped_text = _first_source_sentence(untyped)
+        theory_text = _complete_source_text(theory)
+        practice_text = _complete_source_text(practice)
+        untyped_text = _complete_source_text(untyped)
         if theory_text or practice_text or untyped_text:
             blocks.append(
                 _SectionContentBlock(
@@ -194,6 +193,13 @@ def _assign_section_blocks(
     slots = assign_practice_slots(list(eligible), appearances)
     marker = "Теория." if part_type == "theory" else "Практика."
     assigned: list[_AssignedSectionContent] = []
+    # Block counts do not establish duration. Keep the existing provisional
+    # ordered allocation, but expose uncertainty rather than dropping content.
+    warnings = (
+        ("NEEDS_REVIEW: распределение подтем по неделям требует подтверждения; "
+         "длительность подтем в источнике не задана.",)
+        if appearances > 1 and len(eligible) != appearances else ()
+    )
     for slot in slots:
         titles = tuple(dict.fromkeys(block.title for block in slot))
         representative = slot[0]
@@ -219,7 +225,11 @@ def _assign_section_blocks(
         assigned.append(
             _AssignedSectionContent(
                 title=representative_title if representative_title else titles[0],
-                content="\n".join((marker, representative_clause)),
+                # The display title does not select one block's content.
+                content="\n".join((marker, *(
+                    getattr(block, part_type) or block.untyped for block in slot
+                ))),
+                warnings=warnings,
             )
         )
     return tuple(assigned)
@@ -439,6 +449,10 @@ def build_content_model(
             for part_type in ("theory", "practice")
             if (group_key, part_type) in section_content
         ]
+        warnings = tuple(dict.fromkeys((
+            *warnings,
+            *(warning for item in assigned_parts for warning in item.warnings),
+        )))
         full_content = (
             "\n".join(item.content for item in assigned_parts)
             if assigned_parts
