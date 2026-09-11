@@ -67,7 +67,7 @@ def test_participation_in_competition_is_event_on_practice():
 
 
 def test_participation_in_holiday_or_mass_event_is_not_generic_practice():
-    assert _derived_type("Участие в празднике курая.", theory=0, practice=2) == "праздник"
+    assert _derived_type("Участие в празднике курая.", theory=0, practice=2) == "праздничное мероприятие"
     assert (
         _derived_type("Участие в массовом мероприятии.", theory=0, practice=2)
         == "мероприятие"
@@ -78,14 +78,14 @@ def test_participation_in_holiday_or_mass_event_is_not_generic_practice():
             theory=0,
             practice=2,
         )
-        == "мероприятие"
+        == "туристско-краеведческое мероприятие"
     )
     assert _type(
         "Подготовка и участие в празднике.",
         theory=0,
         practice=2,
         result="Участвует в празднике.",
-    ) == "праздник"
+    ) == "праздничное мероприятие"
     assert (
         finalize_lesson_type("мероприятие", theory_hours=0, practice_hours=2)
         == "мероприятие"

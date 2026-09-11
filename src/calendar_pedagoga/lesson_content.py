@@ -119,6 +119,10 @@ def refine_selected_activity_type(candidate: str, clause: str, result: str) -> s
 
     source = _normalize_spaces(clause).casefold()
     action = _normalize_spaces(result).casefold()
+    if candidate == "учебно-тренировочное занятие" and re.search(
+        r"\b(?:надевани|использовани)\w*\s+страховочн\w*\s+(?:систем|снаряжени)", source
+    ):
+        return "практикум по работе со страховочным снаряжением"
     generic = {
         "практикум", "практическое занятие", "теоретико-практическое занятие",
         "дидактическое занятие",
@@ -142,7 +146,7 @@ def refine_selected_activity_type(candidate: str, clause: str, result: str) -> s
         r"(?:[а-яё]+(?:ые|ие|ый|ий|ая|ое|ых)\s+){0,2}праздник",
         source,
     ):
-        return "праздник"
+        return "праздничное мероприятие"
     if re.match(r"(?:проведени[ея]\s+)?дидактическ\w*(?:\s+и\s+ролев\w*)?\s+(?:игр|упражнен)", source):
         return "дидактическое занятие"
     if re.match(r"(?:проведени[ея]\s+)?ролев\w*\s+игр", source):
@@ -170,7 +174,11 @@ def refine_selected_activity_type(candidate: str, clause: str, result: str) -> s
     if re.search(r"\bзакаливан", source):
         return "практикум по закаливанию"
     if re.search(r"\bкатани\w*\s+на\s+(?:санк|коньк|лыж)", source):
-        return "учебно-тренировочное занятие"
+        if re.search(r"\b(?:трениров|отработ|обучени|техник)\w*", source):
+            return "учебно-тренировочное занятие"
+        if re.search(r"\b(?:развлечени|игр)\w*", source):
+            return "спортивно-игровое занятие"
+        return candidate
     if re.search(r"\b(?:разведени|поддержани)\w*\s+костр", source):
         return "практикум по разведению костра"
     if re.search(r"\bукладк\w*\s+рюкзак", source):

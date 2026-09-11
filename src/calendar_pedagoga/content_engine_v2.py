@@ -730,10 +730,28 @@ def _starts_new_action(tokens: list[str], index: int) -> bool:
     return False
 
 
+def _has_explicit_action_catalogue(text: str) -> bool:
+    """Colon marks accepted parallel objects, not new independent actions."""
+    head, separator, tail = text.partition(":")
+    if not separator or not re.search(
+        r"(?i)\b(?:при[её]м|элемент|техник|способ|действ|упражнен)\w*\s*$", head
+    ):
+        return False
+    members = [item.strip() for item in tail.rstrip(".").split(",")]
+    return len(members) > 1 and all(
+        member and len(member.split()) <= 5
+        and not re.search(r"[.;:!?]", member)
+        and not _FINITE_VERB_RE.match(member)
+        for member in members
+    )
+
+
 def _split_action_segments(text: str) -> list[str]:
     """Режет клаузу только перед новым действием, не внутри объекта."""
 
     parts: list[str] = []
+    if _has_explicit_action_catalogue(text):
+        return [text.strip(" ,")]
     buf: list[str] = []
     tokens = text.split()
     index = 0
@@ -2215,6 +2233,8 @@ def _is_parallel_observable_series(parts: list[str]) -> bool:
 
 
 def _drop_raw_list_tails(text: str) -> str:
+    if _has_explicit_action_catalogue(text):
+        return text
     parts = re.split(r",\s+", text)
     if len(parts) <= 1:
         return text
@@ -3720,8 +3740,17 @@ def _activity_event_type(result: str, clause: str) -> str:
     if "слёт" in event_src or "слет" in event_src:
         return "туристский слёт" if "туристск" in event_src else "слёт"
     if "праздник" in event_src:
-        return "праздник"
+        return "праздничное мероприятие"
     if "мероприяти" in event_src:
+        modifier = re.search(r"\b((?:[а-яё-]+(?:ых|их)\s+){1,3})мероприяти", clause_low)
+        if modifier:
+            adjectives = [
+                _adj_to_acc(_adj_gen_pl_to_sg(word, gender="n"), plural=False, gender="n")
+                for word in modifier.group(1).split()
+                if word not in {"массовых", "различных", "разных", "общих"}
+            ]
+            if adjectives:
+                return " ".join([*adjectives, "мероприятие"])
         return "мероприятие"
     return ""
 
