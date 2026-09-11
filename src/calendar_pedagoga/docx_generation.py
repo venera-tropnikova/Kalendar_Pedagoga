@@ -33,8 +33,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
 STANDARD_TABLE_FONT_FAMILY = "Times New Roman"
 STANDARD_GROUP_SPACE_AFTER_PT = 8
+ORGANIZATION_YEAR_SPACE_AFTER_PT = 4
 _MONTH_CELL_MARGIN_DXA = 40
 PRINT_TOP_MARGIN_CM = 1.0
+DATA_ROW_LINE_SPACING_TWIPS = 220
 
 
 @dataclass(frozen=True)
@@ -374,7 +376,7 @@ def _strip_header_sample_paragraph_layout(paragraph_properties) -> None:
         paragraph_properties.append(spacing)
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:line"), str(DATA_ROW_LINE_SPACING_TWIPS))
     spacing.set(qn("w:lineRule"), "auto")
     snap = paragraph_properties.find(qn("w:snapToGrid"))
     if snap is None:
@@ -1007,41 +1009,48 @@ def _paragraph_before_first_table(document):
     return None
 
 
-def _clear_paragraph_tabs(paragraph) -> None:
-    properties = paragraph._p.find(qn("w:pPr"))
-    if properties is None:
-        return
-    tabs = properties.find(qn("w:tabs"))
-    if tabs is not None:
-        properties.remove(tabs)
+_ACADEMIC_YEAR_LINE_RE = re.compile(
+    r"(?<!\d)(?:19|20)\d{2}\s*[-–—]\s*(?:19|20)\d{2}"
+    r"\s+учебный\s+год(?!\w)",
+    flags=re.IGNORECASE,
+)
 
 
-def _header_run_seed_before(document, target):
-    seed = _first_run_properties(target)
-    if seed is not None:
-        return seed
-    for paragraph in document.paragraphs:
-        if paragraph._p is target._p:
-            break
-        found = _first_run_properties(paragraph)
-        if found is not None:
-            seed = found
-    return seed
-
-
-def _fill_organization_academic_year(document, academic_year: str | None) -> None:
-    """Записать канон Y–(Y+1) в существующий пустой абзац перед таблицей."""
+def _fill_organization_academic_year(
+    document, academic_year: str | None
+) -> bool:
+    """Обновить только существующую в загруженном шаблоне строку учебного года."""
 
     canonical = normalize_academic_year(academic_year)
     if canonical is None:
-        return
+        return False
+    for paragraph in document.paragraphs:
+        original = paragraph.text
+        if not _ACADEMIC_YEAR_LINE_RE.search(original):
+            continue
+        updated = _ACADEMIC_YEAR_LINE_RE.sub(
+            f"{canonical} учебный год",
+            original,
+            count=1,
+        )
+        if updated != original:
+            _set_paragraph_text_keep_format(paragraph, updated)
+        paragraph.paragraph_format.space_after = Pt(
+            ORGANIZATION_YEAR_SPACE_AFTER_PT
+        )
+        return True
+    return False
+
+
+def _compact_empty_header_spacer(document) -> None:
+    """Не отдавать целую строку пустому абзацу перед таблицей."""
+
     spacer = _paragraph_before_first_table(document)
     if spacer is None or spacer.text.strip():
         return
-    seed = _header_run_seed_before(document, spacer)
-    _set_paragraph_text_keep_format(spacer, f"{canonical} учебный год", seed)
-    spacer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _clear_paragraph_tabs(spacer)
+    spacer.paragraph_format.space_before = Pt(0)
+    spacer.paragraph_format.space_after = Pt(0)
+    spacer.paragraph_format.line_spacing = Pt(1)
 
 
 def _fill_organization_header(
@@ -1076,7 +1085,8 @@ def _fill_organization_header(
             paragraph.text.replace("\t", "")
         ):
             _apply_group_teacher_tabs(paragraph, document)
-    _fill_organization_academic_year(document, academic_year)
+    if not _fill_organization_academic_year(document, academic_year):
+        _compact_empty_header_spacer(document)
 
 
 def _write_document_header(

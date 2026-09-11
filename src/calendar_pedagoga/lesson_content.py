@@ -67,8 +67,6 @@ def is_single_pedagogical_lesson_type(value: str) -> bool:
     if not normalized:
         return False
     lowered = normalized.casefold()
-    if lowered == "комбинированное занятие":
-        return False
     if any(separator in normalized for separator in ("+", ";", "|", "/", ",", "\n")):
         return False
     if _TYPE_COMPOSITION_RE.search(lowered):
@@ -80,6 +78,40 @@ def is_single_pedagogical_lesson_type(value: str) -> bool:
     ) > 1:
         return False
     return _PEDAGOGICAL_TYPE_MARKER_RE.search(lowered) is not None
+
+
+def grounded_complete_week_lesson_type(practice_text: str) -> str:
+    """TYPE по всем явно названным формам практики одной недели."""
+
+    scores = _line_form_scores(practice_text)
+    strong = {label for label, score in scores.items() if score >= 2}
+    if not strong:
+        return ""
+    family_scores: dict[str, int] = {}
+    for label in strong:
+        if label in {"практическое занятие", "теоретическое занятие"}:
+            continue
+        family = (
+            "игровая"
+            if label in {"игра", "дидактическое занятие"}
+            else label
+        )
+        family_scores[family] = family_scores.get(family, 0) + scores[label]
+    families = set(family_scores)
+    if len(families) > 1:
+        if len(families) < 3:
+            return ""
+        ranked = sorted(family_scores.values(), reverse=True)
+        if ranked[0] >= 6 and ranked[0] >= 2 * ranked[1]:
+            return ""
+        return "комбинированное занятие"
+    if families == {"игровая"}:
+        return (
+            "дидактическое занятие"
+            if "дидактическое занятие" in strong
+            else "игровое занятие"
+        )
+    return ""
 
 
 def safe_lesson_type_fallback(*, theory_hours: int, practice_hours: int) -> str:
@@ -191,11 +223,15 @@ def _line_form_scores(text: str) -> dict[str, int]:
     for unit in _clause_units(text):
         low = unit.casefold()
         # Одна фраза — одна ведущая форма (иначе «игры на местности» даёт ничью).
-        if re.match(r"дидактическ\w*\s+игр(?:а|ы)\b", low):
+        if re.match(
+            r"(?:проведени[ея]\s+)?дидактическ\w*"
+            r"(?:\s+и\s+ролев\w*)?\s+игр(?:а|ы|у|е|ами|ах)?\b",
+            low,
+        ):
             add("дидактическое занятие", 2)
             continue
         if re.match(
-            r"(?:(?:ролев|подвижн)\w*\s+)?игр(?:а|ы)\b",
+            r"(?:(?:[а-яё]+\s+){0,2})?игр(?:а|ы|у|е|ами|ах)?\b",
             low,
         ):
             add("игра", 2)
@@ -221,7 +257,7 @@ def _line_form_scores(text: str) -> dict[str, int]:
             add("тренинг", 2)
             continue
         if "творческая работа" in low or re.match(
-            r"(?:аппликаци|конструирован|рисован)\w*\b", low
+            r"(?:аппликаци|конструирован|рисован|изготовлен)\w*\b", low
         ):
             add("творческая работа", 2)
             continue

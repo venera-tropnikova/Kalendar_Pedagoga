@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from calendar_pedagoga.lesson_resolution import resolve_lesson_content
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
 from calendar_pedagoga.ai_provider import AIBatchResult, AIUsage, AIWeekVariant, SourcedAIValue
@@ -73,3 +75,55 @@ def test_resolve_rejects_composed_ai_type_and_keeps_grounded_rule_type() -> None
     resolved = resolve_lesson_content(rows, ai_result)
     assert resolved[0].lesson_type == rows[0].lesson_type
     assert "+" not in resolved[0].lesson_type
+
+
+def test_resolve_type_uses_explicit_didactic_and_role_game_form() -> None:
+    rows, _ = _key_rows()
+    source = replace(rows[0].source, theory_hours=0, practice_hours=2)
+    row = replace(
+        rows[0],
+        source=source,
+        theory_text="",
+        practice_text=(
+            "Проведение дидактических и ролевых игр: «Давай поговорим»; "
+            "подвижных игр."
+        ),
+        lesson_type="практикум",
+        planned_result="Выполняет практическое задание по теме „Моя семья“.",
+    )
+    resolved = resolve_lesson_content((row,))
+    assert resolved[0].lesson_type == "дидактическое занятие"
+
+
+def test_resolve_type_uses_combined_for_distinct_explicit_week_forms() -> None:
+    rows, _ = _key_rows()
+    source = replace(rows[0].source, theory_hours=0, practice_hours=2)
+    row = replace(
+        rows[0],
+        source=source,
+        theory_text="",
+        practice_text=(
+            "Изготовление сувениров и открыток. Народные игры. "
+            "Экскурсии в природу. Наблюдение ледохода."
+        ),
+        lesson_type="экскурсия",
+    )
+    resolved = resolve_lesson_content((row,))
+    assert resolved[0].lesson_type == "комбинированное занятие"
+
+
+def test_resolve_type_keeps_dominant_training_form() -> None:
+    rows, _ = _key_rows()
+    source = replace(rows[0].source, theory_hours=0, practice_hours=2)
+    row = replace(
+        rows[0],
+        source=source,
+        theory_text="",
+        practice_text=(
+            "Упражнения для рук. Упражнения для ног. "
+            "Упражнения на координацию. Подвижные игры."
+        ),
+        lesson_type="учебно-тренировочное занятие",
+    )
+    resolved = resolve_lesson_content((row,))
+    assert resolved[0].lesson_type == "учебно-тренировочное занятие"

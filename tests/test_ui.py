@@ -915,7 +915,14 @@ def test_check_status_visible_while_in_flight() -> None:
     app.session_state["calendar_work_status"] = "Проверяем документы…"
     app.run()
     assert _check_button(app).disabled
-    assert _has_info(app, "Проверяем документы…")
+    banners = [
+        item.value or ""
+        for item in app.markdown
+        if 'role="status"' in (item.value or "")
+    ]
+    assert len(banners) == 1
+    assert "Проверяем документы…" in banners[0]
+    assert not _has_info(app, "Проверяем документы…")
 
 
 def test_check_error_reenables_button() -> None:

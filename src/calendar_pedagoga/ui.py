@@ -232,10 +232,11 @@ def _file_uploader_with_clear(
         key=f"upload_{slot}_{nonce}",
     )
     if uploaded is not None:
-        name_col, clear_col = st.columns([0.88, 0.12])
+        name_col, clear_col = st.columns([0.94, 0.06], gap="small")
         with name_col:
             st.markdown(
-                f'<p class="kp-uploaded-name">{html.escape(uploaded.name)}</p>',
+                f'<p class="kp-uploaded-name" title="{html.escape(uploaded.name, quote=True)}">'
+                f"{html.escape(uploaded.name)}</p>",
                 unsafe_allow_html=True,
             )
         with clear_col:
@@ -1957,9 +1958,8 @@ def _inject_landing_styles() -> None:
             color: #374151;
             font-size: 0.9rem;
             line-height: 1.3;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            overflow-wrap: anywhere;
+            white-space: normal;
         }
         button[title="Удалить файл"] {
             min-width: 2rem !important;
@@ -2778,13 +2778,6 @@ def _render_upload_screen() -> tuple[object | None, object | None, object | None
             use_container_width=True,
             disabled=bool(st.session_state.get("calendar_busy")),
         )
-        work_status = str(st.session_state.get("calendar_work_status") or "").strip()
-        if form_open and st.session_state.get("calendar_busy") and work_status:
-            st.markdown(
-                '<div class="kp-work-status-anchor"></div>',
-                unsafe_allow_html=True,
-            )
-            st.info(work_status)
         if not st.session_state.get("analysis_ready") or form_open:
             _render_year_calendar_card(str(fields[3]), owner="inputs")
         _render_normative_panel()
@@ -2964,11 +2957,9 @@ class _WorkStatusWidget:
 
 @contextmanager
 def _work_status_block(slot, label: str) -> Iterator[object]:
-    host = slot.container() if slot is not None else st.container()
-    with host:
-        widget = _WorkStatusWidget(st.empty())
-        widget.update(label=label, state="running")
-        yield widget
+    widget = _WorkStatusWidget(slot if slot is not None else st.empty())
+    widget.update(label=label, state="running")
+    yield widget
 
 
 def _clear_work_busy() -> None:
@@ -3723,6 +3714,14 @@ def run_app() -> None:
         initial_sidebar_state="collapsed",
     )
     status_slot = st.empty()
+    current_status = str(
+        st.session_state.get("calendar_work_status") or ""
+    ).strip()
+    if st.session_state.get("calendar_busy") and current_status:
+        _WorkStatusWidget(status_slot).update(
+            label=current_status,
+            state="running",
+        )
 
     (
         utp_file,

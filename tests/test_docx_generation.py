@@ -806,7 +806,7 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
             assert spacing is not None, "data cells must override docDefaults spacing"
             assert spacing.get(qn("w:before")) == "0"
             assert spacing.get(qn("w:after")) == "0"
-            assert spacing.get(qn("w:line")) == "240"
+            assert spacing.get(qn("w:line")) == "220"
             assert spacing.get(qn("w:lineRule")) == "auto"
             assert paragraph_properties.find(qn("w:jc")) is None
 
@@ -839,7 +839,7 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
     assert len(empty.paragraphs) == len(source.paragraphs)
     assert empty.paragraphs[2].text == "\tГруппа № ___________ (Класс _________)"
     assert empty.paragraphs[2].alignment == 0  # LEFT
-    assert empty.paragraphs[3].text == "2026–2027 учебный год"
+    assert empty.paragraphs[3].text == source.paragraphs[3].text == ""
     empty_tabs = empty.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:tabs"))
     empty_vals = [tab.get(qn("w:val")) for tab in empty_tabs.findall(qn("w:tab"))]
     assert empty_vals == ["center", "right"]
@@ -863,7 +863,7 @@ def test_organization_docx_appends_teacher_name_without_new_paragraph() -> None:
     tab_vals = [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
     assert tab_vals == ["center", "right"]
     assert all(paragraph.text.strip() != "Иванов И.И." for paragraph in filled.paragraphs)
-    assert filled.paragraphs[3].text == "2026–2027 учебный год"
+    assert filled.paragraphs[3].text == source.paragraphs[3].text == ""
 
 
 def _org_header_fixture(academic_year: str, teacher_name: str = "Иванов И.И."):
@@ -891,15 +891,14 @@ def _org_header_fixture(academic_year: str, teacher_name: str = "Иванов И
     return source, filled
 
 
-def test_organization_header_uses_existing_spacer_for_academic_year() -> None:
+def test_organization_header_does_not_turn_existing_spacer_into_academic_year() -> None:
     source, filled = _org_header_fixture("2026–2027")
     assert source.paragraphs[3].text.strip() == ""
     assert len(filled.paragraphs) == len(source.paragraphs)
-    assert filled.paragraphs[3].text == "2026–2027 учебный год"
-    assert "\t" not in filled.paragraphs[3].text
-    assert filled.paragraphs[3].alignment == 1  # CENTER
-    spacer_tabs = filled.paragraphs[3]._p.find(qn("w:pPr")).find(qn("w:tabs"))
-    assert spacer_tabs is None
+    assert filled.paragraphs[3].text == source.paragraphs[3].text == ""
+    assert filled.paragraphs[3].paragraph_format.space_before.pt == 0
+    assert filled.paragraphs[3].paragraph_format.space_after.pt == 0
+    assert filled.paragraphs[3].paragraph_format.line_spacing.pt == 1
     assert filled.paragraphs[4].text.strip() == ""
 
 
@@ -914,7 +913,32 @@ def test_organization_header_keeps_group_teacher_tabs_and_program_line() -> None
     tabs = group._p.find(qn("w:pPr")).find(qn("w:tabs"))
     tab_vals = [tab.get(qn("w:val")) for tab in tabs.findall(qn("w:tab"))]
     assert tab_vals == ["center", "right"]
+    assert filled.paragraphs[3].text == ""
+
+
+def test_organization_header_updates_only_existing_academic_year_line() -> None:
+    source, filled = _org_header_fixture("2027–2028")
+    source.paragraphs[3].text = "2025-2026 учебный год"
+    filled.paragraphs[3].text = "2025-2026 учебный год"
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    tourists = resolve_utp(
+        None,
+        validate_upload(
+            UploadPurpose.PROGRAM,
+            program_path.name,
+            program_path.read_bytes(),
+        ),
+    )
+    _write_document_header(
+        filled,
+        tourists,
+        academic_year="2027–2028",
+        program_title="Туристы-проводники",
+        study_year_hints=(program_path.name,),
+        uses_organization_template=True,
+    )
     assert filled.paragraphs[3].text == "2027–2028 учебный год"
+    assert filled.paragraphs[3].paragraph_format.space_after.pt == 4
 
 
 def test_standard_template_file_and_generated_header_keep_year_slot() -> None:

@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from calendar_pedagoga.ai_provider import AIBatchResult, AI_FIELDS
-from calendar_pedagoga.lesson_content import LessonContentRow, finalize_lesson_type
+from calendar_pedagoga.lesson_content import (
+    LessonContentRow,
+    finalize_lesson_type,
+    grounded_complete_week_lesson_type,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,35 @@ def resolve_lesson_content(
             planned_result = row.planned_result
             assessment = row.assessment_method
             filled_by_ai = False
+
+        complete_week_type = grounded_complete_week_lesson_type(practice)
+        result_low = planned_result.casefold()
+        game_supported = (
+            "игр" in result_low
+            or result_low.startswith(
+                "выполняет практическое задание по теме"
+            )
+        )
+        replaces_current = (
+            complete_week_type
+            not in {"игровое занятие", "дидактическое занятие"}
+            or game_supported
+        ) and (
+            complete_week_type != "игровое занятие"
+            or lesson_type
+            in {
+                "практикум",
+                "практическое занятие",
+                "теоретико-практическое занятие",
+                "комбинированное занятие",
+            }
+        )
+        if complete_week_type and replaces_current:
+            lesson_type = finalize_lesson_type(
+                complete_week_type,
+                theory_hours=row.source.theory_hours,
+                practice_hours=row.source.practice_hours,
+            )
 
         resolved.append(
             ResolvedLessonRow(

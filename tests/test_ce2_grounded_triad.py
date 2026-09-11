@@ -627,7 +627,6 @@ def test_legacy_combined_candidate_never_becomes_final_type(caplog):
         "теоретическое и практическое занятие",
         "лекция и практикум",
         "экскурсия, практикум",
-        "комбинированное занятие",
     ],
 )
 def test_final_type_invariant_rejects_composed_or_technical_labels(invalid_type):
