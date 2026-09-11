@@ -1155,8 +1155,11 @@ def test_catalog_alone_is_not_an_activity_slot():
     practice = "Фестиваль, «Зимние старты», «Лесными тропами»."
     first = _slot_fields(practice, index=0, weeks=2)
     second = _slot_fields(practice, index=1, weeks=2)
-    assert first.planned_result.startswith("Выполняет практическое задание")
-    assert second.planned_result.startswith("Выполняет практическое задание")
+    for result in (first, second):
+        assert result.practice_text == practice
+        assert result.planned_result == ""
+        assert result.assessment_method == ""
+        assert any("NEEDS_REVIEW" in warning for warning in result.warnings)
     assert first.lesson_type == "практическое занятие"
     assert "фестиваль" not in first.lesson_type.casefold()
 

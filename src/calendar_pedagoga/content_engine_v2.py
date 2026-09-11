@@ -5622,6 +5622,60 @@ def _prohibition_only_source(source: str) -> bool:
     return True
 
 
+def _bare_list_without_action(source: str) -> bool:
+    """A standalone enumeration is not evidence of a pupil's action."""
+    units = [u for u in _clause_units(source) if u.casefold() not in {"практика", "теория"}]
+    if len(units) != 1:
+        return False
+    text = re.sub(r"(?i)^(?:практика|теория)\s*:\s*", "", units[0])
+    text = re.sub(r"(?i)^перечень\s*:\s*", "", text)
+    unquoted = re.sub(r'«[^»]*»|"[^"]*"|„[^“]*“', "название", text)
+    members = re.split(r"\s*[,/]\s*", unquoted)
+    if len(members) < 2 or not all(members):
+        return False
+    # Explicit verbal/nominal governing actions must keep the ordinary path.
+    # Named techniques alone (unlike performing them) provide no predicate.
+    if _VERBAL_NOUN_FIND_RE.search(text) or _CONTROL_RESULT_VERB_RE.search(text):
+        return False
+    if _nominal_activity_lemma(text.split()[0]) in _NOMINAL_PERFORM_LEMMAS:
+        return False
+    if _is_leading_form_activity(text.split()[0]) or _participation_lemma(text.split()[0]):
+        return False
+    if re.search(r"(?i)\b(?:их|его|её|ее)\b", unquoted):
+        return False  # Dependent description/anaphora is not a standalone list.
+    if re.search(r"(?i)\b(?:не|педагог|учитель|ребенок|ребёнок|ученик)\b|[:!?]", text):
+        return False
+    return True
+
+
+def _pupil_observes_demonstration(source: str) -> tuple[str, str] | None:
+    """Resolve only an explicit adjacent demonstrator/observer relation."""
+    units = [u for u in _clause_units(source) if u.casefold() not in {"практика", "теория"}]
+    if len(units) != 2:
+        return None
+    show = re.fullmatch(
+        r"(педагог|учитель|инструктор|тренер)\s+(?:демонстрирует|показывает)(?:\s+(.+))?",
+        units[0], re.IGNORECASE,
+    )
+    watch = re.fullmatch(
+        r"(?:ребёнок|ребенок|ученик|ученица|дети|ученики|учащиеся|обучающиеся)"
+        r"\s+наблюда(?:ет|ют)", units[1], re.IGNORECASE,
+    )
+    if not show or not watch:
+        return None
+    obj = show.group(2) or ""
+    if re.search(r"(?i)\b(?:не|но|а)\b|[,;]", obj):
+        return None  # Do not guess scope or discard an additional action.
+    teacher = {"педагог": "педагога", "учитель": "учителя",
+               "инструктор": "инструктора", "тренер": "тренера"}[show.group(1).casefold()]
+    # Quote the original object instead of inventing a case or a new action.
+    detail = f": «{obj}»" if obj else ""
+    return (
+        f"Наблюдает за показом {teacher}{detail}.",
+        f"педагогическое наблюдение за участием ребёнка в просмотре показа {teacher}{detail}",
+    )
+
+
 def derive_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
@@ -5635,6 +5689,10 @@ def derive_fields_v2(
         program_content=context, theory_hours=theory_hours, practice_hours=practice_hours,
         occurrence_index=occurrence_index, practice_appearance_count=practice_appearance_count,
     )
+    observation = _pupil_observes_demonstration(context)
+    if observation:
+        return replace(candidate, frame=ActionFrame(context, "наблюдает", "", ""),
+                       planned_result=observation[0], assessment_method=observation[1])
     if _prohibition_only_source(context):
         # Keep source fields and TYPE untouched; a prohibition alone provides
         # no observable positive result and authorises no positive control.
@@ -5674,6 +5732,13 @@ def derive_fields_v2(
                                       source=grounded_source, clause=repaired.frame.clause)
         if not repair_issue:
             return repaired
+    if _bare_list_without_action(context):
+        return replace(
+            candidate, frame=ActionFrame(context, "", "", ""),
+            planned_result="", assessment_method="",
+            warnings=(*candidate.warnings,
+                      "NEEDS_REVIEW: перечень не задаёт действия ученика."),
+        )
     result, control = _safe_topic_fields(topic_title, practical=practical)
     lesson_type = candidate.lesson_type
     # Fallback may reduce specificity, but must never widen the source scope.
