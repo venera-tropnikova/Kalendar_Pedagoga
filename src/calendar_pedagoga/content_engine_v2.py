@@ -5391,6 +5391,17 @@ def _proven_finite_predicates() -> set[str]:
     return set(_PROVEN_FINITE_VERBS)
 
 
+def _nominal_governed_span(clause: str, span: str) -> bool:
+    """The copied span follows a nominal action, which governs the genitive."""
+
+    low = _normalize_spaces(clause).casefold()
+    index = low.find(_normalize_spaces(span).casefold())
+    if index <= 0:
+        return False
+    preceding = low[:index].split()
+    return bool(preceding) and _looks_like_verbal_noun(preceding[-1])
+
+
 def _quality_issue(
     result: str, control: str, *, source: str = "", clause: str = "",
 ) -> str:
@@ -5519,6 +5530,11 @@ def _quality_issue(
     if genitive_after_verb:
         span = genitive_after_verb.group(1)
         if not (clause and span.casefold() in clause.casefold()):
+            return "unproven_object_case"
+        # In the source the span may be governed by a nominal action, which
+        # requires the genitive. Copying it after a finite verb keeps that
+        # case and does not prove a direct object.
+        if _nominal_governed_span(clause, span):
             return "unproven_object_case"
     if re.search(r"(?i)\b(?:подготовки|выполнения)\s+[а-яё]+(?:ое|ая|ые)\b", control):
         return "unsafe_control_case"
@@ -5985,16 +6001,25 @@ def _derive_week_fields_v2(
             if status == "COVERED"
             and _coordinated_action_uncovered(clause, original.planned_result)
         ]
+        coverage = tuple(
+            (c, "NEEDS_REVIEW" if c in partial else status) for c in clauses
+        )
+        # A clause whose object form could not be proven is reported: the safe
+        # template must not hide an unconverted source case. A clause without
+        # any proven predicate keeps the established silent fallback.
+        unproven_case = any(
+            w.startswith("Безопасный шаблон CE2:") and w.rstrip(".").endswith("_case")
+            for w in original.warnings
+        )
         warnings = original.warnings + tuple(
             "NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + clause
-            for clause in partial
+            for clause, clause_status in coverage
+            if clause_status == "NEEDS_REVIEW" and (clause in partial or unproven_case)
         )
         return replace(
             original,
             warnings=tuple(dict.fromkeys(warnings)),
-            clause_coverage=tuple(
-                (c, "NEEDS_REVIEW" if c in partial else status) for c in clauses
-            ),
+            clause_coverage=coverage,
         )
     results: list[str] = []
     controls: list[str] = []

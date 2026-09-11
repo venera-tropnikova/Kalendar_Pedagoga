@@ -225,21 +225,34 @@ def test_analysis_with_trailing_game_keeps_analysis_action():
 
 
 def test_conducting_games_is_grounded_activity_not_generic():
+    source = "Проведение дидактических и ролевых игр."
     result = derive_fields_v2(
         topic_title="Общение",
         theory_text="",
-        practice_text="Проведение дидактических и ролевых игр.",
-        program_content="Проведение дидактических и ролевых игр.",
+        practice_text=source,
+        program_content=source,
         theory_hours=0,
         practice_hours=2,
         occurrence_index=0,
         practice_appearance_count=2,
     )
     low = result.planned_result.casefold()
-    assert low.startswith("проводит")
+    # Родительный падеж источника после личной формы недопустим.
+    assert "проводит дидактических" not in low
     assert "участвует" not in low
-    assert not result.planned_result.startswith("Выполняет практическое задание")
-    assert "дидактическ" in low and "ролев" in low
+    # SOURCE сохраняется целиком.
+    assert result.practice_text == source
+    coverage = dict(result.clause_coverage)
+    if "дидактическ" in low:
+        # Форма объекта доказана: действие и объект берутся из источника.
+        assert low.startswith("проводит")
+        assert "ролев" in low
+        assert coverage[source.rstrip(".")] == "COVERED"
+    else:
+        # Форма не доказана: воздержание с NEEDS_REVIEW, а безопасный
+        # шаблон не выдаётся за покрытие клаузы.
+        assert any("NEEDS_REVIEW" in warning for warning in result.warnings)
+        assert coverage[source.rstrip(".")] == "NEEDS_REVIEW"
 
 
 def test_neighbor_game_mention_does_not_override_leading_action():
