@@ -1505,11 +1505,34 @@ def _transform_segment(
             return unconjugated
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
+        if _knowledge_label_over_catalogue(text):
+            # BARE LIST: a label above an enumeration is not an action; keep
+            # the source untouched and let the clause stay for review.
+            return text, "", "", ""
         named = _name_kinds(text)
         if named:
             return named
         return _characterize(text)
     return text, "", "", ""
+
+
+def _knowledge_label_over_catalogue(text: str) -> bool:
+    """Knowledge label plus a colon enumeration: no action of the pupil."""
+
+    head, separator, tail = _normalize_spaces(text).partition(":")
+    if not separator:
+        return False
+    tokens = head.split()
+    if not tokens or _token_core(tokens[0]).casefold() not in _KNOWLEDGE_NOUNS:
+        return False
+    members = [item.strip() for item in tail.rstrip(" .").split(",")]
+    return len(members) > 1 and all(
+        member
+        and len(member.split()) <= 5
+        and not re.search(r"[.;:!?]", member)
+        and not _FINITE_VERB_RE.match(member)
+        for member in members
+    )
 
 
 def _name_kinds(text: str) -> tuple[str, str, str, str] | None:
