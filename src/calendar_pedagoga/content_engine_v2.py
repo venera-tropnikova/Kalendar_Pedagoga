@@ -5575,6 +5575,53 @@ def _closed_candidate(
     return None
 
 
+def _prohibition_only_source(source: str) -> bool:
+    """Recognise direct prohibitions, not mentions, ordinary negation or a topic.
+
+    This closed grammatical guard does not infer an opposite allowed action.
+    Every source clause must be prohibitive: a separate positive activity must
+    not become NEEDS_REVIEW merely because a neighbouring clause forbids one.
+    """
+    infinitives = set(_TASK_VERBS.values()) | {
+        "выполнять", "использовать", "применять", "проводить", "начинать",
+        "продолжать", "оставлять", "снимать", "надевать", "приближаться",
+        "касаться", "входить", "выходить", "брать", "трогать", "открывать",
+        "закрывать", "переходить", "подниматься", "спускаться", "лазать",
+    }
+    action = "(?:" + "|".join(sorted(infinitives, key=len, reverse=True)) + ")"
+    nominal = "(?:" + "|".join(sorted(set(_VERBAL_NOUN_TO_VERB) | {"использование"})) + ")"
+    clauses = re.split(r"[.!?;\n]+", source.casefold())
+    meaningful = []
+    for clause in clauses:
+        clause = re.sub(r"^\s*(?:практика|теория)\s*:\s*", "", clause).strip()
+        if not clause or clause in {"практика", "теория"}:
+            continue
+        meaningful.append(clause)
+    if not meaningful:
+        return False
+    for clause in meaningful:
+        # Prefix modality governs the following action, not an object adjective.
+        prefix = re.fullmatch(
+            rf"(?:запрещено|запрещается|нельзя|не допускается)\s+(?:{action}|{nominal})\b.+",
+            clause,
+        )
+        imperative = re.fullmatch(rf"не\s+(?:{action}|[а-яё]+йте(?:сь)?)\b.+", clause)
+        suffix = re.fullmatch(
+            rf"(?:{action}|{nominal})\b.+\s+(?:запрещено|запрещается|не допускается)",
+            clause,
+        )
+        # 'Не запрещено' and 'не только' are not prohibitions. Do not guess
+        # scope in a coordinated clause containing a second finite action.
+        if re.search(r"\b(?:не\s+(?:запрещено|запрещается|только)|но|однако)\b", clause):
+            return False
+        finite = "(?:" + "|".join(_PROVEN_FINITE_VERBS) + ")"
+        if re.search(rf"(?:,\s*|\s+(?:а|и)\s+)(?:{action}|{finite})\b", clause):
+            return False
+        if not (prefix or imperative or suffix):
+            return False
+    return True
+
+
 def derive_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
@@ -5588,6 +5635,18 @@ def derive_fields_v2(
         program_content=context, theory_hours=theory_hours, practice_hours=practice_hours,
         occurrence_index=occurrence_index, practice_appearance_count=practice_appearance_count,
     )
+    if _prohibition_only_source(context):
+        # Keep source fields and TYPE untouched; a prohibition alone provides
+        # no observable positive result and authorises no positive control.
+        return replace(
+            candidate,
+            frame=ActionFrame(context, "", "", ""),
+            planned_result="",
+            assessment_method="",
+            warnings=(*candidate.warnings,
+                      "NEEDS_REVIEW: источник содержит только запрет; "
+                      "положительное действие не задано."),
+        )
     candidate = replace(
         candidate,
         planned_result=re.sub(r"(?<=\d)(?=[А-Яа-яЁё])", " ", candidate.planned_result),
