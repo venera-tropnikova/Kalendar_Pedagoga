@@ -1228,6 +1228,35 @@ def _remainder_is_dependent_object(remainder: str) -> bool:
     return bool(rest)
 
 
+# Path/manner PPs specify how a process is performed, not a knowledge field.
+_PATH_MANNER_PREPOSITIONS = frozenset({"по", "вдоль", "через", "вокруг"})
+
+
+def _remainder_is_path_or_manner_complement(remainder: str) -> bool:
+    """Restrictive path/manner PP: «по маршруту», not a topic field «о X»."""
+
+    text = _normalize_spaces(remainder)
+    if not text or text.startswith(":") or _remainder_is_quoted_label(text):
+        return False
+    tokens = text.split()
+    if tokens[0].casefold() not in _PATH_MANNER_PREPOSITIONS:
+        return False
+    return len(tokens) >= 2 and not _remainder_is_knowledge_np(text)
+
+
+def _is_unconjugated_process_noun(head: str) -> bool:
+    """Deverbal process that can be performed, not a document or knowledge NP."""
+
+    lemma = _verbal_noun_lemma(head).casefold()
+    if lemma in _STATE_OR_KNOWLEDGE_LEMMAS or lemma in {"произведение", "заключение"}:
+        return False
+    if lemma.endswith("ведение") and lemma != "ведение":
+        return False
+    if _is_exercise_word(head):
+        return False
+    return bool(re.search(r"(?:ание|ение|яние|тие)$", lemma))
+
+
 def _remainder_is_knowledge_np(remainder: str) -> bool:
     first = remainder.split()[0].casefold() if remainder.split() else ""
     if first in _KNOWLEDGE_PP_STARTS:
@@ -1267,7 +1296,9 @@ def _unconjugated_practice_activity_result(
         return None
     if _remainder_is_quoted_label(remainder) or _remainder_is_knowledge_np(remainder):
         return None
-    if not _remainder_is_dependent_object(remainder):
+    has_object = _remainder_is_dependent_object(remainder)
+    has_path = _remainder_is_path_or_manner_complement(remainder)
+    if not has_object and not has_path:
         return None
     if _conjugate_verbal_noun(head):
         return None
@@ -1276,7 +1307,12 @@ def _unconjugated_practice_activity_result(
     lemma = _verbal_noun_lemma(head).casefold()
     deverbal_ka = bool(re.search(r"(?i)(?:тка|дка|нка|вка|жка|зка)$", lemma))
     # A -ка suffix is only a candidate filter, not activity evidence.
-    if not (_has_stem(head, _PERFORM_STEMS) or deverbal_ka):
+    # A path PP is activity evidence for an unconjugated process noun;
+    # a genitive object after an unknown -ение noun is not.
+    if _has_stem(head, _PERFORM_STEMS) or deverbal_ka:
+        if not has_object:
+            return None
+    elif not (has_path and _is_unconjugated_process_noun(head)):
         return None
     obj_np = _practice_activity_np_object(mods, head, remainder)
     obj, cond = _split_object_and_conditions(remainder)

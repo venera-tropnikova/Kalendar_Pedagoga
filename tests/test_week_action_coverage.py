@@ -56,9 +56,26 @@ def test_only_current_slot_is_used():
     assert "ширин" not in second.planned_result
 
 
+def test_path_complement_keeps_unconjugated_process():
+    result = derive("Выполнение разминки. Движение по маршруту.")
+    for text in (result.planned_result, result.assessment_method):
+        assert "разминк" in text.casefold()
+        assert "движен" in text.casefold()
+        assert "маршрут" in text.casefold()
+    assert dict(result.clause_coverage)["Движение по маршруту"] == "COVERED"
+
+
+def test_document_noun_with_pp_is_not_performed():
+    result = derive("Выполнение разминки. Введение в туризм.")
+    assert "разминк" in result.planned_result.casefold()
+    assert "выполняет введение" not in result.planned_result.casefold()
+    assert any("Введение" in warning for warning in result.warnings)
+
+
 @pytest.mark.parametrize("source", [
     "Выполнение разминки. Измерение пульса.",
     "Изготовление открытки. Ролевая игра.",
+    "Ориентирование карты по компасу. Определение азимута на ориентир. Движение по азимуту.",
 ])
 def test_type_and_source_do_not_change(source):
     args = dict(topic_title="Учебная тема", theory_text="", practice_text=source, practice_hours=2)
