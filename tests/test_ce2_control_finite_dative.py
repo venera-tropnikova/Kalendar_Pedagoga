@@ -80,10 +80,20 @@ def test_mixed_theory_practice_does_not_create_malformed_oral_tail():
     )
     merged = build_lesson_content_v2((row,))[0]
     control = merged.assessment_method.casefold()
+    result = merged.planned_result.casefold()
     assert "проводиту" not in control
-    assert merged.planned_result.casefold().count("характеризует") >= 1
-    assert "проводит тестирование" in merged.planned_result.casefold()
-    assert "устный опрос по" in control
+    assert "проводит тестирование" in result
+    # Номинальный заголовок теории не доказывает действия ученика: SOURCE
+    # сохраняется, клауза уходит в NEEDS_REVIEW, предикат не выдумывается.
+    theory_clause = "Перспективы занятий туристско-краеведческой деятельностью"
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert (theory_clause, "NEEDS_REVIEW") in merged.clause_coverage
+    assert any(
+        "NEEDS_REVIEW" in warning and theory_clause in warning
+        for warning in merged.warnings
+    )
+    assert "устный опрос по перспективам занятий" in control
     assert "проводиту тестирование" not in control
     stitched = _merge_part_controls(
         [

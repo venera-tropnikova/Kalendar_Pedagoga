@@ -6123,6 +6123,7 @@ def _derive_week_fields_v2(
 _PROVEN_NEUTER_ACC_RE = re.compile(r"(?i)(?:ние|тие|ствие|ье|ьё)$")
 _NEUTER_DATIVE_RE = re.compile(r"(?i)(?:нию|тию|стию)$")
 _NOMINATIVE_FEMININE_ADJ_RE = re.compile(r"(?i)(?:ая|яя)$")
+_ABSTRACT_QUALITY_RE = re.compile(r"(?i)(?:ость|ости)$")
 
 
 def _proven_feminine_acc_form(low: str) -> bool:
@@ -6143,7 +6144,29 @@ def _proven_accusative_noun(word: str) -> bool:
         return True
     if _PROVEN_NEUTER_ACC_RE.search(core):
         return True
+    if _ABSTRACT_QUALITY_RE.search(core):
+        # The -ость suffix builds abstract nouns: inanimate, so the accusative
+        # repeats the nominative in both numbers.
+        return True
     return _proven_feminine_acc_form(core)
+
+
+def _knowledge_coordinated_head(tokens: list[str], head: int) -> bool:
+    """An unproven head coordinated with a proven knowledge noun of one group."""
+
+    core = _strip_punct_word(tokens[head])[1]
+    if _NOMINATIVE_FEMININE_ADJ_RE.search(core) or _regular_feminine_a_noun(core.casefold()):
+        # A nominative form cannot head an accusative object group.
+        return False
+    for position in range(head + 1, len(tokens) - 1):
+        if _is_preposition(tokens[position]):
+            return False
+        if _strip_punct_word(tokens[position])[1].casefold() != "и":
+            continue
+        following = tokens[position + 1]
+        if _is_theory_knowledge_token(following) and _proven_accusative_noun(following):
+            return True
+    return False
 
 
 def _proven_characterize_object(sentence: str) -> bool:
@@ -6160,7 +6183,11 @@ def _proven_characterize_object(sentence: str) -> bool:
         if _NOMINATIVE_FEMININE_ADJ_RE.search(_strip_punct_word(tokens[index])[1]):
             return False
         index += 1
-    if index >= len(tokens) or not _proven_accusative_noun(tokens[index]):
+    if index >= len(tokens):
+        return False
+    if not _proven_accusative_noun(tokens[index]) and not _knowledge_coordinated_head(
+        tokens, index
+    ):
         return False
     return not _unproven_object_conjunct(tokens, index)
 
@@ -6184,6 +6211,38 @@ def _unproven_object_conjunct(tokens: list[str], head: int) -> bool:
             # A nominative -а cannot continue the accusative object group.
             return True
     return False
+
+
+def _oblique_source_conjunct(source: str, tail: str) -> bool:
+    """The tail repeats a source conjunct still governed by a preposition."""
+
+    words = _normalize_spaces(source).split()
+    for index, word in enumerate(words):
+        if _strip_punct_word(word)[1].casefold() != tail:
+            continue
+        for earlier in reversed(words[:index]):
+            prefix, _core, suffix = _strip_punct_word(earlier)
+            if prefix or suffix:
+                # Punctuation closes the coordinated group.
+                break
+            if _is_preposition(earlier):
+                return True
+    return False
+
+
+def _proven_object_prefix(sentence: str, source: str) -> str:
+    """Proven part of an object group whose coordinated tail stayed oblique."""
+
+    tokens = _normalize_spaces(sentence).split()
+    for position in range(2, len(tokens) - 1):
+        if _strip_punct_word(tokens[position])[1].casefold() != "и":
+            continue
+        tail = _strip_punct_word(tokens[position + 1])[1].casefold()
+        if not _oblique_source_conjunct(source, tail):
+            return ""
+        prefix = " ".join(tokens[:position]).rstrip(" ,;") + "."
+        return "" if _result_grammar_issue(prefix) else prefix
+    return ""
 
 
 def _result_grammar_issue(sentence: str) -> str:
@@ -6268,6 +6327,18 @@ def derive_fields_v2(
             if _normalize_spaces(proof.planned_result).casefold() == _normalize_spaces(sentence).casefold():
                 replacements[sentence] = safe
                 restored.add(clause)
+    source_text = _normalize_spaces(f"{theory_text} {program_content}")
+    knowledge_source = any(_is_theory_knowledge_token(word) for word in source_text.split())
+    for sentence in rejected if knowledge_source else ():
+        # A knowledge nominalization with one unsafe conjunct keeps its proven
+        # part; the clause itself stays NEEDS_REVIEW for the dropped remainder.
+        if sentence in replacements:
+            continue
+        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
+            continue
+        trimmed = _proven_object_prefix(sentence, source_text)
+        if trimmed:
+            replacements[sentence] = trimmed
     retained = " ".join(replacements.get(s, s) for s in sentences if s not in rejected or s in replacements)
     coverage = []
     for clause, status in original.clause_coverage:

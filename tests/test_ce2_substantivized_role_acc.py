@@ -1,4 +1,4 @@
-"""Substantivized role adjectives take animate accusative after характеризует."""
+"""Ярлык роли с перечнем остаётся SOURCE; падеж роли проверяется в CONTROL."""
 
 from calendar_pedagoga.content_engine_v2 import _phrase_to_dative, derive_fields_v2
 
@@ -14,38 +14,61 @@ def _theory(source: str, topic: str = "Туристские роли"):
     )
 
 
-def test_characterize_puts_role_adjective_in_animate_accusative():
+def _kept_for_review(derived, fragment: str) -> bool:
+    """SOURCE сохранён, клауза NEEDS_REVIEW, и это объявлено в warnings."""
+    flagged = [
+        clause
+        for clause, status in derived.clause_coverage
+        if fragment in clause and status == "NEEDS_REVIEW"
+    ]
+    return bool(flagged) and any(
+        "NEEDS_REVIEW" in warning and fragment in warning for warning in derived.warnings
+    )
+
+
+def test_role_catalogue_keeps_source_and_dative_role_in_control():
     derived = _theory(
         "Ответственные: за питание, за походный дневник, по охране природы."
     )
     result = derived.planned_result.casefold()
+    # Перечень обязанностей не задаёт действия ученика: предикат не выдумывается.
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Ответственные")
     control = derived.assessment_method.casefold()
-    assert "характеризует ответственных за питание" in result
-    assert "характеризует ответственные за" not in result
     assert "устный опрос по ответственным за питание" in control
     assert "ответственным за" in control
     assert "ответственных за" not in control
+    assert "ответственныму" not in control
 
 
-def test_same_accusative_rule_for_another_role_adjective():
+def test_same_role_catalogue_rule_for_another_label():
     derived = _theory(
         "Дежурные: за питание, за походный дневник, по охране природы."
     )
     result = derived.planned_result.casefold()
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Дежурные")
     control = derived.assessment_method.casefold()
-    assert "характеризует дежурных за питание" in result
-    assert "характеризует дежурные за" not in result
     assert "устный опрос по дежурным за питание" in control
+    assert "дежурных за" not in control
+    assert "дежурныму" not in control
 
 
-def test_modifier_plus_noun_stays_inanimate_accusative():
+def test_trip_catalogue_keeps_inanimate_dative_in_control():
     derived = _theory(
         "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие.",
         topic="Экскурсии",
     )
-    low = derived.planned_result.casefold()
-    assert "характеризует экскурсионные поездки" in low
-    assert "характеризует экскурсионных" not in low
+    result = derived.planned_result.casefold()
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Экскурсионные поездки")
+    control = derived.assessment_method.casefold()
+    assert "по экскурсионным поездкам" in control
+    assert "по экскурсионных" not in control
+    assert "шиханы" not in control
 
 
 def test_dative_from_already_accusative_role_head_stays_correct():

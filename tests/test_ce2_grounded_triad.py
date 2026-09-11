@@ -1332,6 +1332,18 @@ def _theory_fields(source: str, *, title: str = "Тема занятия") -> Co
     )
 
 
+def _kept_for_review(derived: ContentEngineV2Result, fragment: str) -> bool:
+    """SOURCE сохранён, клауза NEEDS_REVIEW, и это объявлено в warnings."""
+    flagged = [
+        clause
+        for clause, status in derived.clause_coverage
+        if fragment in clause and status == "NEEDS_REVIEW"
+    ]
+    return bool(flagged) and any(
+        "NEEDS_REVIEW" in warning and fragment in warning for warning in derived.warnings
+    )
+
+
 def test_theory_characterizes_clothing_inventory():
     derived = _theory_fields("Одежда, зимний инвентарь.")
     low = derived.planned_result.casefold()
@@ -1355,26 +1367,39 @@ def test_theory_characterizes_compass_knowledge_head():
     assert not derived.planned_result.startswith("Характеризует материал по теме")
 
 
-def test_theory_characterizes_colon_heading_not_catalogue():
+def test_theory_colon_heading_catalogue_stays_for_review():
     derived = _theory_fields(
         "Памятники природы: Стерлитамакские шиханы, Капова пещера и другие."
     )
     low = derived.planned_result.casefold()
-    assert low.startswith("характеризует памятники природы")
+    # Ярлык над перечнем — не действие ученика: предикат не выдумывается,
+    # перечень не попадает в поля, клауза остаётся на проверку.
+    assert "характеризует" not in low
+    assert "называет" not in low
     assert "шиханы" not in low
     assert ":" not in derived.planned_result
     assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert _kept_for_review(derived, "Памятники природы")
+    control = derived.assessment_method.casefold()
+    assert "по памятникам природы" in control
+    assert "по памятники" not in control
+    assert "шиханы" not in control
 
 
-def test_theory_characterizes_trip_heading_not_catalogue():
+def test_theory_trip_heading_catalogue_stays_for_review():
     derived = _theory_fields(
         "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие."
     )
     low = derived.planned_result.casefold()
-    assert "характеризует экскурсионные поездки" in low
+    assert "характеризует" not in low
+    assert "называет" not in low
     assert "шиханы" not in low
     assert ":" not in derived.planned_result
     assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert _kept_for_review(derived, "Экскурсионные поездки")
+    control = derived.assessment_method.casefold()
+    assert "по экскурсионным поездкам" in control
+    assert "по экскурсионные" not in control
 
 
 def test_theory_skips_interrogative_clause_with_parentheses():
@@ -1391,8 +1416,13 @@ def test_theory_skips_interrogative_clause_with_parentheses():
     assert "(место." not in mixed.planned_result
     assert "что послужило" not in low
     assert "предприятию" not in low
-    if not mixed.planned_result.startswith("Характеризует материал по теме"):
-        assert "предприятия" in low or "учреждения" in low or "памятник" in low
+    # Ни вопрос, ни номинальный перечень не дают действия ученика: обе клаузы
+    # сохраняются как SOURCE и помечаются на проверку.
+    assert "характеризует" not in low
+    assert "называет" not in low
+    assert _kept_for_review(lone, "Что послужило началом строительства города")
+    assert _kept_for_review(mixed, "Что послужило началом строительства города")
+    assert _kept_for_review(mixed, "Предприятия и учреждения города")
 
 
 def test_theory_only_does_not_conjugate_coordinated_activity():
@@ -1491,7 +1521,12 @@ def test_theory_oral_control_uses_result_object_not_topic_title():
         practice_hours=0,
     )
     assert derived.lesson_type == "теоретическое занятие"
-    assert derived.planned_result.casefold().startswith("характеризует рассказы")
+    # Заголовок темы не доказывает действия, но CONTROL берёт объект из SOURCE,
+    # а не название темы, и ставит его в правильный падеж.
+    result = derived.planned_result.casefold()
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Рассказы об интересных походах")
     control = derived.assessment_method.casefold()
     assert control.startswith("устный опрос по ")
     assert "по теме" not in control
@@ -1513,9 +1548,13 @@ def test_theory_oral_control_keeps_all_characterized_objects():
         theory_hours=2,
         practice_hours=0,
     )
-    assert derived.planned_result.casefold().startswith("характеризует")
-    assert "мастерств" in derived.planned_result.casefold()
-    assert "легенд" in derived.planned_result.casefold()
+    # Оба номинальных заголовка остаются на проверку, но ни один объект
+    # источника не теряется в CONTROL.
+    result = derived.planned_result.casefold()
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Народное мастерство")
+    assert _kept_for_review(derived, "Башкирские легенды и предания")
     control = derived.assessment_method.casefold()
     assert control.startswith("устный опрос по ")
     assert "по теме" not in control
@@ -1592,9 +1631,14 @@ def test_characterizing_first_aid_kit_stays_oral_not_product_check():
         theory_hours=2,
         practice_hours=0,
     )
-    assert derived.planned_result == "Характеризует комплектование аптечки."
+    # Оба знаниевых действия доказаны источником, поэтому сохраняются оба.
+    result = derived.planned_result.casefold()
+    assert "характеризует комплектование аптечки" in result
+    assert "характеризует назначение лекарственных препаратов" in result
+    assert all(status == "COVERED" for _clause, status in derived.clause_coverage)
+    assert not derived.planned_result.startswith("Характеризует материал по теме")
     control = derived.assessment_method.casefold()
-    assert control.startswith("устный опрос по ")
+    assert control.startswith("устный опрос")
     assert "комплектован" in control
     assert "по комплектованию" in control
     assert "по комплектование " not in control
@@ -1677,8 +1721,12 @@ def test_theory_oral_dative_from_coordinated_acc_and_neuter():
     assert "по подготовку" not in control.casefold()
 
 
-def test_clothing_inventory_theory_keeps_result_and_fixes_oral_control():
+def test_clothing_inventory_theory_stays_for_review_with_fixed_control():
     derived = _theory_fields("Одежда, зимний инвентарь.")
-    assert derived.planned_result.casefold().startswith("характеризует одежду")
+    result = derived.planned_result.casefold()
+    # Голое перечисление предметов не задаёт действия ученика.
+    assert "характеризует" not in result
+    assert "называет" not in result
+    assert _kept_for_review(derived, "Одежда, зимний инвентарь")
     assert derived.lesson_type == "теоретическое занятие"
     assert derived.assessment_method == "устный опрос по одежде, зимнему инвентарю"
