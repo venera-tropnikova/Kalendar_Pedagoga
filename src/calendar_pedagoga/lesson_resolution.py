@@ -82,7 +82,11 @@ def resolve_lesson_content(
         replaces_current = (
             complete_week_type
             not in {"игровое занятие", "дидактическое занятие"}
-            or game_supported
+            or (game_supported and lesson_type in {
+                "практикум", "практическое занятие",
+                "теоретико-практическое занятие", "игра",
+                "игровое занятие", "дидактическое занятие",
+            })
         ) and (
             complete_week_type != "игровое занятие"
             or lesson_type

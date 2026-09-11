@@ -24,6 +24,7 @@ from calendar_pedagoga.lesson_content import (
     _week_result_source,
     derive_lesson_type,
     finalize_lesson_type,
+    refine_selected_activity_type,
 )
 from calendar_pedagoga.practice_slots import (
     SLOT_CONTINUE_WARNING,
@@ -5926,6 +5927,13 @@ def _aggregate_week_lesson_type(
 ) -> str:
     """Classify the complete week instead of selecting one part by position."""
 
+    # TYPE уточняется после RESULT/CONTROL: их прежний контракт неизменен.
+    derived_parts = [
+        replace(item, lesson_type=refine_selected_activity_type(
+            item.lesson_type, item.frame.clause, item.planned_result
+        ))
+        for item in derived_parts
+    ]
     types = list(dict.fromkeys(
         item.lesson_type for item in derived_parts if item.lesson_type
     ))
@@ -5941,7 +5949,10 @@ def _aggregate_week_lesson_type(
     elif practice_hours and not theory_hours:
         if differing_forms:
             candidate = "практическое занятие"
-        elif candidate and candidate not in _GENERIC_LESSON_TYPES:
+        elif candidate and (
+            candidate not in _GENERIC_LESSON_TYPES
+            or candidate == "комбинированное занятие"
+        ):
             pass
         else:
             candidate = "практическое занятие"

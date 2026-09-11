@@ -207,7 +207,6 @@ def _clear_upload_slot(slot: str) -> None:
     st.session_state[nonce_key] = int(st.session_state.get(nonce_key, 0)) + 1
     st.session_state.pop(f"upload_name_{slot}", None)
     _reset_analysis_state()
-    st.rerun()
 
 
 def _remember_upload(slot: str, uploaded: object | None) -> None:
@@ -230,33 +229,35 @@ def _file_uploader_with_clear(
     help: str,
 ) -> object | None:
     nonce = int(st.session_state.setdefault(f"upload_nonce_{slot}", 0))
-    uploaded = st.file_uploader(
-        label,
-        type=type,
-        help=help,
-        label_visibility="collapsed",
-        key=f"upload_{slot}_{nonce}",
-    )
-    if uploaded is not None:
-        name_col, clear_col = st.columns([0.96, 0.04], gap=None)
-        with name_col:
+    upload_col, clear_col = st.columns([0.94, 0.06], gap=None)
+    with upload_col:
+        uploaded = st.file_uploader(
+            label,
+            type=type,
+            help=help,
+            label_visibility="collapsed",
+            key=f"upload_{slot}_{nonce}",
+        )
+        if uploaded is not None:
             st.markdown(
                 f'<p class="kp-uploaded-name" title="{html.escape(uploaded.name, quote=True)}">'
                 f"{html.escape(uploaded.name)}</p>",
                 unsafe_allow_html=True,
             )
-        with clear_col:
+    with clear_col:
+        if uploaded is not None:
             st.markdown(
                 '<span class="kp-upload-clear-marker" aria-hidden="true"></span>',
                 unsafe_allow_html=True,
             )
-            if st.button(
+            st.button(
                 "×",
                 key=f"clear_{slot}",
                 help="Удалить файл",
                 use_container_width=True,
-            ):
-                _clear_upload_slot(slot)
+                on_click=_clear_upload_slot,
+                args=(slot,),
+            )
     _remember_upload(slot, uploaded)
     return uploaded
 
@@ -1971,15 +1972,32 @@ def _inject_landing_styles() -> None:
             overflow-wrap: anywhere;
             white-space: normal;
         }
-        [data-testid="stColumn"]:has(.kp-upload-clear-marker) {
-            display: flex !important;
-            align-items: flex-start !important;
-            justify-content: flex-end !important;
+        [data-testid="stColumn"]:has([data-testid="stFileChip"]) .kp-uploaded-name {
+            display: none;
+        }
+        [data-testid="stFileChips"],
+        [data-testid="stFileChips"] > div,
+        [data-testid="stFileChips"] > div > div,
+        [data-testid="stFileChip"] {
+            flex: 1 1 auto !important;
+            min-width: 0 !important;
+            max-width: none !important;
+        }
+        [data-testid="stFileChipName"] {
+            font-size: 0 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            max-width: none !important;
+        }
+        [data-testid="stFileChipName"]::after {
+            content: attr(title);
+            font-size: 0.9rem;
+            line-height: 1.35;
         }
         .kp-upload-clear-marker {
             display: none;
         }
-        [data-testid="stColumn"]:has(.kp-upload-clear-marker) button {
+        [class*="st-key-clear_"] button {
             min-width: 1.8rem !important;
             width: 1.8rem !important;
             height: 1.8rem !important;
@@ -1987,16 +2005,17 @@ def _inject_landing_styles() -> None:
             font-size: 1.25rem !important;
             font-weight: 700 !important;
             line-height: 1 !important;
-            color: #991b1b !important;
+            color: #475569 !important;
             background: #ffffff !important;
-            border: 1px solid #fca5a5 !important;
+            border: 1px solid #cbd5e1 !important;
             border-radius: 8px !important;
-            box-shadow: 0 1px 2px rgba(153, 27, 27, 0.08) !important;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08) !important;
         }
-        [data-testid="stColumn"]:has(.kp-upload-clear-marker) button:hover {
-            color: #7f1d1d !important;
-            border-color: #ef4444 !important;
-            background: #fef2f2 !important;
+        [class*="st-key-clear_"] button:hover,
+        [class*="st-key-clear_"] button:focus-visible {
+            color: #1d4ed8 !important;
+            border-color: #93c5fd !important;
+            background: #eff6ff !important;
         }
         [data-testid="stElementContainer"]:has(.kp-check-details-marker)
         + [data-testid="stExpander"] summary,
@@ -2568,6 +2587,14 @@ def _inject_landing_styles() -> None:
             min-height: 36px !important;
             font-size: 14.5px !important;
             font-weight: 600 !important;
+            color: #475569 !important;
+            border-color: #cbd5e1 !important;
+        }
+        [data-testid="stFileUploaderDropzone"] button:hover,
+        [data-testid="stFileUploaderDropzone"] button:focus-visible {
+            color: #1d4ed8 !important;
+            border-color: #93c5fd !important;
+            background: #eff6ff !important;
         }
         .kp-cal-card .kp-step-title {
             font-size: 18px;

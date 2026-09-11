@@ -114,6 +114,76 @@ def grounded_complete_week_lesson_type(practice_text: str) -> str:
     return ""
 
 
+def refine_selected_activity_type(candidate: str, clause: str, result: str) -> str:
+    """Уточнить только TYPE по уже выбранной деятельности, не по всему разделу."""
+
+    source = _normalize_spaces(clause).casefold()
+    action = _normalize_spaces(result).casefold()
+    generic = {
+        "практикум", "практическое занятие", "теоретико-практическое занятие",
+        "дидактическое занятие",
+    }
+    if candidate not in generic:
+        return candidate
+    if re.match(r"(?:обсуждение|сравнение|история|правила|понятие)\b", source):
+        return candidate
+    # Сравниваем формы только назначенного слота; весь раздел здесь недопустим.
+    forms = {
+        label for label, score in _line_form_scores(source).items()
+        if score >= 2 and label not in {
+            "практическое занятие", "теоретическое занятие"
+        }
+    }
+    if len(forms) > 1 and not forms <= {"игра", "дидактическое занятие"}:
+        return "комбинированное занятие"
+    # Название праздника не превращается в игру из соседнего слота темы.
+    if re.match(
+        r"(?:развлечени\w*\s*[,;]\s*)?"
+        r"(?:[а-яё]+(?:ые|ие|ый|ий|ая|ое|ых)\s+){0,2}праздник",
+        source,
+    ):
+        return "праздник"
+    if re.match(r"(?:проведени[ея]\s+)?дидактическ\w*(?:\s+и\s+ролев\w*)?\s+(?:игр|упражнен)", source):
+        return "дидактическое занятие"
+    if re.match(r"(?:проведени[ея]\s+)?ролев\w*\s+игр", source):
+        return "ролевое игровое занятие"
+    if re.match(
+        r"(?:проведени[ея]\s+)?(?:[а-яё]+(?:ые|ие)\s+){0,2}игр[аы]\b",
+        source,
+    ):
+        return "игровое занятие"
+    if re.match(r"(?:проведени[ея]\s+)?(?:викторин|тестирован|экскурси)", source):
+        if "викторин" in source:
+            return "викторина"
+        if "тестирован" in source:
+            return "тестирование"
+        return "экскурсия"
+    if re.search(r"\b(?:анализ|решение|разбор)\s+(?:\w+\s+){0,2}ситуаци", source):
+        return "ситуационное занятие"
+    if re.match(
+        r"(?:рисован|рисунк|изготовлен|конструирован|аппликаци)\w*", source
+    ) or re.search(r"\bв рисунках (?:детей|учащихся|учеников)\b", source):
+        if re.search(r"\b(?:рисунк|рисуе|изготавлива|конструиру|аппликаци)", action) or action.startswith("выполняет практическое задание"):
+            return "творческое занятие"
+    if re.search(r"\bсамомассаж", source):
+        return "практикум по самомассажу"
+    if re.search(r"\bзакаливан", source):
+        return "практикум по закаливанию"
+    if re.search(r"\bкатани\w*\s+на\s+(?:санк|коньк|лыж)", source):
+        return "учебно-тренировочное занятие"
+    if re.search(r"\b(?:разведени|поддержани)\w*\s+костр", source):
+        return "практикум по разведению костра"
+    if re.search(r"\bукладк\w*\s+рюкзак", source):
+        return "практикум по укладке рюкзака"
+    if re.match(r"(?:\w+\s+)?прогулк", source):
+        if re.search(r"\bпоход", source):
+            return "комбинированное занятие"
+        return "прогулка"
+    if candidate == "дидактическое занятие":
+        return "практическое занятие"
+    return candidate
+
+
 def safe_lesson_type_fallback(*, theory_hours: int, practice_hours: int) -> str:
     """Единый педагогический fallback без описания технического состава строки."""
 
