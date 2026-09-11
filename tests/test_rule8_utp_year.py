@@ -12,6 +12,7 @@ from calendar_pedagoga.resolve_utp import (
     RECONCILE_LEAD,
     RECONCILE_NOTICE,
     RECONCILE_PASS,
+    UTP_PROGRAM_MISMATCH_MESSAGE,
     UtpResolutionError,
     compare_embedded_to_separate,
     resolve_utp,
@@ -28,6 +29,7 @@ def _add_year_table(
     totals: Hours,
     *,
     topic_title: str = "Введение в тему",
+    topic_titles: tuple[str, str, str] | None = None,
     extra_paragraph: str | None = None,
 ) -> None:
     if year is None:
@@ -45,11 +47,16 @@ def _add_year_table(
     third = totals.total - 4
     theory_third = max(totals.theory - 2, 0)
     practice_third = third - theory_third
+    titles = topic_titles or (
+        topic_title,
+        "Практика раздела",
+        "Закрепление материала",
+    )
     rows = (
         ("1", "Раздел первый", str(totals.total), str(totals.theory), str(totals.practice)),
-        ("1.1", topic_title, "2", "1", "1"),
-        ("1.2", "Практика раздела", "2", "1", "1"),
-        ("1.3", "Закрепление материала", str(third), str(theory_third), str(practice_third)),
+        ("1.1", titles[0], "2", "1", "1"),
+        ("1.2", titles[1], "2", "1", "1"),
+        ("1.3", titles[2], str(third), str(theory_third), str(practice_third)),
         ("Итого", "", str(totals.total), str(totals.theory), str(totals.practice)),
     )
     for index, values in enumerate(rows, start=1):
@@ -72,6 +79,7 @@ def _separate_utp(
     totals: Hours,
     *,
     topic_title: str = "Введение в тему",
+    topic_titles: tuple[str, str, str] | None = None,
     filename: str | None = None,
 ) -> ValidatedUpload:
     document = Document()
@@ -80,7 +88,13 @@ def _separate_utp(
     document.add_paragraph("Количество часов в неделю: 2")
     document.add_paragraph(f"Общее количество часов в год: {totals.total}")
     document.add_paragraph("36 учебных недель")
-    _add_year_table(document, year, totals, topic_title=topic_title)
+    _add_year_table(
+        document,
+        year,
+        totals,
+        topic_title=topic_title,
+        topic_titles=topic_titles,
+    )
     stream = BytesIO()
     document.save(stream)
     data = stream.getvalue()
@@ -162,6 +176,27 @@ def test_resolve_same_year_different_topics_is_notice_with_diff() -> None:
     assert RECONCILE_LEAD in result.warnings
     assert any("Тема программы" in warning for warning in result.warnings)
     assert any("Тема отдельного плана" in warning for warning in result.warnings)
+
+
+def test_key_program_with_climbing_utp_is_blocked_as_another_program() -> None:
+    totals = Hours(72, 11, 61)
+    program = _program_upload(
+        _multi_year_program((1, totals, "Дидактические игры")),
+        name="Программа КЛЮЧ.docx",
+    )
+    separate = _separate_utp(
+        1,
+        totals,
+        filename="УТП Скалолазание.docx",
+        topic_titles=(
+            "Техника лазания по рельефу",
+            "Страховка и карабины",
+            "Скалолазные узлы",
+        ),
+    )
+
+    with pytest.raises(UtpResolutionError, match=UTP_PROGRAM_MISMATCH_MESSAGE):
+        resolve_utp(separate, program)
 
 
 def test_key_program_only_blocks_without_requested_year() -> None:

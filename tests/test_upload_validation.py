@@ -10,6 +10,7 @@ from calendar_pedagoga.upload_validation import (
     MAX_UPLOAD_BYTES,
     UploadPurpose,
     UploadValidationError,
+    validate_program_for_reuse,
     validate_upload,
 )
 
@@ -169,3 +170,29 @@ def test_legacy_conversion_always_removes_temporary_directory(
     assert result == output_bytes
     assert observed_temp_dir is not None
     assert not observed_temp_dir.exists()
+
+
+def test_legacy_program_is_converted_once_for_pipeline_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized = (REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx").read_bytes()
+    calls = 0
+
+    def fake_convert(_data: bytes) -> bytes:
+        nonlocal calls
+        calls += 1
+        return normalized
+
+    monkeypatch.setattr(
+        "calendar_pedagoga.upload_validation.convert_legacy_doc",
+        fake_convert,
+    )
+    uploaded = validate_program_for_reuse(
+        "Программа КЛЮЧ.DOC",
+        bytes.fromhex("D0CF11E0A1B11AE1") + b"legacy",
+    )
+
+    assert calls == 1
+    assert uploaded.filename == "Программа КЛЮЧ.docx"
+    assert uploaded.content == normalized
+    assert uploaded.parsed is not None

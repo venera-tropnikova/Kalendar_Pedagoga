@@ -33,7 +33,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
 STANDARD_TABLE_FONT_FAMILY = "Times New Roman"
 STANDARD_GROUP_SPACE_AFTER_PT = 8
-ORGANIZATION_YEAR_SPACE_AFTER_PT = 4
+ORGANIZATION_YEAR_SPACE_AFTER_PT = 8
+ORGANIZATION_HEADER_TABLE_GAP_PT = 8
 _MONTH_CELL_MARGIN_DXA = 40
 PRINT_TOP_MARGIN_CM = 1.0
 DATA_ROW_LINE_SPACING_TWIPS = 220
@@ -1043,14 +1044,14 @@ def _fill_organization_academic_year(
 
 
 def _compact_empty_header_spacer(document) -> None:
-    """Не отдавать целую строку пустому абзацу перед таблицей."""
+    """Оставить аккуратный интервал, не отдавая целую строку абзацу."""
 
     spacer = _paragraph_before_first_table(document)
     if spacer is None or spacer.text.strip():
         return
     spacer.paragraph_format.space_before = Pt(0)
     spacer.paragraph_format.space_after = Pt(0)
-    spacer.paragraph_format.line_spacing = Pt(1)
+    spacer.paragraph_format.line_spacing = Pt(ORGANIZATION_HEADER_TABLE_GAP_PT)
 
 
 def _fill_organization_header(

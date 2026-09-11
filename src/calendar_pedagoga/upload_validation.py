@@ -11,7 +11,12 @@ import zipfile
 from docx import Document
 
 from calendar_pedagoga.parsing import UtpParseResult, parse_utp
-from calendar_pedagoga.program_parsing import ProgramData, parse_program
+from calendar_pedagoga.program_parsing import (
+    LegacyDocUnsupportedError,
+    ProgramData,
+    convert_legacy_doc,
+    parse_program,
+)
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -203,3 +208,31 @@ def validate_upload(
     else:
         _validate_calendar_template(safe_name, data)
     return ValidatedUpload(purpose, safe_name, bytes(data), parsed)
+
+
+def validate_program_for_reuse(filename: str, data: bytes) -> ValidatedUpload:
+    """Validate a program and keep one reusable DOCX representation in memory.
+
+    Legacy DOC conversion is the expensive part of reading a program. The UI
+    needs the same document for validation, embedded-UTP resolution and the
+    selected-year parse, so converting it once avoids repeated LibreOffice
+    launches without caching a user document beyond the current analysis.
+    """
+
+    safe_name = Path(filename).name
+    suffix = _validate_container(safe_name, data, UploadPurpose.PROGRAM)
+    if suffix != ".doc":
+        return validate_upload(UploadPurpose.PROGRAM, safe_name, data)
+    try:
+        normalized = convert_legacy_doc(data)
+    except LegacyDocUnsupportedError as error:
+        raise UploadValidationError(str(error)) from error
+    normalized_name = f"{Path(safe_name).stem}.docx"
+    _validate_container(normalized_name, normalized, UploadPurpose.PROGRAM)
+    parsed = _validate_program(normalized_name, normalized)
+    return ValidatedUpload(
+        UploadPurpose.PROGRAM,
+        normalized_name,
+        normalized,
+        parsed,
+    )

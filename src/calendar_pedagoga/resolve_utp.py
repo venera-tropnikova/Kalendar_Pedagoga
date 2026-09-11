@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+import re
 
 from calendar_pedagoga.matching import normalize_title
 from calendar_pedagoga.parsing import (
@@ -15,7 +17,11 @@ from calendar_pedagoga.parsing import (
     collect_utp_table_candidates,
     parse_utp,
 )
-from calendar_pedagoga.program_parsing import convert_legacy_doc, infer_study_year_number
+from calendar_pedagoga.program_parsing import (
+    ProgramData,
+    convert_legacy_doc,
+    infer_study_year_number,
+)
 from calendar_pedagoga.upload_validation import ValidatedUpload
 
 
@@ -25,6 +31,36 @@ RECONCILE_NOTICE = "NOTICE"
 RECONCILE_LEAD = (
     "Отдельный УТП выбран источником плана, но он расходится с "
     "учебно-тематическим планом того же года в программе:"
+)
+UTP_PROGRAM_MISMATCH_MESSAGE = (
+    "УТП, вероятно, относится к другой программе. Проверьте загруженный файл."
+)
+UTP_PROGRAM_UNCERTAIN_NOTICE = (
+    "Не удалось уверенно подтвердить соответствие УТП программе. Проверьте файл."
+)
+_IDENTITY_STOPWORDS = frozenset(
+    {
+        "дополнительная",
+        "общеобразовательная",
+        "общеразвивающая",
+        "образовательная",
+        "программа",
+        "утп",
+        "учебный",
+        "учебно",
+        "тематический",
+        "план",
+        "год",
+        "обучения",
+        "час",
+        "часа",
+        "часов",
+        "doc",
+        "docx",
+    }
+)
+_CONTENT_STOPWORDS = _IDENTITY_STOPWORDS | frozenset(
+    {"раздел", "тема", "основы", "занятие", "занятия", "практика", "теория"}
 )
 
 
@@ -133,6 +169,74 @@ def _topic_key(topic: Topic) -> tuple[str | None, str]:
     return (topic.number, normalize_title(topic.title))
 
 
+def _meaningful_tokens(*values: str | None, stopwords: frozenset[str]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        spaced = re.sub(r"(?<=\D)(?=\d)|(?<=\d)(?=\D)", " ", value)
+        for token in re.findall(r"[a-zа-яё]+", normalize_title(spaced)):
+            if len(token) >= 3 and token not in stopwords:
+                tokens.add(token)
+    return tokens
+
+
+def _coverage(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def _program_utp_compatibility(
+    separate: UtpParseResult,
+    embedded: UtpParseResult,
+    program_document: ValidatedUpload,
+    separate_filename: str,
+) -> str:
+    """Classify identity using independent name and content signals."""
+
+    program = program_document.parsed
+    program_title = program.title if isinstance(program, ProgramData) else None
+    program_identity = _meaningful_tokens(
+        program_title,
+        Path(program_document.filename).stem,
+        stopwords=_IDENTITY_STOPWORDS,
+    )
+    utp_identity = _meaningful_tokens(
+        separate.metadata.program_name,
+        Path(separate_filename).stem,
+        stopwords=_IDENTITY_STOPWORDS,
+    )
+    identity_known = bool(program_identity and utp_identity)
+    identity_matches = identity_known and _coverage(program_identity, utp_identity) >= 0.5
+    identity_conflicts = identity_known and not (program_identity & utp_identity)
+
+    embedded_titles = tuple(
+        item.title for item in (*embedded.sections, *embedded.topics)
+    )
+    separate_titles = tuple(
+        item.title for item in (*separate.sections, *separate.topics)
+    )
+    embedded_content = _meaningful_tokens(
+        *embedded_titles,
+        stopwords=_CONTENT_STOPWORDS,
+    )
+    separate_content = _meaningful_tokens(
+        *separate_titles,
+        stopwords=_CONTENT_STOPWORDS,
+    )
+    content_known = bool(embedded_content and separate_content)
+    content_matches = (
+        content_known and _coverage(embedded_content, separate_content) >= 0.25
+    )
+
+    if identity_conflicts and content_known and not content_matches:
+        return "BLOCK"
+    if identity_matches or content_matches:
+        return "PASS"
+    return "NOTICE"
+
+
 def compare_embedded_to_separate(
     embedded: UtpParseResult,
     separate: UtpParseResult,
@@ -234,6 +338,7 @@ def _reconcile_separate(
     separate: UtpParseResult,
     embedded: UtpParseResult,
     separate_year: int | None,
+    compatibility_notice: tuple[str, ...] = (),
 ) -> UtpParseResult:
     embedded_year = infer_study_year_number(embedded.metadata.study_year)
     if (
@@ -250,7 +355,7 @@ def _reconcile_separate(
     if status == RECONCILE_NOTICE:
         extra = (RECONCILE_LEAD, *diffs)
     return apply_workload_from_document(
-        _with_metadata(separate, separate.metadata, extra)
+        _with_metadata(separate, separate.metadata, (*compatibility_notice, *extra))
     )
 
 
@@ -290,7 +395,20 @@ def resolve_utp(
             raise UtpResolutionError(str(error)) from error
         except Exception:
             return apply_workload_from_document(parsed)
-        return _reconcile_separate(parsed, embedded, separate_year)
+        compatibility = _program_utp_compatibility(
+            parsed,
+            embedded,
+            program_document,
+            optional_utp_upload.filename,
+        )
+        if compatibility == "BLOCK":
+            raise UtpResolutionError(UTP_PROGRAM_MISMATCH_MESSAGE)
+        notice = (
+            (UTP_PROGRAM_UNCERTAIN_NOTICE,)
+            if compatibility == "NOTICE"
+            else ()
+        )
+        return _reconcile_separate(parsed, embedded, separate_year, notice)
 
     try:
         embedded = parse_utp(program_bytes)

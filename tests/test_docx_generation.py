@@ -898,7 +898,7 @@ def test_organization_header_does_not_turn_existing_spacer_into_academic_year() 
     assert filled.paragraphs[3].text == source.paragraphs[3].text == ""
     assert filled.paragraphs[3].paragraph_format.space_before.pt == 0
     assert filled.paragraphs[3].paragraph_format.space_after.pt == 0
-    assert filled.paragraphs[3].paragraph_format.line_spacing.pt == 1
+    assert filled.paragraphs[3].paragraph_format.line_spacing.pt == 8
     assert filled.paragraphs[4].text.strip() == ""
 
 
@@ -938,7 +938,7 @@ def test_organization_header_updates_only_existing_academic_year_line() -> None:
         uses_organization_template=True,
     )
     assert filled.paragraphs[3].text == "2027–2028 учебный год"
-    assert filled.paragraphs[3].paragraph_format.space_after.pt == 4
+    assert filled.paragraphs[3].paragraph_format.space_after.pt == 8
 
 
 def test_standard_template_file_and_generated_header_keep_year_slot() -> None:

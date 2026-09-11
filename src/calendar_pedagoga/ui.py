@@ -76,12 +76,18 @@ from calendar_pedagoga.docx_generation import (
 )
 from calendar_pedagoga.docx_qa import detect_data_row_page_spans
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
-from calendar_pedagoga.resolve_utp import UtpResolutionError, resolve_utp
+from calendar_pedagoga.resolve_utp import (
+    RECONCILE_LEAD,
+    UTP_PROGRAM_UNCERTAIN_NOTICE,
+    UtpResolutionError,
+    resolve_utp,
+)
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
     UploadPurpose,
     UploadValidationError,
     ValidatedUpload,
+    validate_program_for_reuse,
     validate_upload,
 )
 from calendar_pedagoga.parsing import UtpParseResult, parse_utp
@@ -232,7 +238,7 @@ def _file_uploader_with_clear(
         key=f"upload_{slot}_{nonce}",
     )
     if uploaded is not None:
-        name_col, clear_col = st.columns([0.94, 0.06], gap="small")
+        name_col, clear_col = st.columns([0.96, 0.04], gap=None)
         with name_col:
             st.markdown(
                 f'<p class="kp-uploaded-name" title="{html.escape(uploaded.name, quote=True)}">'
@@ -240,6 +246,10 @@ def _file_uploader_with_clear(
                 unsafe_allow_html=True,
             )
         with clear_col:
+            st.markdown(
+                '<span class="kp-upload-clear-marker" aria-hidden="true"></span>',
+                unsafe_allow_html=True,
+            )
             if st.button(
                 "×",
                 key=f"clear_{slot}",
@@ -1954,28 +1964,57 @@ def _inject_landing_styles() -> None:
             display: none !important;
         }
         .kp-uploaded-name {
-            margin: 0.2rem 0 0.1rem 0;
+            margin: 0.18rem 0.35rem 0.1rem 0;
             color: #374151;
             font-size: 0.9rem;
             line-height: 1.3;
             overflow-wrap: anywhere;
             white-space: normal;
         }
-        button[title="Удалить файл"] {
-            min-width: 2rem !important;
-            height: 2rem !important;
-            padding: 0 !important;
-            font-size: 1.15rem !important;
-            line-height: 1 !important;
-            color: #6b7280 !important;
-            background: #ffffff !important;
-            border: 1px solid #e5e7eb !important;
-            border-radius: 8px !important;
+        [data-testid="stColumn"]:has(.kp-upload-clear-marker) {
+            display: flex !important;
+            align-items: flex-start !important;
+            justify-content: flex-end !important;
         }
-        button[title="Удалить файл"]:hover {
-            color: #b91c1c !important;
-            border-color: #fecaca !important;
+        .kp-upload-clear-marker {
+            display: none;
+        }
+        [data-testid="stColumn"]:has(.kp-upload-clear-marker) button {
+            min-width: 1.8rem !important;
+            width: 1.8rem !important;
+            height: 1.8rem !important;
+            padding: 0 !important;
+            font-size: 1.25rem !important;
+            font-weight: 700 !important;
+            line-height: 1 !important;
+            color: #991b1b !important;
+            background: #ffffff !important;
+            border: 1px solid #fca5a5 !important;
+            border-radius: 8px !important;
+            box-shadow: 0 1px 2px rgba(153, 27, 27, 0.08) !important;
+        }
+        [data-testid="stColumn"]:has(.kp-upload-clear-marker) button:hover {
+            color: #7f1d1d !important;
+            border-color: #ef4444 !important;
             background: #fef2f2 !important;
+        }
+        [data-testid="stElementContainer"]:has(.kp-check-details-marker)
+        + [data-testid="stExpander"] summary,
+        .element-container:has(.kp-check-details-marker)
+        + .element-container [data-testid="stExpander"] summary {
+            color: #174a87 !important;
+            font-weight: 700 !important;
+            background: #eff6ff !important;
+            border-radius: 8px !important;
+            padding-left: 0.75rem !important;
+        }
+        [data-testid="stExpander"]:has(.kp-check-explanation) summary {
+            color: #174a87 !important;
+            font-weight: 700 !important;
+            background: #eff6ff !important;
+            border: 1px solid #bfdbfe !important;
+            border-radius: 8px !important;
+            padding: 0.65rem 0.75rem !important;
         }
         .kp-cal-card {
             display: flex;
@@ -3255,13 +3294,6 @@ def _hours_match(report: NormativeReport) -> bool:
     )
 
 
-def _calendar_checked(report: NormativeReport) -> bool:
-    return any(
-        item.verdict is NormativeVerdict.PASS
-        for item in report.for_layer(NormativeLayer.LOCAL)
-    )
-
-
 def _visible_normative_remarks(
     report: NormativeReport,
 ) -> tuple[NormativeCheck, ...]:
@@ -3314,15 +3346,49 @@ def _compact_notice_count(
     return len(_unique_texts(tuple(item.teacher_text for item in remarks) + extra))
 
 
+def _human_utp_notices(warnings: tuple[str, ...]) -> tuple[str, ...]:
+    """Collapse parser/reconciliation diagnostics into teacher-facing messages."""
+
+    result: list[str] = []
+    if UTP_PROGRAM_UNCERTAIN_NOTICE in warnings:
+        result.append(UTP_PROGRAM_UNCERTAIN_NOTICE)
+    if RECONCILE_LEAD in warnings:
+        result.append(
+            "В отдельном УТП есть отличия от плана в программе. "
+            "Для календаря использован отдельный УТП; проверьте его темы и часы."
+        )
+    hidden_prefixes = ("Итоговые часы:", "Раздел ", "Тема ", "Порядок ")
+    for warning in warnings:
+        if warning in {UTP_PROGRAM_UNCERTAIN_NOTICE, RECONCILE_LEAD}:
+            continue
+        if warning.startswith(hidden_prefixes):
+            continue
+        result.append(warning)
+    return _unique_texts(tuple(result))
+
+
 def _render_status_checks(
     report: NormativeReport,
+    utp: UtpParseResult,
+    program: ProgramData | None,
     extra_notices: tuple[str, ...] = (),
 ) -> None:
     lines: list[str] = []
+    if program is not None:
+        lines.append('<p class="kp-status-check">✓ Программа распознана</p>')
+    if UTP_PROGRAM_UNCERTAIN_NOTICE not in utp.warnings:
+        lines.append('<p class="kp-status-check">✓ УТП соответствует программе</p>')
+    else:
+        lines.append(
+            '<p class="kp-status-check warn">⚠ Соответствие УТП программе '
+            "нужно проверить</p>"
+        )
     if _hours_match(report):
-        lines.append('<p class="kp-status-check">✓ Часы совпадают</p>')
-    if _calendar_checked(report):
-        lines.append('<p class="kp-status-check">✓ Календарь проверен</p>')
+        total = utp.table_totals.total if utp.table_totals is not None else None
+        suffix = f": {total}" if total is not None else ""
+        lines.append(f'<p class="kp-status-check">✓ Часы совпадают{suffix}</p>')
+    if _year_is_found(report):
+        lines.append('<p class="kp-status-check">✓ Учебный год определён</p>')
     notice_count = _compact_notice_count(report, extra_notices)
     if notice_count:
         lines.append(
@@ -3334,6 +3400,40 @@ def _render_status_checks(
             '<div class="kp-status-checks">' + "".join(lines) + "</div>",
             unsafe_allow_html=True,
         )
+
+
+def _render_document_check_explanation(
+    report: NormativeReport,
+    utp: UtpParseResult,
+    program: ProgramData | None,
+    notices: tuple[str, ...],
+) -> None:
+    total = utp.table_totals.total if utp.table_totals is not None else None
+    found = "Программа и УТП распознаны." if program is not None else "УТП распознан."
+    matches = []
+    if _hours_match(report) and total is not None:
+        matches.append(f"часы совпадают ({total})")
+    if _year_is_found(report):
+        matches.append("учебный год определён")
+    match_text = "; ".join(matches) or "обязательные данные найдены"
+    if notices:
+        mismatch = f"Есть {_notice_phrase(len(notices))}; они перечислены ниже."
+        action = (
+            "Формирование доступно. Просмотрите замечания и исправьте файл, "
+            "если они существенны для вашего плана."
+        )
+    else:
+        mismatch = "Несовпадений, мешающих формированию, не найдено."
+        action = "Пользователю ничего исправлять не нужно."
+    st.markdown(
+        '<div class="kp-check-explanation">'
+        f"<p><b>Что найдено:</b> {html.escape(found)}</p>"
+        f"<p><b>Что совпало:</b> {html.escape(match_text)}.</p>"
+        f"<p><b>Что не совпало:</b> {html.escape(mismatch)}</p>"
+        f"<p><b>Нужно ли что-то исправлять:</b> {html.escape(action)}</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_normative_report(report: NormativeReport, *, academic_year: str) -> None:
@@ -3444,8 +3544,9 @@ def _render_teacher_analysis_screen(
         )
     )
     generation_notices = _visible_generation_notices() if generated else ()
+    document_notices = _human_utp_notices(utp.warnings)
     has_notices = any(is_missing_program_content(match) for match in matches)
-    extra_notices = generation_notices
+    extra_notices = _unique_texts((*document_notices, *generation_notices))
     if has_notices:
         extra_notices = _unique_texts((*extra_notices, MISSING_PROGRAM_CONTENT_NOTICE))
 
@@ -3510,8 +3611,13 @@ def _render_teacher_analysis_screen(
         kpi = _weeks_phrase(weeks)
     st.markdown(f'<p class="kp-status-kpi">{html.escape(kpi)}</p>', unsafe_allow_html=True)
 
-    _render_status_checks(report, extra_notices)
-    with st.expander("Подробнее о проверке", expanded=False):
+    _render_status_checks(report, utp, program, extra_notices)
+    st.markdown(
+        '<span class="kp-check-details-marker" aria-hidden="true"></span>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("Что проверено и какие есть замечания", expanded=False):
+        _render_document_check_explanation(report, utp, program, extra_notices)
         _render_normative_report(report, academic_year=academic_year)
         if extra_notices:
             st.markdown(
@@ -3775,8 +3881,7 @@ def run_app() -> None:
                 try:
                     transient_program = uploads.get(UploadPurpose.PROGRAM)
                     assert transient_program is not None
-                    validated_program = validate_upload(
-                        UploadPurpose.PROGRAM,
+                    validated_program = validate_program_for_reuse(
                         transient_program.filename,
                         transient_program.content,
                     )

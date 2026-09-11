@@ -282,6 +282,11 @@ def test_clear_template_keeps_program() -> None:
     assert len(_clear_buttons(app)) == 1
     assert int(app.number_input[0].value) == default_academic_year_start()
 
+    _upload(app, 2, template)
+    app.run()
+    assert template.name in _page_text(app)
+    assert len(_clear_buttons(app)) == 2
+
 
 def test_clear_program_resets_analysis_but_keeps_other_files() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
@@ -375,10 +380,15 @@ def test_analysis_screen_shows_study_year_from_program_filename() -> None:
     assert "Календарный план" in text
     assert _default_year() in text
     assert "1 год обучения" in text
-    assert "Часы совпадают" in text
-    assert "Календарь проверен" in text
+    assert "Программа распознана" in text
+    assert "УТП соответствует программе" in text
+    assert "Часы совпадают: 72" in text
+    assert "Учебный год определён" in text
     assert "замечан" in text
-    assert any(item.label == "Подробнее о проверке" for item in app.expander)
+    assert any(
+        item.label == "Что проверено и какие есть замечания"
+        for item in app.expander
+    )
     assert any(button.label == "Изменить данные" for button in app.button)
     assert not _generate_buttons(app)
     assert app.get("download_button")[0].label == (
@@ -716,7 +726,10 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert "Недостаточно данных источника" in _page_text(app)
     assert "Некоторые формулировки автоматически приведены" in _page_text(app)
     assert "не мешают формированию" in _page_text(app)
-    assert any(item.label == "Подробнее о проверке" for item in app.expander)
+    assert any(
+        item.label == "Что проверено и какие есть замечания"
+        for item in app.expander
+    )
     assert callable(pipeline.call_args.kwargs.get("on_progress"))
     stored = app.session_state["calendar_warnings"]
     assert SLOT_CONTINUE_WARNING in stored
