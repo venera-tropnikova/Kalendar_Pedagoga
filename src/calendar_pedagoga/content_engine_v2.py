@@ -5921,6 +5921,24 @@ def _retained_complement_covered(clause: str, original: ContentEngineV2Result) -
     return True
 
 
+def _coordinated_action_uncovered(clause: str, result: str) -> bool:
+    """Coordinated nominal actions of one clause must all reach the result."""
+
+    if " и " not in clause.casefold():
+        return False
+    for head, verb in _VERBAL_NOUN_TO_VERB.items():
+        if not re.search(r"(?i)\b" + re.escape(head) + r"\b", clause):
+            continue
+        if not (
+            re.search(r"(?i)\s+и\s+" + re.escape(head) + r"\b", clause)
+            or clause.casefold().startswith(head + " ")
+        ):
+            continue
+        if verb not in result.casefold():
+            return True
+    return False
+
+
 def _derive_week_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
@@ -5960,7 +5978,24 @@ def _derive_week_fields_v2(
             and not any("NEEDS_REVIEW" in w or w.startswith("Безопасный шаблон CE2:") for w in original.warnings)
             else "NEEDS_REVIEW"
         )
-        return replace(original, clause_coverage=tuple((c, status) for c in clauses))
+        # One clause may assign several coordinated actions: keeping just one
+        # of them is partial coverage, not a proven clause.
+        partial = [
+            clause for clause in clauses
+            if status == "COVERED"
+            and _coordinated_action_uncovered(clause, original.planned_result)
+        ]
+        warnings = original.warnings + tuple(
+            "NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + clause
+            for clause in partial
+        )
+        return replace(
+            original,
+            warnings=tuple(dict.fromkeys(warnings)),
+            clause_coverage=tuple(
+                (c, "NEEDS_REVIEW" if c in partial else status) for c in clauses
+            ),
+        )
     results: list[str] = []
     controls: list[str] = []
     uncovered: list[str] = []
@@ -5985,7 +6020,10 @@ def _derive_week_fields_v2(
                 practice_hours=practice_hours,
             )
             phrase = proof.planned_result
-            if not _nonempty_result_in(phrase, original.planned_result):
+            if (
+                not _nonempty_result_in(phrase, original.planned_result)
+                or _coordinated_action_uncovered(clause, original.planned_result)
+            ):
                 uncovered.append(clause)
             continue
         if (_prohibition_only_source(clause) or _bare_list_without_action(clause)
@@ -6033,12 +6071,8 @@ def _derive_week_fields_v2(
             controls.append(control)
         # A successful local repair may keep only one coordinated operation.
         # Do not certify the original clause as fully covered in that case.
-        for head, verb in _VERBAL_NOUN_TO_VERB.items():
-            if re.search(r"(?i)\b" + re.escape(head) + r"\b", clause):
-                if re.search(r"(?i)\s+и\s+" + re.escape(head) + r"\b", clause) or clause.casefold().startswith(head + " "):
-                    if verb not in local.planned_result.casefold() and " и " in clause:
-                        uncovered.append(clause)
-                        break
+        if _coordinated_action_uncovered(clause, local.planned_result):
+            uncovered.append(clause)
     if retained and not retained_added:
         results.insert(0, original.planned_result)
         controls.insert(0, original.assessment_method)
