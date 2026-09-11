@@ -705,6 +705,18 @@ def _data_row_page_layout_pdf(
     def identifier(text):
         return re.sub(r"\s+", "", text or "")
 
+    header_cells = {
+        normalized(cell.text)
+        for row in source.rows[:2]
+        for cell in row.cells
+        if normalized(cell.text)
+    }
+
+    def is_header_fragment(fragment) -> bool:
+        """A repeated table header, recognised by its own text."""
+        texts = [normalized(value) for value in fragment]
+        return any(texts) and all(text in header_cells for text in texts if text)
+
     source_cells: list[list[str]] = []
     expected: list[list[str]] = []
     identifiers: list[list[str]] = []
@@ -734,11 +746,22 @@ def _data_row_page_layout_pdf(
     fragments: list[tuple[int, list[str]]] = []
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
-            tables = [table for table in page.find_tables().tables
+            found = page.find_tables().tables
+            if not found:
+                # A tall first row can push the table off the title page.
+                continue
+            tables = [table for table in found
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
                 return None
-            for fragment in tables[0].extract()[2:]:
+            for fragment in tables[0].extract():
+                # Word repeats the header on most pages but omits it above the
+                # continuation of a split row, so the header is recognised by
+                # its text instead of by a fixed fragment position.
+                if is_header_fragment(fragment):
+                    continue
+                if not any(normalized(value) for value in fragment):
+                    continue
                 if len(layouts) >= total_rows:
                     return None
                 row_index = len(layouts)
