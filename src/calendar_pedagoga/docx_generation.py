@@ -1381,6 +1381,29 @@ def build_output_filename(utp: UtpParseResult, academic_year: str) -> str:
     return f"Календарный_план_{safe}_{year}.docx"
 
 
+def _measure_preview_layouts(
+    template: CalendarTemplateSelection,
+    utp: UtpParseResult,
+    rows: tuple[ResolvedLessonRow, ...],
+    *,
+    splittable: frozenset[int] = frozenset(),
+    **header,
+):
+    """Measure the unmerged preview: only *splittable* rows may break on a page.
+
+    The preview is the semantic source for exact page segmentation.
+    """
+
+    from calendar_pedagoga.docx_qa import detect_data_row_page_layout
+
+    document = _load_template(template)
+    table, _, _ = _populate_calendar_table(document, utp, rows, **header)
+    for index, row in enumerate(table.rows[2:]):
+        if index not in splittable:
+            _prevent_row_split(row)
+    return detect_data_row_page_layout(_save_document(document), total_rows=len(rows))
+
+
 def generate_calendar_docx(
     utp: UtpParseResult,
     rows: tuple[ResolvedLessonRow, ...],
@@ -1405,18 +1428,19 @@ def generate_calendar_docx(
         "uses_organization_template": template.uses_organization_template,
     }
 
-    # The unmerged preview is the semantic source for exact page segmentation.
-    preview_document = _load_template(template)
-    preview_table, _, _ = _populate_calendar_table(preview_document, utp, rows, **header)
     # Measure the production rule first: a logical week that fits on a page
     # moves there as one row. A genuinely over-height row may still be
     # segmented by the existing fail-closed renderer path.
-    for row in preview_table.rows[2:]:
-        _prevent_row_split(row)
-    preview = _save_document(preview_document)
-    from calendar_pedagoga.docx_qa import detect_data_row_page_layout
-
-    layouts = detect_data_row_page_layout(preview, total_rows=len(rows))
+    layouts = _measure_preview_layouts(template, utp, rows, **header)
+    if layouts and layouts[0].span.start_page > 1:
+        # The document header leaves room on the title page, but an over-height
+        # first week cannot move into it while its row may not break. Measured
+        # as a breakable row, its first segment takes the space that is left.
+        filled = _measure_preview_layouts(
+            template, utp, rows, splittable=frozenset({0}), **header
+        )
+        if filled is not None and filled[0].span.start_page == 1:
+            layouts = filled
     if layouts is None:
         raise ValueError(
             "DOCX не прошёл QA: не удалось надёжно определить границы текста "
