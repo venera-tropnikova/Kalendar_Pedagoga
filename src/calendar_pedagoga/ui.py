@@ -8,6 +8,8 @@ import hashlib
 import json
 import logging
 import re
+import sys
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -3680,6 +3682,40 @@ def _store_analysis_context(
     }
 
 
+def _emit_generation_error_to_stderr(error: BaseException) -> None:
+    """Write the UI-caught generation error to process stderr.
+
+    Streamlit replaces ``sys.stderr`` for the script runner; Render tails the
+    original process stream. Both are written. Session state is not changed.
+    """
+
+    from calendar_pedagoga.docx_qa import collect_docx_qa_diagnostics
+
+    stage = "ui_execute_calendar_generation"
+    try:
+        payload = collect_docx_qa_diagnostics()
+    except Exception:
+        payload = None
+    text = (
+        "DOCX QA diagnostics\n"
+        f"stage: {stage}\n"
+        f"exception: {type(error).__name__}: {error}\n"
+        "payload: "
+        + (
+            json.dumps(payload, ensure_ascii=False, default=str)
+            if payload is not None
+            else "unavailable"
+        )
+    )
+    streams = [sys.stderr]
+    original = getattr(sys, "__stderr__", None)
+    if original is not None and original is not sys.stderr:
+        streams.append(original)
+    for stream in streams:
+        print(text, file=stream, flush=True)
+        traceback.print_exception(type(error), error, error.__traceback__, file=stream)
+
+
 def _execute_calendar_generation(
     *,
     validated_utp: ValidatedUpload,
@@ -3738,6 +3774,7 @@ def _execute_calendar_generation(
             status_widget.update(label=_STATUS_READY, state="complete")
             _set_work_status(_STATUS_READY)
     except (PipelineError, ScheduleValidationError, ValueError) as error:
+        _emit_generation_error_to_stderr(error)
         st.session_state["calendar_generation_error"] = str(error)
         _set_work_status("")
     else:

@@ -890,6 +890,23 @@ def test_teacher_generation_warnings_hide_internal_diagnostics_and_collapse_ce2(
     )
 
 
+def test_ui_generation_error_is_printed_to_stderr(capsys) -> None:
+    try:
+        raise ValueError(
+            "DOCX не прошёл QA: page-segment не помещается на одной странице "
+            "или его идентификаторы не подтверждены render-проверкой."
+        )
+    except ValueError as error:
+        ui._emit_generation_error_to_stderr(error)
+    captured = capsys.readouterr().err
+    assert "DOCX QA diagnostics" in captured
+    assert "stage: ui_execute_calendar_generation" in captured
+    assert "page-segment не помещается на одной странице" in captured
+    assert "ValueError" in captured
+    assert "payload:" in captured
+    assert "Traceback" in captured
+
+
 def test_check_button_disabled_while_busy() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
     app.session_state["calendar_busy"] = True
