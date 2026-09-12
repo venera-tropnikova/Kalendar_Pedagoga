@@ -4,7 +4,7 @@ import pytest
 
 from calendar_pedagoga.content_engine_v2 import (
     _continues_prepositional_group, _coordinated_inside_group,
-    _drop_raw_list_tails, _fold_week_result,
+    _drop_raw_list_tails, _fold_week_result, _name_catalogue_result,
     _result_grammar_issue, _derive_week_fields_v2, derive_fields_v2,
 )
 
@@ -73,12 +73,18 @@ def test_covered_knowledge_citation_survives_case_gate(source, fragment):
     assert "по теме" not in low
 
 
-@pytest.mark.parametrize("source, head", [
-    ("Экскурсионные поездки: Шиханы, Капова пещера и другие.", "экскурсионные поездки"),
-    ("Памятники: обелиски, мемориальные доски.", "памятники"),
+@pytest.mark.parametrize("source, named", [
+    (
+        "Экскурсионные поездки: Шиханы, Капова пещера и другие.",
+        "Называет экскурсионные поездки: Шиханы, Капова пещера и другие.",
+    ),
+    (
+        "Памятники: обелиски, мемориальные доски.",
+        "Называет памятники: обелиски, мемориальные доски.",
+    ),
 ])
-def test_catalogue_heading_is_not_a_covered_citation(source, head):
-    """Заголовок над перечнем не цитата клаузы: перечень нельзя терять молча."""
+def test_catalogue_heading_names_its_members_instead_of_silent_drop(source, named):
+    """Заголовок над перечнем не цитата: перечень называется целиком, не теряется."""
     result = derive_fields_v2(
         topic_title="Учебная тема",
         theory_text=source,
@@ -86,10 +92,10 @@ def test_catalogue_heading_is_not_a_covered_citation(source, head):
         program_content=source,
         theory_hours=2,
     )
-    assert result.planned_result.strip() == ""
-    assert f"характеризует {head}" not in result.planned_result.casefold()
-    assert all(status == "NEEDS_REVIEW" for _clause, status in result.clause_coverage)
-    assert any("NEEDS_REVIEW" in warning for warning in result.warnings)
+    assert result.planned_result == named
+    assert "характеризует" not in result.planned_result.casefold()
+    assert all(status == "COVERED" for _clause, status in result.clause_coverage)
+    assert result.warnings == ()
 
 
 def test_instrumental_government_is_not_an_admissible_knowledge_object():
@@ -414,6 +420,115 @@ def test_dropped_list_member_is_reported_instead_of_covered():
     )
     assert coverage[clause] == "NEEDS_REVIEW"
     assert any(clause in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("clause, expected", [
+    (
+        "Экскурсионные поездки: Стерлитамакские Шиханы, Нугушское водохранилище, "
+        "Хазинское урочище, Капова пещера, водопад Кук-Караук и другие",
+        "Называет экскурсионные поездки: Стерлитамакские Шиханы, "
+        "Нугушское водохранилище, Хазинское урочище, Капова пещера, "
+        "водопад Кук-Караук и другие.",
+    ),
+    (
+        "Государственные символы: герб, флаг, гимн",
+        "Называет государственные символы: герб, флаг, гимн.",
+    ),
+    (
+        "Памятники природы: Стерлитамакские шиханы, Хазинское урочище, "
+        "Капова пещера, водопад Кук-Караук и другие",
+        "Называет памятники природы: Стерлитамакские шиханы, Хазинское урочище, "
+        "Капова пещера, водопад Кук-Караук и другие.",
+    ),
+    (
+        "Основные требования к привалу: выбор места (безопасность, наличие воды, "
+        "удобство), длительность",
+        "Называет основные требования к привалу: выбор места (безопасность, "
+        "наличие воды, удобство), длительность.",
+    ),
+    (
+        "Виды туризма: пешеходный, лыжный, горный водный, велосипедный",
+        "Называет виды туризма: пешеходный, лыжный, горный водный, велосипедный.",
+    ),
+])
+def test_unprovable_theory_label_names_its_whole_catalogue(clause, expected):
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=clause,
+        practice_text="",
+        program_content=clause,
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert result.planned_result == expected
+    # The oral check names the area it asks about, never the cases of the
+    # members listed under the label.
+    assert result.assessment_method.startswith("устный опрос по ")
+    assert ":" not in result.assessment_method
+    assert all(status == "COVERED" for _clause, status in result.clause_coverage)
+    assert result.warnings == ()
+
+
+def test_proven_characterisation_is_not_replaced_by_naming():
+    clause = (
+        "Воспитание волевых качеств: целеустремленности, настойчивости и упорства, "
+        "самостоятельности и инициативы, решительности и смелости"
+    )
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=clause,
+        practice_text="",
+        program_content=clause,
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert result.planned_result == "Характеризует воспитание волевых качеств."
+
+
+@pytest.mark.parametrize("clause", [
+    # Nothing follows the colon, so there is no catalogue to name.
+    "Экскурсионные поездки:",
+    # No label above an enumeration at all.
+    "Экскурсионные поездки.",
+])
+def test_naming_needs_a_catalogue_under_the_label(clause):
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=clause,
+        practice_text="",
+        program_content=clause,
+        theory_hours=2,
+        practice_hours=0,
+    )
+    assert "азывает" not in result.planned_result
+
+
+def test_practice_catalogue_keeps_its_performed_action():
+    clause = (
+        "Экскурсионные поездки: Стерлитамакские Шиханы, "
+        "Нугушское водохранилище и другие."
+    )
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=clause,
+        program_content=clause,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert result.planned_result.startswith("Совершает экскурсионные поездки:")
+    assert "азывает" not in result.planned_result
+
+
+@pytest.mark.parametrize("text", [
+    "Экскурсионные поездки",
+    "Экскурсионные поездки:",
+    ": герб, флаг, гимн",
+    # Duty complements open with a preposition: naming would invent an action.
+    "Ответственные: за питание, за походный дневник, по охране природы",
+])
+def test_name_catalogue_needs_a_label_and_a_catalogue(text):
+    assert _name_catalogue_result(text) is None
 
 
 def test_named_techniques_without_process_head_stay_unconverted():

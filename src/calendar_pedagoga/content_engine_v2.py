@@ -1613,14 +1613,25 @@ def _transform_segment(
             return unconjugated
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
+        # Naming is offered only where the lesson has no practice: a heading a
+        # practice clause converts into an action keeps that conversion.
+        catalogue = _name_catalogue_result(text) if theory_only else None
         if _knowledge_label_over_catalogue(text):
-            # BARE LIST: a label above an enumeration is not an action; keep
-            # the source untouched and let the clause stay for review.
-            return text, "", "", ""
+            # BARE LIST: a label above an enumeration is not an action. Naming
+            # what the label collects is the one action it does license; with no
+            # catalogue to name the source stays untouched for review.
+            return catalogue or (text, "", "", "")
         named = _name_kinds(text)
         if named:
             return named
-        return _characterize(text)
+        characterized = _characterize(text)
+        if catalogue and (
+            not characterized[0] or _result_grammar_issue(characterized[0])
+        ):
+            # An unproven characterisation would leave the clause under review
+            # and drop the catalogue with it; naming keeps both.
+            return catalogue
+        return characterized
     return text, "", "", ""
 
 
@@ -1652,6 +1663,37 @@ def _name_kinds(text: str) -> tuple[str, str, str, str] | None:
         return None
     phrase = f"называет виды {obj[:1].lower() + obj[1:]}"
     return phrase, "называет", f"виды {obj}", ""
+
+
+def _name_catalogue_result(text: str) -> tuple[str, str, str, str] | None:
+    """Naming a catalogue of knowledge objects, kept whole.
+
+    A label above a colon enumeration assigns no action of its own, and naming
+    quotes what the label collects instead of governing it, so it needs neither
+    the accusative proof a characterisation needs nor an action the source never
+    states. The enumeration is the named object, so it is kept verbatim.
+
+    Members that open with a preposition are duty complements of a role, not
+    objects of knowledge: naming would invent an action the source never states.
+    """
+
+    heading, separator, tail = _normalize_spaces(text).partition(":")
+    heading, tail = heading.strip(" ."), tail.strip(" .")
+    if not separator or not heading or not tail:
+        return None
+    members = [
+        item.strip()
+        for item in re.split(r",\s*|\s+и\s+", tail)
+        if item.strip()
+    ]
+    if not members:
+        return None
+    for member in members:
+        first = member.split()[0] if member.split() else ""
+        if _is_preposition(first):
+            return None
+    obj = f"{_decap_lexical(heading)}: {tail}"
+    return f"называет {obj}", "называет", obj, ""
 
 
 def _is_interrogative_clause(text: str) -> bool:
@@ -2369,7 +2411,18 @@ def _merge_repeated_verbs(text: str, *, only: frozenset[str] | None = None) -> s
     return ", ".join(merged)
 
 
+def _names_catalogue(text: str) -> bool:
+    """Result whose object is a catalogue it names rather than governs."""
+
+    return bool(re.match(r"(?i)^называет\s+[^:]+:\s*\S", _normalize_spaces(text)))
+
+
 def _trim_long_parentheticals(text: str) -> str:
+    if _names_catalogue(text):
+        # The catalogue is quoted, not summarised: dropping a member of it would
+        # rename what the source collects under its label.
+        return _normalize_spaces(text)
+
     def drop(match: re.Match[str]) -> str:
         inner = match.group(1)
         if inner.count(",") >= 2 or inner.count(";") >= 1:
@@ -2472,7 +2525,7 @@ def _group_member_separator(member: str) -> str:
 
 
 def _drop_raw_list_tails(text: str) -> str:
-    if _has_explicit_action_catalogue(text):
+    if _has_explicit_action_catalogue(text) or _names_catalogue(text):
         return text
     parts = re.split(r",\s+", text)
     if len(parts) <= 1:
@@ -3234,6 +3287,11 @@ def _oral_object_for_control(obj: str) -> str:
     phrase = _normalize_spaces(obj).strip(" ,.;")
     if not phrase or _starts_with_action_finite(phrase):
         return ""
+    label, separator, _catalogue = phrase.partition(":")
+    if separator and label.strip():
+        # An oral check names the area it asks about; a catalogue under a label
+        # lists members of that area, and their own cases are not proven.
+        phrase = label.strip()
     topic = re.match(r"(?i)^материал по теме\s+[„\"«](.+?)[“\"»]$", phrase)
     if topic:
         return f"теме „{topic.group(1)}“"

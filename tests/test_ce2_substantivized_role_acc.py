@@ -56,15 +56,15 @@ def test_same_role_catalogue_rule_for_another_label():
     assert "дежурныму" not in control
 
 
-def test_trip_catalogue_keeps_inanimate_dative_in_control():
+def test_trip_catalogue_names_its_members_and_keeps_inanimate_dative_in_control():
     derived = _theory(
         "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие.",
         topic="Экскурсии",
     )
-    result = derived.planned_result.casefold()
-    assert "характеризует" not in result
-    assert "называет" not in result
-    assert _kept_for_review(derived, "Экскурсионные поездки")
+    assert derived.planned_result == (
+        "Называет экскурсионные поездки: Стерлитамакские Шиханы, "
+        "водопад Кук-Караук и другие."
+    )
     control = derived.assessment_method.casefold()
     assert "по экскурсионным поездкам" in control
     assert "по экскурсионных" not in control

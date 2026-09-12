@@ -1429,39 +1429,36 @@ def test_theory_characterizes_compass_knowledge_head():
     assert not derived.planned_result.startswith("Характеризует материал по теме")
 
 
-def test_theory_colon_heading_catalogue_stays_for_review():
+def test_theory_colon_heading_names_its_whole_catalogue():
     derived = _theory_fields(
         "Памятники природы: Стерлитамакские шиханы, Капова пещера и другие."
     )
-    low = derived.planned_result.casefold()
-    # Ярлык над перечнем — не действие ученика: предикат не выдумывается,
-    # перечень не попадает в поля, клауза остаётся на проверку.
-    assert "характеризует" not in low
-    assert "называет" not in low
-    assert "шиханы" not in low
-    assert ":" not in derived.planned_result
-    assert not derived.planned_result.startswith("Характеризует материал по теме")
-    assert _kept_for_review(derived, "Памятники природы")
+    assert derived.planned_result == (
+        "Называет памятники природы: Стерлитамакские шиханы, "
+        "Капова пещера и другие."
+    )
+    assert all(status == "COVERED" for _clause, status in derived.clause_coverage)
+    assert derived.warnings == ()
     control = derived.assessment_method.casefold()
     assert "по памятникам природы" in control
     assert "по памятники" not in control
     assert "шиханы" not in control
 
 
-def test_theory_trip_heading_catalogue_stays_for_review():
+def test_theory_trip_heading_names_its_whole_catalogue():
     derived = _theory_fields(
         "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие."
     )
-    low = derived.planned_result.casefold()
-    assert "характеризует" not in low
-    assert "называет" not in low
-    assert "шиханы" not in low
-    assert ":" not in derived.planned_result
-    assert not derived.planned_result.startswith("Характеризует материал по теме")
-    assert _kept_for_review(derived, "Экскурсионные поездки")
+    assert derived.planned_result == (
+        "Называет экскурсионные поездки: Стерлитамакские Шиханы, "
+        "водопад Кук-Караук и другие."
+    )
+    assert all(status == "COVERED" for _clause, status in derived.clause_coverage)
+    assert derived.warnings == ()
     control = derived.assessment_method.casefold()
     assert "по экскурсионным поездкам" in control
     assert "по экскурсионные" not in control
+    assert "шиханы" not in control
 
 
 def test_theory_skips_interrogative_clause_with_parentheses():
