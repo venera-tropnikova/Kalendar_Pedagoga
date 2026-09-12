@@ -57,10 +57,6 @@ def test_abbreviation_does_not_leave_orphan_city_as_result():
     ("Памятники прославленным людям.", "характеризует памятники прославленным людям"),
     ("День моей республики.", "характеризует день моей республики"),
     ("Одежда, зимний инвентарь.", "характеризует одежду, зимний инвентарь"),
-    (
-        "Экскурсионные поездки: Шиханы, Капова пещера и другие.",
-        "характеризует экскурсионные поездки",
-    ),
 ])
 def test_covered_knowledge_citation_survives_case_gate(source, fragment):
     result = derive_fields_v2(
@@ -73,6 +69,40 @@ def test_covered_knowledge_citation_survives_case_gate(source, fragment):
     low = result.planned_result.casefold()
     assert fragment in low
     assert "по теме" not in low
+
+
+@pytest.mark.parametrize("source, head", [
+    ("Экскурсионные поездки: Шиханы, Капова пещера и другие.", "экскурсионные поездки"),
+    ("Памятники: обелиски, мемориальные доски.", "памятники"),
+])
+def test_catalogue_heading_is_not_a_covered_citation(source, head):
+    """Заголовок над перечнем не цитата клаузы: перечень нельзя терять молча."""
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+    )
+    assert result.planned_result.strip() == ""
+    assert f"характеризует {head}" not in result.planned_result.casefold()
+    assert all(status == "NEEDS_REVIEW" for _clause, status in result.clause_coverage)
+    assert any("NEEDS_REVIEW" in warning for warning in result.warnings)
+
+
+def test_instrumental_government_is_not_an_admissible_knowledge_object():
+    """Инструменталис — комплемент деятельности, а не поле знания."""
+    source = "Перспективы занятий туристско-краеведческой деятельностью."
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+    )
+    assert result.planned_result.strip() == ""
+    assert "характеризует" not in result.planned_result.casefold()
+    assert all(status == "NEEDS_REVIEW" for _clause, status in result.clause_coverage)
 
 
 @pytest.mark.parametrize("text", [

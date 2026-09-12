@@ -6461,12 +6461,12 @@ def _feminine_acc_citation(text: str) -> str:
 
 
 def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
-    """True when RESULT restates a covered source NP, not a newly cased object.
+    """True when RESULT restates the whole covered NP, not a newly cased object.
 
     Animacy of masculine/plural heads stays unknown in the form-only gate.
-    A covered source citation is not a new unproven case: the object is the
-    assigned clause (or its regular feminine accusative), never a dative or
-    a generic «по теме» fallback.
+    Restating the entire assigned clause (or its regular feminine accusative)
+    adds no case of our own. A heading taken from above a colon catalogue is
+    not such a citation: it silently drops the enumeration it governs.
     """
 
     if re.search(r"(?i)по теме", sentence):
@@ -6474,27 +6474,41 @@ def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
     obj = _knowledge_cite_key(_knowledge_result_object(sentence))
     if len(obj) < 4:
         return False
-    heads = [_normalize_spaces(clause).strip(" .")]
-    raw = heads[0]
-    if ":" in raw:
-        heads.append(raw.split(":", 1)[0].strip())
-    for head in heads:
-        cite = _knowledge_cite_key(head)
-        if not cite:
-            continue
-        full = _knowledge_cite_key(heads[0])
-        if obj == cite or full.startswith(obj + ":"):
-            return True
-        if len(cite) >= 8 and (
-            obj.startswith(cite + ",")
-            or obj.startswith(cite + " ")
-            or f"характеризует {cite}" in obj
-        ):
-            return True
-        acc = _knowledge_cite_key(_feminine_acc_citation(head))
-        if acc and (obj == acc or obj.startswith(acc + ",") or obj.startswith(acc + " ")):
-            return True
-    return False
+    head = _normalize_spaces(clause).strip(" .")
+    cite = _knowledge_cite_key(head)
+    if not cite:
+        return False
+    if obj == cite:
+        return True
+    if len(cite) >= 8 and (
+        obj.startswith(cite + ",")
+        or obj.startswith(cite + " ")
+        or f"характеризует {cite}" in obj
+    ):
+        return True
+    acc = _knowledge_cite_key(_feminine_acc_citation(head))
+    return bool(acc) and (
+        obj == acc or obj.startswith(acc + ",") or obj.startswith(acc + " ")
+    )
+
+
+# Instrumental is the case of an activity complement, not of a knowledge field.
+_INSTRUMENTAL_COMPLEMENT_RE = re.compile(r"(?i)(?:ью|ами|ями)$")
+
+
+def _admissible_knowledge_object(obj: str) -> bool:
+    """Knowledge object without government CE2 has not converted into an action.
+
+    An instrumental dependent names what the activity is carried out with;
+    quoting it under «характеризует» would state a relation, not a field of
+    knowledge, so such an object is not admissible for a citation.
+    """
+
+    for token in _normalize_spaces(obj).split():
+        core = _strip_punct_word(token)[1].casefold()
+        if len(core) > 4 and _INSTRUMENTAL_COMPLEMENT_RE.search(core):
+            return False
+    return True
 
 
 def _safe_operation_result(clause: str, *, practical: bool) -> str:
@@ -6554,6 +6568,10 @@ def derive_fields_v2(
         if sentence in replacements:
             continue
         if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
+            continue
+        # A citation is kept only when the object is an admissible knowledge
+        # field as well: quoting the clause does not license every government.
+        if not _admissible_knowledge_object(_knowledge_result_object(sentence)):
             continue
         for clause, status in original.clause_coverage:
             if status != "COVERED" or not _knowledge_result_cites_clause(sentence, clause):

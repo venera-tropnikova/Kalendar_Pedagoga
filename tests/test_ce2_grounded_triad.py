@@ -1381,11 +1381,14 @@ def test_theory_colon_heading_catalogue_stays_for_review():
         "Памятники природы: Стерлитамакские шиханы, Капова пещера и другие."
     )
     low = derived.planned_result.casefold()
-    assert low.startswith("характеризует памятники природы")
+    # Ярлык над перечнем — не действие ученика: предикат не выдумывается,
+    # перечень не попадает в поля, клауза остаётся на проверку.
+    assert "характеризует" not in low
     assert "называет" not in low
     assert "шиханы" not in low
     assert ":" not in derived.planned_result
     assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert _kept_for_review(derived, "Памятники природы")
     control = derived.assessment_method.casefold()
     assert "по памятникам природы" in control
     assert "по памятники" not in control
@@ -1397,11 +1400,12 @@ def test_theory_trip_heading_catalogue_stays_for_review():
         "Экскурсионные поездки: Стерлитамакские Шиханы, водопад Кук-Караук и другие."
     )
     low = derived.planned_result.casefold()
-    assert low.startswith("характеризует экскурсионные поездки")
+    assert "характеризует" not in low
     assert "называет" not in low
     assert "шиханы" not in low
     assert ":" not in derived.planned_result
     assert not derived.planned_result.startswith("Характеризует материал по теме")
+    assert _kept_for_review(derived, "Экскурсионные поездки")
     control = derived.assessment_method.casefold()
     assert "по экскурсионным поездкам" in control
     assert "по экскурсионные" not in control
