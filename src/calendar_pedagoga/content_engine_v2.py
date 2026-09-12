@@ -2461,6 +2461,16 @@ def _continues_prepositional_group(kept: str, tail: str) -> bool:
     return bool(shared & _OBLIQUE_CASES)
 
 
+def _group_member_separator(member: str) -> str:
+    """Two members of one group are coordinated by «и».
+
+    A member that already carries its own coordination keeps the comma the
+    source used: a second «и» would leave the boundary of the pair unreadable.
+    """
+
+    return ", " if " и " in member or "," in member else " и "
+
+
 def _drop_raw_list_tails(text: str) -> str:
     if _has_explicit_action_catalogue(text):
         return text
@@ -2470,16 +2480,19 @@ def _drop_raw_list_tails(text: str) -> str:
     if _is_parallel_observable_series(parts):
         return text
     kept = [parts[0]]
+    separators: list[str] = []
     for part in parts[1:]:
         first = part.split()[0] if part.split() else ""
         if _FINITE_VERB_RE.match(part):
             kept.append(part)
+            separators.append(", ")
             continue
         if _looks_like_verbal_noun(first) or re.search(
             r"(?i)(?:нию|тию|анию|ению)$", first
         ):
             if _continues_prepositional_group(kept[-1], part):
                 kept.append(part)
+                separators.append(_group_member_separator(part))
             continue
         if first[:1].isupper() and not _RESULT_FINITE_RE.match(part):
             if not re.match(r"(?i)^(?:совершает|посещает)\s+", parts[0]):
@@ -2487,7 +2500,11 @@ def _drop_raw_list_tails(text: str) -> str:
         if re.match(r"(?i)^(игры|игра|соревнования|диктанты|занятия|мини)\b", part):
             continue
         kept.append(part)
-    return ", ".join(kept)
+        separators.append(", ")
+    joined = kept[0]
+    for separator, part in zip(separators, kept[1:]):
+        joined += separator + part
+    return joined
 
 
 def _keep_strongest_phrase(phrases: list[str]) -> list[str]:
@@ -6976,6 +6993,28 @@ def _vary_repeated_independent_characterize(sentences: list[str]) -> list[str]:
     return rewritten
 
 
+def _coordinated_inside_group(obj: str) -> bool:
+    """Object that coordinates members inside a prepositional group of its own.
+
+    Parentheses delimit their own coordination, and an «и» before any
+    preposition joins dependents of the head, not members of a group.
+    """
+
+    depth = 0
+    opened = False
+    for token in _normalize_spaces(obj).split():
+        depth += token.count("(") - token.count(")")
+        if depth > 0:
+            continue
+        if token.casefold() == "и":
+            if opened:
+                return True
+            continue
+        if _is_preposition(token):
+            opened = True
+    return False
+
+
 def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
     """One predicate per run of actions that share it; every object is kept."""
 
@@ -6986,14 +7025,20 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
     def flush() -> None:
         nonlocal verb, objects
         if objects:
-            # A final «и» would be ambiguous once an object carries its own
-            # coordination, so such an enumeration stays comma-separated.
-            listed = (
-                ", ".join(objects)
-                if any(" и " in item or "," in item for item in objects)
-                else _join_and(objects)
-            )
-            folded.append(_cap_sentence(f"{verb} {listed}"))
+            # A group that coordinates members of its own already spends the
+            # comma and the «и» on them, so a following object would enter the
+            # enumeration at another level. Such objects keep a sentence each.
+            if any(_coordinated_inside_group(item) for item in objects[:-1]):
+                folded.extend(_cap_sentence(f"{verb} {item}") for item in objects)
+            else:
+                # A final «и» would be ambiguous once an object carries its own
+                # coordination, so such an enumeration stays comma-separated.
+                listed = (
+                    ", ".join(objects)
+                    if any(" и " in item or "," in item for item in objects)
+                    else _join_and(objects)
+                )
+                folded.append(_cap_sentence(f"{verb} {listed}"))
         verb, objects = "", []
 
     for sentence in sentences:

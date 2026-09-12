@@ -3,7 +3,8 @@ import re
 import pytest
 
 from calendar_pedagoga.content_engine_v2 import (
-    _continues_prepositional_group, _drop_raw_list_tails,
+    _continues_prepositional_group, _coordinated_inside_group,
+    _drop_raw_list_tails, _fold_week_result,
     _result_grammar_issue, _derive_week_fields_v2, derive_fields_v2,
 )
 
@@ -269,10 +270,11 @@ def test_colon_catalogue_after_process_is_not_performed_activity():
 
 
 @pytest.mark.parametrize("text, expected", [
-    # A further member of an open prepositional group keeps the same case.
+    # A further member of an open prepositional group keeps the same case and
+    # is coordinated with the member before it.
     (
         "оказывает первую доврачебную помощь при ожогах, обморожениях",
-        "оказывает первую доврачебную помощь при ожогах, обморожениях",
+        "оказывает первую доврачебную помощь при ожогах и обморожениях",
     ),
     (
         "выполняет обязанности по должностям в период подготовки, "
@@ -328,6 +330,66 @@ def test_group_continuation_reaches_the_result():
     assert "при ожогах" in low
     assert "обморожениях" in low
     assert all(status == "COVERED" for _clause, status in result.clause_coverage)
+
+
+def test_group_coordination_keeps_objects_in_their_own_sentences():
+    week = _derive_week_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=(
+            "Основные приёмы оказания первой доврачебной помощи при ожогах, "
+            "обморожениях. Первая помощь утопающему."
+        ),
+        practice_hours=2,
+    )
+    assert _fold_week_result(week.planned_result) == (
+        "Оказывает первую доврачебную помощь при ожогах и обморожениях. "
+        "Оказывает первую помощь утопающему."
+    )
+
+
+@pytest.mark.parametrize("result, expected", [
+    # Coordination of the last object ends the enumeration, so it still folds.
+    (
+        "Характеризует значение карт. Характеризует устройство и назначение компаса.",
+        "Характеризует значение карт, устройство и назначение компаса.",
+    ),
+    # An «и» before any preposition joins dependents of the head, not members
+    # of a group, so the objects stay in one enumeration.
+    (
+        "Характеризует роль государства и органов образования в развитии туризма. "
+        "Характеризует краеведение.",
+        "Характеризует роль государства и органов образования в развитии туризма, "
+        "краеведение.",
+    ),
+    # Parentheses delimit their own coordination.
+    (
+        "Характеризует строение организма (органы и системы). "
+        "Характеризует строение внутренних органов.",
+        "Характеризует строение организма (органы и системы), "
+        "строение внутренних органов.",
+    ),
+    # A comma enumeration inside an object is not coordination by «и».
+    (
+        "Выполняет подъем «лесенкой», «ёлочкой». Выполняет спуск с горы. "
+        "Выполняет торможение.",
+        "Выполняет подъем «лесенкой», «ёлочкой», спуск с горы, торможение.",
+    ),
+])
+def test_objects_without_group_coordination_still_fold(result, expected):
+    assert _fold_week_result(result) == expected
+
+
+@pytest.mark.parametrize("obj, coordinated", [
+    ("первую доврачебную помощь при ожогах и обморожениях", True),
+    ("значение волевых усилий в походах и тренировках", True),
+    ("роль государства и органов образования в развитии туризма", False),
+    ("строение организма (органы и системы)", False),
+    ("духовные и физические возможности среды в развитии личности", False),
+    ("устройство и назначение компаса", False),
+])
+def test_group_coordination_is_recognised_only_inside_a_group(obj, coordinated):
+    assert _coordinated_inside_group(obj) is coordinated
 
 
 def test_dropped_list_member_is_reported_instead_of_covered():
