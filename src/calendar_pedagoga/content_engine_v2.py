@@ -6108,7 +6108,7 @@ def _derive_week_fields_v2(
     return replace(
         original,
         planned_result=_merge_independent_part_results(results),
-        assessment_method="; ".join(controls),
+        assessment_method=_join_control_clauses(controls),
         warnings=tuple(dict.fromkeys(warnings)),
         type_result=original.planned_result,
         clause_coverage=tuple(
@@ -6628,6 +6628,85 @@ def _sanitize_oral_control(control: str) -> str:
     return prefix + " и ".join(kept)
 
 
+def _drop_repeated_lead(tails: list[str]) -> list[str]:
+    """The wording that introduces a quoted operation is stated once per label."""
+
+    kept: list[str] = []
+    seen: set[str] = set()
+    for tail in tails:
+        lead, quote, rest = tail.partition("«")
+        if quote and lead.strip():
+            key = lead.casefold()
+            if key in seen:
+                kept.append(quote + rest)
+                continue
+            seen.add(key)
+        kept.append(tail)
+    return kept
+
+
+def _split_control_clauses(control: str) -> list[str]:
+    """Clauses of an assembled CONTROL; separators inside quotes stay in place."""
+
+    clauses: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in control:
+        if char in "«„":
+            depth += 1
+        elif char in "»“":
+            depth = max(depth - 1, 0)
+        if char == ";" and depth == 0:
+            clauses.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    clauses.append("".join(current))
+    return [item for item in (clause.strip() for clause in clauses) if item]
+
+
+def _join_control_clauses(controls: list[str]) -> str:
+    """Group the week's operations by control method: one label, no repeated wording."""
+
+    groups: list[tuple[str, list[str], set[str]]] = []
+    index_by_label: dict[str, int] = {}
+    last_label_index: int | None = None
+    for control in controls:
+        # Already assembled controls are regrouped clause by clause, so a method
+        # that appears in several parts of the week keeps a single label.
+        for item in _split_control_clauses(_normalize_spaces(control)):
+            head, separator, tail = item.partition(": ")
+            labelled = bool(separator) and "«" not in head and bool(tail.strip())
+            if labelled:
+                index = index_by_label.get(head.casefold())
+                if index is None:
+                    index_by_label[head.casefold()] = len(groups)
+                    groups.append((head, [], set()))
+                    index = len(groups) - 1
+                operation = tail.strip()
+            elif item.startswith("«") and last_label_index is not None:
+                # A clause that is only a quoted operation continues the method
+                # whose label was already stated.
+                index, operation = last_label_index, item
+            else:
+                # A colon inside a quoted operation belongs to the operation
+                # itself, and a method without a label keeps its own clause.
+                groups.append(("", [item], set()))
+                continue
+            _, tails, seen = groups[index]
+            if operation.casefold() in seen:
+                continue
+            seen.add(operation.casefold())
+            tails.append(operation)
+            last_label_index = index
+    rendered = [
+        "; ".join(tails) if not label
+        else f"{label}: " + "; ".join(_drop_repeated_lead(tails))
+        for label, tails, _seen in groups
+    ]
+    return "; ".join(item for item in rendered if item)
+
+
 def _merge_part_controls(controls: list[str]) -> str:
     if any("по теме „" in item for item in controls):
         return "; ".join(dict.fromkeys(item for item in controls if item))
@@ -6652,7 +6731,7 @@ def _merge_part_controls(controls: list[str]) -> str:
             if not tails:
                 continue
             return prefix + _join_and(_unique_phrases(tails))
-    return "; ".join(unique)
+    return _join_control_clauses(unique)
 
 
 def _merge_independent_part_controls(controls: list[str]) -> str:
@@ -6669,7 +6748,7 @@ def _merge_independent_part_controls(controls: list[str]) -> str:
             continue
         seen.add(key)
         unique.append(item)
-    return "; ".join(unique)
+    return _join_control_clauses(unique)
 
 
 _GENERIC_LESSON_TYPES = {
