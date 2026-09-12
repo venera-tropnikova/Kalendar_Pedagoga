@@ -123,14 +123,15 @@ def _source():
     return result.getvalue()
 
 
-def _pdf(monkeypatch, fragments):
+def _pdf(monkeypatch, fragments, cols=None):
     import pymupdf
+    cols = cols or len(fragments[0][0])
     class Pdf:
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def __iter__(self):
             for rows in fragments:
-                table = SimpleNamespace(col_count=3, extract=lambda rows=rows: [[], []] + rows)
+                table = SimpleNamespace(col_count=cols, extract=lambda rows=rows: [[], []] + rows)
                 yield SimpleNamespace(find_tables=lambda table=table: SimpleNamespace(tables=[table]))
     monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
 
@@ -175,6 +176,92 @@ def test_match_text_ignores_soft_hyphen_and_line_breaks():
     assert qa._normalize_match_text('подго\u00ad\nтовка') == 'подготовка'
     assert qa._absorb_normalized_fragment('подготовка', 'подго', 'подготовка') == 'подготовка'
     assert qa._absorb_normalized_fragment('подготовка', 'подго', 'xxxx') is None
+    assert qa._absorb_normalized_fragment('abcdefxyz', '', 'abcabc') == 'abc'
+    assert qa._absorb_normalized_fragment('abcdefxyz', 'abc', 'abc') == 'abc'
+    assert qa._absorb_normalized_fragment('abcdefxyz', 'abc', 'abcX') is None
+    assert qa._absorb_normalized_fragment('abcdefxyz', '', 'abcXXX') is None
+    assert qa._absorb_normalized_fragment(
+        'abcdefxyz', 'abcdef', 'abc', matched_fragments=('abc',)
+    ) == 'abcdef'
+
+
+# Climbing W9 practice on Render: column 4, matched_length=715, then the PDF
+# appends an exact copy of that already matched prefix instead of the source tail.
+_W9_PRACTICE = (
+    "Изучение техники выполнения упражнений для улучшения осанки "
+    "(Приложение №1). Лазание легких трасс (по 4 мин.). Круговое ОФП: "
+    "планка, выпрыгивание, вис на турнике, «складочки», обратное "
+    "отжимание от скамейки (2 круга). Коллективные приседания (40 раз).\n"
+    "Изучение техники выполнения упражнений для формирования и укрепления "
+    "мышечного корсета спины (Приложение №1). Лазание легких трасс "
+    "(по 4 мин.). Круговое ОФП: планка, выпрыгивание, вис на турнике, "
+    "«складочки», обратное отжимание от скамейки (2 круга). Коллективные "
+    "приседания (50 раз).\n"
+    "Игры на развитие внимания: «Повторюшки», «Земля, вода, лава». "
+    "Лазанье легких трасс (по 4 мин.). Круговое ОФП: планка, выпрыгивание, "
+    "вис на турнике, «складочки», обратное отжимание от скамейки (2 круга). "
+    "Коллективные приседания (50 раз). Игры на быстроту реакции Игры на "
+    "развитие быстроты реакции: «Выше ноги от земли», «Твистер». Лазание "
+    "легких трасс (по 4 мин.). Круговое ОФП: планка, выпрыгивание, вис на "
+    "турнике, «складочки», обратное отжимание от скамейки (2 круга). "
+    "Коллективные приседания (50 раз)."
+)
+_W9_PREFIX_LEN = 715
+
+
+def _w9_source():
+    doc = Document()
+    table = doc.add_table(rows=4, cols=8)
+    first = ['Октябрь / Ноябрь', '9\n26.10–01.11', '', '', _W9_PRACTICE, 'игра', 'результат', 'контроль']
+    second = ['Ноябрь', '10\n02–08.11', '', '', 'хвост', 'игра', 'далее', 'контроль']
+    for row, values in zip(table.rows[2:], (first, second)):
+        for cell, value in zip(row.cells, values):
+            cell.text = value
+    result = BytesIO()
+    doc.save(result)
+    return result.getvalue()
+
+
+def _w9_row(practice):
+    return ['Октябрь / Ноябрь', '9\n26.10–01.11', '', '', practice, 'игра', 'результат', 'контроль']
+
+
+def test_w9_prefix_plus_exact_matched_repeat_continues_next_fragment(monkeypatch):
+    target = qa._normalize_match_text(_W9_PRACTICE)
+    assert len(target) > _W9_PREFIX_LEN
+    prefix = target[:_W9_PREFIX_LEN]
+    rest = target[_W9_PREFIX_LEN:]
+    _pdf(
+        monkeypatch,
+        [
+            [_w9_row(prefix + prefix)],
+            [_w9_row(rest), ['Ноябрь', '10\n02–08.11', '', '', 'хвост', 'игра', 'далее', 'контроль']],
+        ],
+        cols=8,
+    )
+    layouts = qa._data_row_page_layout_pdf(_w9_source(), b'pdf', 2)
+    assert layouts is not None
+    first = layouts[0].segments
+    assert qa._SEGMENTATION_DIAG.get('result') == 'ok'
+    assert ''.join(segment.cells[4] for segment in first) == _W9_PRACTICE
+    assert first[0].cells[4]
+    assert first[0].cells[4] + first[1].cells[4] == _W9_PRACTICE
+
+
+def test_w9_repeat_plus_foreign_text_still_fails_closed(monkeypatch):
+    target = qa._normalize_match_text(_W9_PRACTICE)
+    prefix = target[:_W9_PREFIX_LEN]
+    _pdf(
+        monkeypatch,
+        [[_w9_row(prefix + prefix + 'чужойтекст')]],
+        cols=8,
+    )
+    assert qa._data_row_page_layout_pdf(_w9_source(), b'pdf', 2) is None
+    diag = qa._SEGMENTATION_DIAG
+    assert diag.get('result') == 'prefix_mismatch'
+    assert diag.get('week') == '9'
+    assert diag.get('column') == 4
+    assert diag.get('matched_length') == _W9_PREFIX_LEN
 
 
 def test_physical_page_segments_center_vertical_month_and_week_cells():

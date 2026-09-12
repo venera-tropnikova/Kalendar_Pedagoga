@@ -847,11 +847,32 @@ def _prefix_mismatch_windows(
     }
 
 
-def _absorb_normalized_fragment(target: str, accumulated: str, fragment: str) -> str | None:
+def _exact_repeat_of_matched_fragment(
+    remainder: str,
+    matched_text: str,
+    accumulated: str,
+    matched_fragments: tuple[str, ...] = (),
+) -> bool:
+    """True only when *remainder* equals an already matched piece of this cell."""
+
+    return bool(remainder) and remainder in {
+        matched_text,
+        accumulated,
+        *matched_fragments,
+    }
+
+
+def _absorb_normalized_fragment(
+    target: str,
+    accumulated: str,
+    fragment: str,
+    matched_fragments: tuple[str, ...] = (),
+) -> str | None:
     """Append a PDF fragment; a hyphenated word may repeat its already seen stem.
 
-    Returns the new accumulated prefix, or None when the fragment is not part
-    of *target*. Extra letters still fail closed.
+    A PDF cell may also append an exact copy of an already matched fragment of
+    this same source cell instead of the source continuation. That duplicate is
+    ignored. Any new or foreign text still fails closed.
     """
 
     if not fragment:
@@ -865,6 +886,17 @@ def _absorb_normalized_fragment(target: str, accumulated: str, fragment: str) ->
             combined = accumulated + fragment[overlap:]
             if target.startswith(combined):
                 return combined
+    proposed = accumulated + fragment
+    matched_length = 0
+    limit = min(len(target), len(proposed))
+    while matched_length < limit and target[matched_length] == proposed[matched_length]:
+        matched_length += 1
+    remainder = proposed[matched_length:]
+    matched_text = target[:matched_length]
+    if _exact_repeat_of_matched_fragment(
+        remainder, matched_text, accumulated, matched_fragments
+    ):
+        return matched_text
     return None
 
 
@@ -993,8 +1025,16 @@ def _data_row_page_layout_pdf(
                 normalized_fragment = [""] * len(target)
                 for column in body_columns:
                     fragment_text = normalized(fragment[column])
+                    already_matched = tuple(
+                        item[column]
+                        for _page, item in fragments
+                        if column < len(item) and item[column]
+                    )
                     absorbed = _absorb_normalized_fragment(
-                        target[column], accumulated[column], fragment_text
+                        target[column],
+                        accumulated[column],
+                        fragment_text,
+                        already_matched,
                     )
                     if absorbed is None:
                         _record_segmentation_diag(
