@@ -289,6 +289,8 @@ def _is_adjective(word: str) -> bool:
     core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE)
     if re.search(r"(?i)(?:ение|ание|яние|ствие|ений|аний|яний|ствий|ций)$", core):
         return False
+    if _motion_process_lemma(word):
+        return False
     if re.search(r"(?i)(?:ностей|телей|ателей)$", core):
         return False
     return bool(
@@ -832,7 +834,17 @@ def _is_leading_form_activity(token: str) -> bool:
 # Closed nominal-activity frames: the source names an observable activity NP,
 # but that lemma has no proven finite conjugation. Map only onto verbs that
 # are already in the proven predicate set. Never invent a verb from a suffix.
-_NOMINAL_PERFORM_LEMMAS = frozenset({"висы", "закаливание", "катание", "лазание", "сдача", "тренировка"})
+_NOMINAL_PERFORM_LEMMAS = frozenset({
+    "висы",
+    "закаливание",
+    "катание",
+    "лазание",
+    "подъем",
+    "сдача",
+    "спуск",
+    "торможение",
+    "тренировка",
+})
 _ACTIVITY_GLOSS_RE = re.compile(r"\s+[–—−]\s+|\s+-\s+")
 
 
@@ -842,6 +854,9 @@ def _nominal_activity_lemma(word: str) -> str:
         return "помощь"
     if re.fullmatch(r"поездк[аиуеы]|поездок", core):
         return "поездка"
+    motion = _motion_process_lemma(word)
+    if motion:
+        return motion
     return _verbal_noun_lemma(word).casefold()
 
 
@@ -899,6 +914,10 @@ def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
         return None
     head, remainder = _head_core_and_remainder(rest)
     lemma = _nominal_activity_lemma(head)
+    if _remainder_contains_finite_action(remainder):
+        return None
+    if ":" in remainder and lemma in _NOMINAL_PERFORM_LEMMAS | {"преодоление"}:
+        return None
     if lemma == "помощь":
         if not _aid_activity_evidence(mods, remainder):
             return None
@@ -1257,6 +1276,63 @@ def _is_unconjugated_process_noun(head: str) -> bool:
     return bool(re.search(r"(?:ание|ение|яние|тие)$", lemma))
 
 
+def _motion_process_lemma(head: str) -> str:
+    """Motion process without a proven finite verb: подъём, спуск."""
+
+    core = re.sub(r"[^\wёЁ]", "", head, flags=re.IGNORECASE).casefold()
+    if re.fullmatch(r"подъ?[её]м(?:ы|ов|а|у|е)?", core):
+        return "подъем"
+    if re.fullmatch(r"спуски?|спуска|спусков|спуске|спуску", core):
+        return "спуск"
+    return ""
+
+
+def _technique_catalogue_head(head: str) -> bool:
+    core = re.sub(r"[^\wёЁ]", "", head, flags=re.IGNORECASE).casefold()
+    return bool(re.fullmatch(r"способ(?:ы|а|ов)?", core))
+
+
+def _remainder_starts_with_process_noun(remainder: str) -> bool:
+    """«способы передвижения»: the object itself is a performable process."""
+
+    tokens = _normalize_spaces(remainder).split()
+    if not tokens or _is_preposition(tokens[0]):
+        return False
+    first = tokens[0]
+    lemma = _verbal_noun_lemma(first).casefold()
+    if lemma in _STATE_OR_KNOWLEDGE_LEMMAS:
+        return False
+    if _motion_process_lemma(first):
+        return True
+    return bool(re.search(r"(?:ание|ение|яние|тие)$", lemma))
+
+
+def _remainder_contains_finite_action(remainder: str) -> bool:
+    """A later proven finite verb is its own action, not a process complement."""
+
+    if not remainder:
+        return False
+    if _CONTROL_RESULT_VERB_RE.search(remainder):
+        return True
+    return any(
+        _starts_with_action_finite(part)
+        for part in re.split(r"[,:;]", remainder)
+        if _normalize_spaces(part)
+    )
+
+
+def _technique_process_lemma(head: str) -> str:
+    """Closed motion/technique processes without a proven finite verb."""
+
+    motion = _motion_process_lemma(head)
+    if motion:
+        return motion
+    lemma = _verbal_noun_lemma(head).casefold()
+    if lemma in {"торможение", "преодоление"}:
+        return lemma
+    return ""
+
+
 def _remainder_is_knowledge_np(remainder: str) -> bool:
     first = remainder.split()[0].casefold() if remainder.split() else ""
     if first in _KNOWLEDGE_PP_STARTS:
@@ -1265,7 +1341,7 @@ def _remainder_is_knowledge_np(remainder: str) -> bool:
     _mods, rest = _leading_modifiers(tokens)
     if not rest:
         return False
-    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    head = _strip_punct_word(rest[0])[1]
     low = head.casefold()
     if _is_theory_knowledge_token(head):
         return True
@@ -1292,24 +1368,44 @@ def _unconjugated_practice_activity_result(
     if not rest:
         return None
     head, remainder = _head_core_and_remainder(rest)
-    if not remainder.strip():
-        return None
-    if _remainder_is_quoted_label(remainder) or _remainder_is_knowledge_np(remainder):
-        return None
-    has_object = _remainder_is_dependent_object(remainder)
-    has_path = _remainder_is_path_or_manner_complement(remainder)
-    if not has_object and not has_path:
-        return None
     if _conjugate_verbal_noun(head):
         return None
     if _participation_lemma(head) == "занятие":
+        return None
+    if ":" in remainder or _remainder_contains_finite_action(remainder):
+        return None
+    technique_ways = (
+        _technique_catalogue_head(head)
+        and _remainder_starts_with_process_noun(remainder)
+        and not _remainder_is_knowledge_np(remainder)
+    )
+    overcoming = (
+        _technique_process_lemma(head) == "преодоление"
+        and _remainder_is_dependent_object(remainder)
+        and not _remainder_is_knowledge_np(remainder)
+    )
+    if not remainder.strip() and not technique_ways:
+        return None
+    if (
+        not technique_ways
+        and not overcoming
+        and (_remainder_is_quoted_label(remainder) or _remainder_is_knowledge_np(remainder))
+    ):
+        return None
+    has_object = _remainder_is_dependent_object(remainder)
+    has_path = _remainder_is_path_or_manner_complement(remainder)
+    if not technique_ways and not overcoming and not has_object and not has_path:
         return None
     lemma = _verbal_noun_lemma(head).casefold()
     deverbal_ka = bool(re.search(r"(?i)(?:тка|дка|нка|вка|жка|зка)$", lemma))
     # A -ка suffix is only a candidate filter, not activity evidence.
     # A path PP is activity evidence for an unconjugated process noun;
-    # a genitive object after an unknown -ение noun is not.
-    if _has_stem(head, _PERFORM_STEMS) or deverbal_ka:
+    # a genitive object after an unknown -ение noun is not, except the
+    # closed technique process «преодоление + object».
+    # «способы + process» is technique rehearsal, not a topic label.
+    if technique_ways or overcoming:
+        pass
+    elif _has_stem(head, _PERFORM_STEMS) or deverbal_ka:
         if not has_object:
             return None
     elif not (has_path and _is_unconjugated_process_noun(head)):
@@ -5841,9 +5937,12 @@ def _bare_list_without_action(source: str) -> bool:
     # Named techniques alone (unlike performing them) provide no predicate.
     if _VERBAL_NOUN_FIND_RE.search(text) or _CONTROL_RESULT_VERB_RE.search(text):
         return False
-    if _nominal_activity_lemma(text.split()[0]) in _NOMINAL_PERFORM_LEMMAS:
+    first = text.split()[0] if text.split() else ""
+    if _nominal_activity_lemma(first) in _NOMINAL_PERFORM_LEMMAS:
         return False
-    if _is_leading_form_activity(text.split()[0]) or _participation_lemma(text.split()[0]):
+    if _technique_catalogue_head(first):
+        return False
+    if _is_leading_form_activity(first) or _participation_lemma(first):
         return False
     if re.search(r"(?i)\b(?:их|его|её|ее)\b", unquoted):
         return False  # Dependent description/anaphora is not a standalone list.

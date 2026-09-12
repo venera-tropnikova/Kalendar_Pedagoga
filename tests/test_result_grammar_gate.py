@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from calendar_pedagoga.content_engine_v2 import (
@@ -106,9 +108,41 @@ def test_topic_fallback_is_not_restored_by_citation_gate():
     assert result.planned_result.strip() == ""
 
 
-def test_unproven_practice_list_stays_empty():
+@pytest.mark.parametrize(
+    "source, fragment",
+    [
+        ("Торможение.", "выполняет торможение"),
+        ("Подъем «лесенкой».", "выполняет подъем «лесенкой»"),
+        ("Спуск с холма.", "выполняет спуск с холма"),
+        ("Преодоление препятствий на коньках.", "выполняет преодоление препятствий"),
+        ("Способы передвижения на коньках.", "выполняет способы передвижения"),
+    ],
+)
+def test_practice_process_actions_become_finite_result(source, fragment):
     result = derive_fields_v2(
-        topic_title="Лыжный туризм",
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=source,
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold().replace("ё", "е")
+    assert fragment.replace("ё", "е") in low
+    assert "по теме" not in low
+    assert "тормозит" not in low
+    assert "преодолевает" not in low
+    control = result.assessment_method.casefold()
+    assert control
+    assert "по теме" not in control
+    assert control.startswith("педагогическое наблюдение") or control.startswith(
+        "проверка выполнения"
+    )
+
+
+def test_practice_process_list_keeps_control_from_same_result():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
         theory_text="",
         practice_text=(
             "Способы передвижения на лыжах. Подъем «лесенкой», «ёлочкой». "
@@ -118,4 +152,67 @@ def test_unproven_practice_list_stays_empty():
         theory_hours=0,
         practice_hours=2,
     )
-    assert result.planned_result.strip() == ""
+    low = result.planned_result.casefold()
+    assert "выполняет" in low
+    assert "торможение" in low
+    assert "по теме" not in low
+    control = result.assessment_method.casefold()
+    assert "по теме" not in control
+    assert "торможен" in control or "выполнен" in control
+
+
+def test_theory_process_noun_is_not_wrapped_as_performance():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="Торможение.",
+        practice_text="",
+        program_content="Торможение.",
+        theory_hours=2,
+        practice_hours=0,
+    )
+    low = result.planned_result.casefold()
+    assert not low.startswith("выполняет")
+
+
+def test_knowledge_or_ordinary_np_is_not_invented_practice_action():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text="Значение правил. Вязка.",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert "выполняет значение" not in low
+    assert "вяжет" not in low
+    assert not re.search(r"выполняет вязк", low)
+
+
+def test_colon_catalogue_after_process_is_not_performed_activity():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text="Преодоление препятствий: крутые склоны.",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert "выполняет преодоление" not in low
+    assert "преодолевает" not in low
+
+
+def test_named_techniques_without_process_head_stay_unconverted():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text="Крутые склоны, залесенная местность.",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert "тормозит" not in low
+    assert "выполняет крутые" not in low
+    assert "по теме" in low or not low.strip()

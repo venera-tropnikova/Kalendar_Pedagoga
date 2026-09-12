@@ -1221,7 +1221,8 @@ def test_event_name_and_lone_process_stay_generic_fallback():
     )
     assert family.planned_result.startswith("Выполняет практическое задание")
     braking = _slot_fields("Торможение.", index=0, weeks=2)
-    assert braking.planned_result.startswith("Выполняет практическое задание")
+    assert braking.planned_result.casefold().startswith("выполняет торможение")
+    assert "по теме" not in braking.planned_result.casefold()
 
 
 def test_stronger_form_is_not_replaced_by_quoted_event_title_overlap():
@@ -1275,9 +1276,9 @@ def test_family_week_keeps_grounded_walk_not_quoted_event():
     assert "по теме" not in derived.assessment_method.casefold()
 
 
-def test_ski_technique_list_stays_generic_fallback():
+def test_practice_technique_list_uses_source_actions():
     derived = derive_fields_v2(
-        topic_title="Лыжный туризм",
+        topic_title="Учебная тема",
         theory_text="",
         practice_text=(
             "Способы передвижения на лыжах. "
@@ -1290,13 +1291,21 @@ def test_ski_technique_list_stays_generic_fallback():
         theory_hours=0,
         practice_hours=2,
     )
-    if not derived.planned_result.strip():
-        assert any("NEEDS_REVIEW" in warning for warning in derived.warnings)
-        assert "тормозит" not in "".join(derived.warnings).casefold()
-        return
-    assert derived.planned_result.startswith("Выполняет практическое задание")
-    assert "тормозит" not in derived.planned_result.casefold()
-    assert "преодолевает" not in derived.planned_result.casefold()
+    low = derived.planned_result.casefold()
+    assert low.startswith("выполняет")
+    assert "по теме" not in low
+    assert "способы передвижения" in low
+    assert "подъем" in low.replace("ё", "е")
+    assert "спуск" in low
+    assert "торможение" in low
+    assert "преодоление" in low
+    assert "тормозит" not in low
+    assert "преодолевает" not in low
+    control = derived.assessment_method.casefold()
+    assert control
+    assert "по теме" not in control
+    assert control.startswith("педагогическое наблюдение")
+    assert "выполнен" in control
 
 
 @pytest.mark.parametrize(
