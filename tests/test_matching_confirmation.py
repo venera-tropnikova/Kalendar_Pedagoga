@@ -119,13 +119,59 @@ def test_occupied_unique_similar_number_does_not_bind():
     assert matches[1].ambiguous_candidates == ()
 
 
-def test_single_token_without_number_stays_not_matched():
+def test_single_token_binds_unique_unnumbered_qualified_heading():
     topic = _topic("4.2", "Аптечка", "Гигиена")
     item = _item(None, "Медицинская аптечка.", "Комплектование аптечки.", "Гигиена", 1)
     match = match_utp_to_program((topic,), (item,), study_year=1)[0]
+    assert match.status is MatchStatus.TEXT_MATCH
+    assert bound_program_item(match) is item
+    assert match.ambiguous_candidates == ()
+
+
+def test_single_token_does_not_bind_second_carrier_of_the_word():
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    items = (
+        _item(None, "Походная аптечка", "Состав походный.", "Гигиена", 1),
+        _item(None, "Домашняя аптечка", "Состав домашний.", "Гигиена", 1),
+    )
+    match = match_utp_to_program((topic,), items, study_year=1)[0]
     assert match.status is MatchStatus.NOT_MATCHED
     assert bound_program_item(match) is None
-    assert "Медицинская аптечка." in match.ambiguous_candidates
+    assert match.ambiguous_candidates == ("Походная аптечка", "Домашняя аптечка")
+
+
+def test_single_token_does_not_bind_numbered_heading():
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    item = _item("9.9", "Медицинская аптечка.", "Комплектование аптечки.", "Гигиена", 1)
+    match = match_utp_to_program((topic,), (item,), study_year=1)[0]
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(match) is None
+
+
+def test_single_token_does_not_bind_across_sections():
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    item = _item(None, "Медицинская аптечка.", "Комплектование аптечки.", "Музыка", 1)
+    match = match_utp_to_program((topic,), (item,), study_year=1)[0]
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(match) is None
+
+
+def test_single_token_does_not_take_an_occupied_heading():
+    owner = _topic("4.1", "Медицинская аптечка", "Гигиена")
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    item = _item(None, "Медицинская аптечка.", "Комплектование аптечки.", "Гигиена", 1)
+    matches = match_utp_to_program((owner, topic), (item,), study_year=1)
+    assert bound_program_item(matches[0]) is item
+    assert matches[1].status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(matches[1]) is None
+
+
+def test_single_token_does_not_bind_a_heading_of_another_year():
+    topic = _topic("4.2", "Аптечка", "Гигиена")
+    item = _item(None, "Медицинская аптечка.", "Комплектование аптечки.", "Гигиена", 1)
+    match = match_utp_to_program((topic,), (item,), study_year=2)[0]
+    assert match.status is MatchStatus.NOT_MATCHED
+    assert bound_program_item(match) is None
 
 
 def test_different_numbers_confirmed_same_title_still_match():
@@ -439,7 +485,7 @@ def test_key_year2_and_tourists_keep_confirmed_links():
         ("3.2", "Лыжный туризм", MatchStatus.NORMALIZED, "Лыжный туризм."),
         ("3.3", "Ориентирование", MatchStatus.NORMALIZED, "Ориентирование."),
         ("4.1", "Личная гигиена", MatchStatus.NORMALIZED, "Личная гигиена."),
-        ("4.2", "Аптечка", MatchStatus.NOT_MATCHED, None),
+        ("4.2", "Аптечка", MatchStatus.TEXT_MATCH, "Медицинская аптечка."),
         ("1", "Введение", MatchStatus.EXACT, "Введение"),
         ("5", "Оздоровительные мероприятия", MatchStatus.EXACT, "Оздоровительные мероприятия"),
         ("6", "Экскурсионные поездки", MatchStatus.EXACT, "Экскурсионные поездки"),
@@ -451,12 +497,10 @@ def test_key_year2_and_tourists_keep_confirmed_links():
         ),
     ]
     pharmacy = next(match for match in key_matches if match.utp_position.title == "Аптечка")
-    assert bound_program_item(pharmacy) is None
-    assert "Медицинская аптечка." in pharmacy.ambiguous_candidates
-    assert all(
-        bound_program_item(match) is not None or match.utp_position.title == "Аптечка"
-        for match in key_matches
-    )
+    assert pharmacy.program_item is not None
+    assert pharmacy.program_item.title == "Медицинская аптечка."
+    assert pharmacy.ambiguous_candidates == ()
+    assert all(bound_program_item(match) is not None for match in key_matches)
     assert all(match.status is not MatchStatus.NUMBER_MATCH for match in key_matches)
     assert [match.utp_position.title for match in key_matches] == [
         topic.title for topic in key_utp.topics

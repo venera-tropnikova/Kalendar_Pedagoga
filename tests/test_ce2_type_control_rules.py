@@ -174,7 +174,9 @@ def test_key_specialises_type_where_source_is_enough_and_keeps_generic_otherwise
     assert by_week[22].lesson_type == "учебно-тренировочное занятие"
     assert "бассейн" in by_week[22].planned_result.casefold()
     assert by_week[14].lesson_type == "практическое занятие"
-    assert by_week[19].lesson_type == "практическое занятие"
+    # The bound programme heading gives this week a first-aid source, so the
+    # generic practical type specialises the way the source allows.
+    assert by_week[19].lesson_type == "практикум по оказанию первой помощи"
     for lesson in generated:
         control = lesson.assessment_method.casefold()
         if not control:

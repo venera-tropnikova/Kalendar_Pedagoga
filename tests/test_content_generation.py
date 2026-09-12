@@ -26,13 +26,8 @@ def test_key_content_model_has_36_complete_sourced_rows() -> None:
     assert len(rows) == 36
     assert all(row.topic_title and row.source_topic_title for row in rows)
     assert all(row.source_utp_name == "УТП КЛЮЧ 2 г. 2ч.docx" for row in rows)
-    assert all(
-        row.program_content_full or row.topic_title == "Аптечка" for row in rows
-    )
-    assert all(
-        row.match_status is not MatchStatus.NOT_MATCHED or row.topic_title == "Аптечка"
-        for row in rows
-    )
+    assert all(row.program_content_full for row in rows)
+    assert all(row.match_status is not MatchStatus.NOT_MATCHED for row in rows)
     assert not any("та же тема" in row.topic_title.lower() for row in rows)
     assert sum(row.total_hours for row in rows) == 72
     assert sum(row.theory_hours for row in rows) == 22
@@ -47,10 +42,11 @@ def test_key_multweek_topics_keep_exact_source_links() -> None:
     assert len({row.program_content_full for row in city}) == 1
     pharmacy_rows = [row for row in rows if row.topic_title == "Аптечка"]
     assert pharmacy_rows
-    assert all(row.program_topic == "" for row in pharmacy_rows)
-    assert all(row.program_content_full == "" for row in pharmacy_rows)
-    assert all(row.match_status is MatchStatus.NOT_MATCHED for row in pharmacy_rows)
-    assert all(any("не сопоставлена" in warning for warning in row.warnings) for row in pharmacy_rows)
+    # A qualified unnumbered heading is the single carrier of the one-word topic.
+    assert all(row.program_topic == "Медицинская аптечка." for row in pharmacy_rows)
+    assert all("Комплектование аптечки." in row.program_content_full for row in pharmacy_rows)
+    assert all(row.match_status is MatchStatus.TEXT_MATCH for row in pharmacy_rows)
+    assert all(row.warnings == () for row in pharmacy_rows)
     assert all(
         row.topic_title == "Туристско-краеведческие праздники, соревнования."
         for row in rows[31:]

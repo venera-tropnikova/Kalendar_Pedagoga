@@ -591,6 +591,45 @@ def _bind_unique_numbered_similar(
     return ContentMatch(topic, found[0], MatchStatus.TEXT_MATCH, 0.85)
 
 
+def _bind_single_token_unnumbered(
+    match: ContentMatch,
+    items: tuple[ProgramContentItem, ...],
+    occupied_by_year: dict[int | None, set[ProgramContentItem]],
+    study_year: int | None,
+) -> ContentMatch | None:
+    """One-word position bound by uniqueness, not by title wording.
+
+    A programme heading may qualify the one-word position it develops. One
+    shared word is never proof of the same topic, so the heading is bound only
+    when it is the single free unnumbered candidate of the section that carries
+    that word: the evidence is uniqueness. A number of its own would make the
+    heading a position in its own right, and a second carrier would leave the
+    choice to guessing, so both stay unmatched.
+    """
+
+    if match.status is not MatchStatus.NOT_MATCHED:
+        return None
+    topic = match.utp_position
+    tokens = _ordered_distinctive(topic.title)
+    if len(tokens) != 1:
+        return None
+    carrying = [
+        item
+        for item in items
+        if _year_compatible(item, study_year)
+        and _sections_compatible(topic.parent_section, item.parent_section)
+        and _token_in(tokens[0], _distinctive_tokens(item.title))
+    ]
+    if len(carrying) != 1:
+        return None
+    item = carrying[0]
+    if item.number is not None:
+        return None
+    if item in occupied_by_year.get(item.study_year, set()):
+        return None
+    return ContentMatch(topic, item, MatchStatus.TEXT_MATCH, 0.85)
+
+
 def match_utp_to_program(
     topics: tuple[Topic, ...],
     items: tuple[ProgramContentItem, ...],
@@ -605,6 +644,10 @@ def match_utp_to_program(
         bound = _bind_unique_numbered_similar(
             current, items, occupied_by_year, study_year
         )
+        if bound is None:
+            bound = _bind_single_token_unnumbered(
+                current, items, occupied_by_year, study_year
+            )
         if bound is not None and bound.program_item is not None:
             occupied_by_year.setdefault(bound.program_item.study_year, set()).add(
                 bound.program_item

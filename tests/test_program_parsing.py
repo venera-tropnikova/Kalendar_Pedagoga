@@ -171,13 +171,13 @@ def test_ambiguous_normalized_match_is_not_guessed() -> None:
     assert len(match.ambiguous_candidates) == 2
 
 
-def test_unique_contained_single_token_is_not_text_match() -> None:
+def test_unique_contained_single_token_is_a_text_match() -> None:
     topic = Topic(None, "Аптечка", Hours(2, 1, 1), "Раздел")
     items = (ProgramContentItem(None, "Медицинская аптечка.", "Текст"),)
     match = match_utp_to_program((topic,), items)[0]
-    assert match.status is MatchStatus.NOT_MATCHED
-    assert match.program_item is None
-    assert "Медицинская аптечка." in match.ambiguous_candidates
+    assert match.status is MatchStatus.TEXT_MATCH
+    assert match.program_item is items[0]
+    assert match.ambiguous_candidates == ()
 
 
 def test_real_key_program_matches_all_13_positions() -> None:
@@ -199,12 +199,10 @@ def test_real_key_program_matches_all_13_positions() -> None:
     assert len(program.content_items) == 16
     assert len(matches) == 13
     pharmacy = next(match for match in matches if match.utp_position.title == "Аптечка")
-    assert pharmacy.status is MatchStatus.NOT_MATCHED
-    assert pharmacy.program_item is None
-    assert all(
-        match.status is not MatchStatus.NOT_MATCHED or match.utp_position.title == "Аптечка"
-        for match in matches
-    )
+    assert pharmacy.status is MatchStatus.TEXT_MATCH
+    assert pharmacy.program_item is not None
+    assert pharmacy.program_item.title == "Медицинская аптечка."
+    assert all(match.status is not MatchStatus.NOT_MATCHED for match in matches)
 def test_tour_guides_year1_program_finds_content_items() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     program = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
