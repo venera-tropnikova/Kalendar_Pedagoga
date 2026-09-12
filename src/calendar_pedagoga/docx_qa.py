@@ -561,6 +561,54 @@ def _probe_w9_prefix_mismatch(
     _emit_qa_probe("\n".join(lines))
 
 
+def _probe_w9_prefix_mismatch_v2(
+    *,
+    target: str,
+    accumulated: str,
+    fragment: str,
+    matched_fragments: tuple[str, ...],
+) -> None:
+    """Temporary Render probe v2. Does not decide matching."""
+
+    proposed = accumulated + fragment
+    matched_length = 0
+    limit = min(len(target), len(proposed))
+    while matched_length < limit and target[matched_length] == proposed[matched_length]:
+        matched_length += 1
+    proposed_remainder = proposed[matched_length:]
+    already_matched = target[:matched_length]
+    duplicate_length = _leading_exact_matched_duplicate_length(
+        proposed_remainder, already_matched, matched_fragments
+    )
+    leftover = proposed_remainder[duplicate_length:]
+    leftover_continues = (not leftover) or target.startswith(already_matched + leftover)
+    prefix_ok = target.startswith(accumulated) if accumulated else True
+    lines = [
+        "QA_PROBE_W9_V2",
+        f"BUILD_COMMIT={_running_build_commit()}",
+        f"accumulated_len = {len(accumulated)}",
+        f"accumulated = {accumulated!r}",
+        f"fragment_len = {len(fragment)}",
+        f"fragment_head = {fragment[:120]!r}",
+        f"fragment_tail = {fragment[-120:]!r}",
+        f"proposed_len = {len(proposed)}",
+        f"matched_length = {matched_length}",
+        f"proposed_remainder = {proposed_remainder!r}",
+        f"proposed_remainder_len = {len(proposed_remainder)}",
+        f"duplicate_detector_input = {proposed_remainder!r}",
+        "duplicate_offset = 0",
+        f"duplicate_length = {duplicate_length}",
+        f"duplicate_text = {proposed_remainder[:duplicate_length]!r}",
+        f"leftover_after_duplicate = {leftover!r}",
+        f"leftover_length = {len(leftover)}",
+        f"source_tail = {target[matched_length:matched_length + 150]!r}",
+        f"accumulated_is_source_prefix: {'YES' if prefix_ok else 'NO'}",
+        f"proposed_prefix_matches_to: {matched_length}",
+        f"leftover_continues_source: {'YES' if leftover_continues else 'NO'}",
+    ]
+    _emit_qa_probe("\n".join(lines))
+
+
 def _week_label_from_cells(source_cells: list[list[str]], row_index: int) -> str:
     if not (0 <= row_index < len(source_cells)) or len(source_cells[row_index]) < 2:
         return ""
@@ -1142,7 +1190,7 @@ def _data_row_page_layout_pdf(
                     if absorbed is None:
                         week_label = _week_label_from_cells(source_cells, row_index)
                         if week_label == "9" and column == 4 and page_number == 9:
-                            _probe_w9_prefix_mismatch(
+                            _probe_w9_prefix_mismatch_v2(
                                 target=target[column],
                                 accumulated=accumulated[column],
                                 fragment=fragment_text,
