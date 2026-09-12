@@ -6398,7 +6398,14 @@ def _derive_week_fields_v2(
         # An oral check names the area it asks about. The quoted RESULT stays
         # only where the object case of that area is not proven.
         control = quoted
-        if not practice_hours:
+        if _unique_phrases([*controls, local.assessment_method]) == _unique_phrases(
+            controls
+        ):
+            # The clause proved a control the week already carries: one
+            # observation of that method covers both actions, so the proven
+            # wording is kept and merged instead of quoted a second time.
+            control = local.assessment_method
+        elif not practice_hours:
             areas = [
                 _oral_object_for_control(obj)
                 for _verb, obj in _result_control_segments(local.planned_result)
@@ -6406,7 +6413,7 @@ def _derive_week_fields_v2(
             ]
             if areas and all(areas):
                 control = "Устный опрос по: " + _join_and(areas)
-        if control not in controls:
+        if _unique_phrases([*controls, control]) != _unique_phrases(controls):
             controls.append(control)
         # A successful local repair may keep only one coordinated operation.
         # Do not certify the original clause as fully covered in that case.

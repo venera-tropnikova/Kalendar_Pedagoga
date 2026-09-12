@@ -10,6 +10,7 @@ from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
     ContentEngineV2Result,
     _aggregate_week_lesson_type,
+    _derive_week_fields_v2,
     _noun_gen_to_acc,
     _noun_nom_to_acc,
     _observable_result,
@@ -1013,6 +1014,48 @@ def test_aid_methods_keep_proven_first_aid_action():
     assert derived.assessment_method.casefold().startswith(
         "педагогическое наблюдение за оказанием первой помощи"
     )
+
+
+def test_clauses_proving_one_control_keep_a_single_observation():
+    week = _derive_week_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=(
+            "Основные приёмы оказания первой доврачебной помощи при ожогах, "
+            "обморожениях. Первая помощь утопающему."
+        ),
+        practice_hours=2,
+    )
+    assert week.assessment_method == (
+        "педагогическое наблюдение за оказанием первой помощи"
+    )
+    # One observation of one method: no second clause, no quoted fallback and
+    # no second spelling of the same method name.
+    assert ";" not in week.assessment_method
+    assert "проверяется действие" not in week.assessment_method
+    assert "«" not in week.assessment_method
+    # Merging the controls leaves the rest of the triad untouched.
+    assert week.planned_result == (
+        "Оказывает первую доврачебную помощь при ожогах и обморожениях. "
+        "Оказывает первую помощь утопающему."
+    )
+    assert all(status == "COVERED" for _clause, status in week.clause_coverage)
+    assert week.warnings == ()
+
+
+def test_clauses_proving_different_controls_keep_their_own_clause():
+    week = _derive_week_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text="Укладка рюкзаков. Изучение маршрутов походов.",
+        practice_hours=2,
+    )
+    control = week.assessment_method
+    assert "педагогическое наблюдение за укладкой рюкзака" in control
+    # A control the week does not carry yet is still stated, and the quoted
+    # wording stays where the object case of the action is not proven.
+    assert "проверяется действие «Изучает маршруты походов»" in control
+    assert control.count(";") == 1
 
 
 def _slot_fields(practice: str, *, index: int, weeks: int) -> ContentEngineV2Result:
