@@ -148,6 +148,27 @@ def test_pdf_measures_continuation_and_monthly_week_numbers(monkeypatch):
     assert ''.join(segment.cells[2] for segment in first) == 'abcdef'
 
 
+def test_hyphenated_continuation_repeats_broken_word_but_keeps_source(monkeypatch):
+    _pdf(monkeypatch, [[['Month', '19', 'abc']], [['', '', 'bcdef'], ['Month', '20', 'gh']]])
+    layouts = qa._data_row_page_layout_pdf(_source(), b'pdf', 2)
+    assert layouts is not None
+    first = layouts[0].segments
+    assert ''.join(segment.cells[2] for segment in first) == 'abcdef'
+    assert [segment.cells[2] for segment in first] == ['abc', 'def']
+
+
+def test_prefix_mismatch_still_fails_closed_on_extra_letters(monkeypatch):
+    _pdf(monkeypatch, [[['Month', '19', 'abc']], [['', '', 'XYZ'], ['Month', '20', 'gh']]])
+    assert qa._data_row_page_layout_pdf(_source(), b'pdf', 2) is None
+    assert qa._SEGMENTATION_DIAG.get('result') == 'prefix_mismatch'
+
+
+def test_match_text_ignores_soft_hyphen_and_line_breaks():
+    assert qa._normalize_match_text('подго\u00ad\nтовка') == 'подготовка'
+    assert qa._absorb_normalized_fragment('подготовка', 'подго', 'подготовка') == 'подготовка'
+    assert qa._absorb_normalized_fragment('подготовка', 'подго', 'xxxx') is None
+
+
 def test_physical_page_segments_center_vertical_month_and_week_cells():
     from calendar_pedagoga.docx_generation import _apply_page_row_segments
     from calendar_pedagoga.docx_qa import (

@@ -797,6 +797,43 @@ class DataRowPageLayout:
     segments: tuple[DataRowPageSegment, ...]
 
 
+_BREAK_AND_DASH_CHARS = frozenset(
+    "\u00ad\u200b\u200c\u200d\ufeff\u00a0\n\r\t\v\f"
+    "-‐‑‒–—−\u2010\u2011\u2012\u2013\u2014\u2015"
+)
+
+
+def _normalize_match_text(text: str) -> str:
+    """Compare PDF and source text without line breaks, hyphens or font wraps."""
+
+    return "".join(
+        char
+        for char in (text or "").casefold()
+        if char.isalnum() and char not in _BREAK_AND_DASH_CHARS
+    )
+
+
+def _absorb_normalized_fragment(target: str, accumulated: str, fragment: str) -> str | None:
+    """Append a PDF fragment; a hyphenated word may repeat its already seen stem.
+
+    Returns the new accumulated prefix, or None when the fragment is not part
+    of *target*. Extra letters still fail closed.
+    """
+
+    if not fragment:
+        return accumulated
+    combined = accumulated + fragment
+    if target.startswith(combined):
+        return combined
+    # The next page often restarts the broken word: «...подго» + «подготовка…».
+    for overlap in range(min(len(accumulated), len(fragment)), 0, -1):
+        if accumulated.endswith(fragment[:overlap]):
+            combined = accumulated + fragment[overlap:]
+            if target.startswith(combined):
+                return combined
+    return None
+
+
 def _slice_by_normalized_lengths(text: str, lengths: list[int]) -> tuple[str, ...] | None:
     """Partition *text* exactly at alphanumeric PDF-match boundaries."""
 
@@ -823,7 +860,7 @@ def _data_row_page_layout_pdf(
     source = Document(BytesIO(content)).tables[0]
 
     def normalized(text):
-        return "".join(char for char in (text or "").casefold() if char.isalnum())
+        return _normalize_match_text(text)
 
     def identifier(text):
         return re.sub(r"\s+", "", text or "")
@@ -921,9 +958,11 @@ def _data_row_page_layout_pdf(
                 body_columns = set(range(len(target))) - protected
                 normalized_fragment = [""] * len(target)
                 for column in body_columns:
-                    normalized_fragment[column] = normalized(fragment[column])
-                    accumulated[column] += normalized_fragment[column]
-                    if not target[column].startswith(accumulated[column]):
+                    fragment_text = normalized(fragment[column])
+                    absorbed = _absorb_normalized_fragment(
+                        target[column], accumulated[column], fragment_text
+                    )
+                    if absorbed is None:
                         _record_segmentation_diag(
                             result="prefix_mismatch",
                             page=page_number,
@@ -935,6 +974,8 @@ def _data_row_page_layout_pdf(
                             total_rows=total_rows,
                         )
                         return None
+                    normalized_fragment[column] = absorbed[len(accumulated[column]):]
+                    accumulated[column] = absorbed
                 fragments.append((page_number, normalized_fragment))
                 if not all(accumulated[column] == target[column] for column in body_columns):
                     continue
