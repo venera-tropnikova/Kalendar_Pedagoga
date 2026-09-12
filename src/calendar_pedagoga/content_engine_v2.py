@@ -3551,7 +3551,7 @@ def _detach_trailing_parens(text: str) -> tuple[str, str]:
 def _regular_feminine_a_noun(low: str) -> bool:
     """Suffixal feminine -а, not the unmarked neuter/inanimate plural -а."""
 
-    return bool(re.search(r"(?i)(?:[кгхжшщч]а|ота|ета|ина|ица)$", low))
+    return bool(re.search(r"(?i)(?:[кгхжшщч]а|ота|ета|ина|ица|жда)$", low))
 
 
 def _adj_to_dative(word: str) -> str:
@@ -6339,6 +6339,65 @@ def _result_grammar_issue(sentence: str) -> str:
     return ""
 
 
+def _knowledge_result_object(sentence: str) -> str:
+    text = _normalize_spaces(sentence).strip()
+    return re.sub(r"(?i)^(?:характеризует|раскрывает)\s+", "", text).rstrip(".")
+
+
+def _knowledge_cite_key(text: str) -> str:
+    return _normalize_spaces(text).strip(" .:;").casefold().replace("ё", "е")
+
+
+def _feminine_acc_citation(text: str) -> str:
+    """Regular feminine nom -а/-я → acc -у/-ю on the first word only."""
+
+    tokens = _normalize_spaces(text).split()
+    if not tokens:
+        return ""
+    prefix, core, suffix = _strip_punct_word(tokens[0])
+    if not _regular_feminine_a_noun(core.casefold()):
+        return ""
+    tokens[0] = f"{prefix}{_noun_nom_to_acc(core)}{suffix}"
+    return _normalize_spaces(" ".join(tokens))
+
+
+def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
+    """True when RESULT restates a covered source NP, not a newly cased object.
+
+    Animacy of masculine/plural heads stays unknown in the form-only gate.
+    A covered source citation is not a new unproven case: the object is the
+    assigned clause (or its regular feminine accusative), never a dative or
+    a generic «по теме» fallback.
+    """
+
+    if re.search(r"(?i)по теме", sentence):
+        return False
+    obj = _knowledge_cite_key(_knowledge_result_object(sentence))
+    if len(obj) < 4:
+        return False
+    heads = [_normalize_spaces(clause).strip(" .")]
+    raw = heads[0]
+    if ":" in raw:
+        heads.append(raw.split(":", 1)[0].strip())
+    for head in heads:
+        cite = _knowledge_cite_key(head)
+        if not cite:
+            continue
+        full = _knowledge_cite_key(heads[0])
+        if obj == cite or full.startswith(obj + ":"):
+            return True
+        if len(cite) >= 8 and (
+            obj.startswith(cite + ",")
+            or obj.startswith(cite + " ")
+            or f"характеризует {cite}" in obj
+        ):
+            return True
+        acc = _knowledge_cite_key(_feminine_acc_citation(head))
+        if acc and (obj == acc or obj.startswith(acc + ",") or obj.startswith(acc + " ")):
+            return True
+    return False
+
+
 def _safe_operation_result(clause: str, *, practical: bool) -> str:
     """Keep the source's nominal government for two approved operations."""
     text = _normalize_spaces(clause).strip(" .")
@@ -6392,6 +6451,17 @@ def derive_fields_v2(
             if _normalize_spaces(proof.planned_result).casefold() == _normalize_spaces(sentence).casefold():
                 replacements[sentence] = safe
                 restored.add(clause)
+    for sentence in rejected:
+        if sentence in replacements:
+            continue
+        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
+            continue
+        for clause, status in original.clause_coverage:
+            if status != "COVERED" or not _knowledge_result_cites_clause(sentence, clause):
+                continue
+            replacements[sentence] = sentence
+            restored.add(clause)
+            break
     source_text = _normalize_spaces(f"{theory_text} {program_content}")
     knowledge_source = any(_is_theory_knowledge_token(word) for word in source_text.split())
     for sentence in rejected if knowledge_source else ():

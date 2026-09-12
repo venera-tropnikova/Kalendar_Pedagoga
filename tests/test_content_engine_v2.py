@@ -230,15 +230,14 @@ def test_synthetic_theory_characterizes_without_inventing_action() -> None:
     if not derived.planned_result.strip():
         assert any("NEEDS_REVIEW" in warning for warning in derived.warnings)
     else:
-        assert derived.planned_result == "Характеризует биографию писателя."
-        # CONTROL опирается на объект результата, а не на ярлык темы;
-        # точный состав якорей не фиксируется снимком.
+        assert derived.planned_result == (
+            "Характеризует биографию писателя. "
+            "Характеризует основные этапы творчества."
+        )
         assert derived.assessment_method.startswith("устный опрос по биографии писателя")
         coverage = dict(derived.clause_coverage)
         assert coverage["Биография писателя"] == "COVERED"
-        # Недоказанная клауза остаётся NEEDS_REVIEW, а не исчезает молча.
-        assert coverage["Основные этапы творчества"] == "NEEDS_REVIEW"
-        assert any("Основные этапы творчества" in w for w in derived.warnings)
+        assert coverage["Основные этапы творчества"] == "COVERED"
 
 
 def test_synthetic_measurement_does_not_invent_numbers() -> None:

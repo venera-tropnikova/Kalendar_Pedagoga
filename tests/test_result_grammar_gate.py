@@ -49,3 +49,73 @@ def test_abbreviation_does_not_leave_orphan_city_as_result():
     result = derive_fields_v2(topic_title="История", theory_text="История развития туризма в г. Салават.",
                               practice_text="", theory_hours=2)
     assert result.planned_result != "Салават."
+
+
+@pytest.mark.parametrize("source, fragment", [
+    ("Памятники прославленным людям.", "характеризует памятники прославленным людям"),
+    ("День моей республики.", "характеризует день моей республики"),
+    ("Одежда, зимний инвентарь.", "характеризует одежду, зимний инвентарь"),
+    (
+        "Экскурсионные поездки: Шиханы, Капова пещера и другие.",
+        "характеризует экскурсионные поездки",
+    ),
+])
+def test_covered_knowledge_citation_survives_case_gate(source, fragment):
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert fragment in low
+    assert "по теме" not in low
+
+
+@pytest.mark.parametrize("text", [
+    "Характеризует правилу безопасного поведения.",
+    "Характеризует лучшие ученики школы.",
+    "Характеризует деревью и кустарники.",
+    "Характеризует городу Башкортостана.",
+])
+def test_unproven_knowledge_case_stays_rejected(text):
+    assert _result_grammar_issue(text) == "unproven_knowledge_object_case"
+
+
+def test_wrong_inflection_is_not_restored_from_near_source():
+    result = derive_fields_v2(
+        topic_title="Край",
+        theory_text="Города Башкортостана.",
+        practice_text="",
+        program_content="Города Башкортостана.",
+        theory_hours=2,
+    )
+    assert "городу" not in result.planned_result.casefold()
+
+
+def test_topic_fallback_is_not_restored_by_citation_gate():
+    result = derive_fields_v2(
+        topic_title="Аптечка",
+        theory_text="",
+        practice_text="",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert result.planned_result.strip() == ""
+
+
+def test_unproven_practice_list_stays_empty():
+    result = derive_fields_v2(
+        topic_title="Лыжный туризм",
+        theory_text="",
+        practice_text=(
+            "Способы передвижения на лыжах. Подъем «лесенкой», «ёлочкой». "
+            "Спуск с горы, способы поворота. Торможение."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert result.planned_result.strip() == ""
