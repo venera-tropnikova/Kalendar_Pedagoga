@@ -864,25 +864,27 @@ def _exact_repeat_of_matched_fragment(
 
 def _leading_exact_matched_duplicate_length(
     fragment: str,
-    accumulated: str,
+    already_matched: str,
     matched_fragments: tuple[str, ...] = (),
 ) -> int:
     """Longest exact leading copy of an already matched span of this cell.
 
-    Approximate or token-wise matches are rejected: the prefix must equal a
-    previous page-fragment or a contiguous substring of *accumulated*.
+    *already_matched* is the proven prefix of this source-cell, including the
+    just-accepted ``fragment[:mismatch_index]``. Approximate matches are
+    rejected: the prefix must equal a previous page-fragment or a contiguous
+    substring of that proven prefix.
     """
 
-    if not fragment or not accumulated:
+    if not fragment or not already_matched:
         return 0
     best = 0
-    if fragment.startswith(accumulated):
-        best = len(accumulated)
+    if fragment.startswith(already_matched):
+        best = len(already_matched)
     for piece in matched_fragments:
         if piece and fragment.startswith(piece):
             best = max(best, len(piece))
     for length in range(len(fragment), best, -1):
-        if fragment[:length] in accumulated:
+        if fragment[:length] in already_matched:
             return length
     return best
 
@@ -923,15 +925,17 @@ def _absorb_normalized_fragment(
         remainder, matched_text, accumulated, matched_fragments
     ):
         return matched_text
+    # The just-proven prefix counts as already matched, even on the first
+    # fragment when *accumulated* is still empty.
     duplicate = _leading_exact_matched_duplicate_length(
-        fragment, accumulated, matched_fragments
+        remainder, matched_text, matched_fragments
     )
     if not duplicate:
         return None
-    leftover = fragment[duplicate:]
+    leftover = remainder[duplicate:]
     if not leftover:
-        return accumulated
-    continued = accumulated + leftover
+        return matched_text
+    continued = matched_text + leftover
     if target.startswith(continued):
         return continued
     return None
