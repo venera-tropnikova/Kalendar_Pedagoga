@@ -1640,8 +1640,9 @@ def test_characterizing_first_aid_kit_stays_oral_not_product_check():
     control = derived.assessment_method.casefold()
     assert control.startswith("устный опрос")
     assert "комплектован" in control
-    assert "по комплектованию" in control
-    assert "по комплектование " not in control
+    # Предлог «по» назван один раз, область проверки — в дательном падеже.
+    assert "комплектованию аптечки" in control
+    assert "комплектование аптечки" not in control
     assert "по теме" not in control
     assert "проверка состава" not in control
 

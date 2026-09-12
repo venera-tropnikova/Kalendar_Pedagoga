@@ -6088,10 +6088,21 @@ def _derive_week_fields_v2(
             results.append(local.planned_result)
         # Retain the proven finite wording: re-inflecting the concatenated
         # objects can lose conditions or attach them to a different action.
-        control = (
+        quoted = (
             ("Устный опрос" if not practice_hours else "Педагогическое наблюдение")
             + ": проверяется действие «" + local.planned_result.rstrip(".") + "»"
         )
+        # An oral check names the area it asks about. The quoted RESULT stays
+        # only where the object case of that area is not proven.
+        control = quoted
+        if not practice_hours:
+            areas = [
+                _oral_object_for_control(obj)
+                for _verb, obj in _result_control_segments(local.planned_result)
+                if obj
+            ]
+            if areas and all(areas):
+                control = "Устный опрос по: " + _join_and(areas)
         if control not in controls:
             controls.append(control)
         # A successful local repair may keep only one coordinated operation.
@@ -6584,6 +6595,66 @@ def _vary_repeated_independent_characterize(sentences: list[str]) -> list[str]:
     return rewritten
 
 
+def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
+    """One predicate per run of actions that share it; every object is kept."""
+
+    folded: list[str] = []
+    verb: str = ""
+    objects: list[str] = []
+
+    def flush() -> None:
+        nonlocal verb, objects
+        if objects:
+            # A final «и» would be ambiguous once an object carries its own
+            # coordination, so such an enumeration stays comma-separated.
+            listed = (
+                ", ".join(objects)
+                if any(" и " in item or "," in item for item in objects)
+                else _join_and(objects)
+            )
+            folded.append(_cap_sentence(f"{verb} {listed}"))
+        verb, objects = "", []
+
+    for sentence in sentences:
+        current = _leading_finite_verb(sentence)
+        obj = _drop_leading_verb(sentence).rstrip(" .") if current else ""
+        # A generic «по теме» wording is not an object worth enumerating.
+        if not current or not obj or "по теме" in sentence.casefold():
+            flush()
+            folded.append(sentence)
+            continue
+        if verb and verb.casefold() != current.casefold():
+            flush()
+        verb = verb or current
+        objects.append(obj)
+    flush()
+    return folded
+
+
+def _result_sentences(result: str) -> list[str]:
+    """Sentences that open a new action; an abbreviated word keeps its sentence."""
+
+    sentences: list[str] = []
+    for piece in re.split(r"(?<=[.!?])\s+", _normalize_spaces(result)):
+        if sentences and not _leading_finite_verb(piece):
+            sentences[-1] = f"{sentences[-1]} {piece}"
+            continue
+        sentences.append(piece)
+    return sentences
+
+
+def _fold_week_result(result: str) -> str:
+    """Write a predicate once for all objects already proven for it.
+
+    Runs after the grammar gate and the coverage accounting: the sentences are
+    proven, so listing their objects adds nothing and removes nothing.
+    """
+
+    return _normalize_spaces(
+        " ".join(_fold_repeated_predicates(_result_sentences(result)))
+    )
+
+
 def _merge_independent_part_results(results: list[str]) -> str:
     """Keep each topic's RESULT as its own sentence. Do not fold same verbs."""
 
@@ -6628,21 +6699,44 @@ def _sanitize_oral_control(control: str) -> str:
     return prefix + " и ".join(kept)
 
 
-def _drop_repeated_lead(tails: list[str]) -> list[str]:
-    """The wording that introduces a quoted operation is stated once per label."""
+_CONTROL_LEAD_PLURALS = {"проверяется действие": "проверяются действия"}
 
-    kept: list[str] = []
-    seen: set[str] = set()
+
+def _fold_control_operations(tails: list[str]) -> str:
+    """One wording per group of operations checked the same way; all are listed."""
+
+    leads: list[str] = []
+    operations: list[list[str]] = []
+    index_by_lead: dict[str, int] = {}
+    last_lead: int | None = None
     for tail in tails:
         lead, quote, rest = tail.partition("«")
-        if quote and lead.strip():
-            key = lead.casefold()
-            if key in seen:
-                kept.append(quote + rest)
-                continue
-            seen.add(key)
-        kept.append(tail)
-    return kept
+        lead = lead.strip()
+        if quote and not lead and last_lead is not None:
+            # A bare quoted operation continues the wording stated before it.
+            operations[last_lead].append(tail)
+            continue
+        if not quote or not lead:
+            leads.append(tail)
+            operations.append([])
+            continue
+        index = index_by_lead.get(lead.casefold())
+        if index is None:
+            index_by_lead[lead.casefold()] = len(leads)
+            leads.append(lead)
+            operations.append([])
+            index = len(leads) - 1
+        operations[index].append(quote + rest)
+        last_lead = index
+    rendered = []
+    for lead, items in zip(leads, operations):
+        if not items:
+            rendered.append(lead)
+            continue
+        if len(items) > 1:
+            lead = _CONTROL_LEAD_PLURALS.get(lead.casefold(), lead)
+        rendered.append(f"{lead} " + ", ".join(items))
+    return "; ".join(item for item in rendered if item)
 
 
 def _split_control_clauses(control: str) -> list[str]:
@@ -6665,6 +6759,20 @@ def _split_control_clauses(control: str) -> list[str]:
     return [item for item in (clause.strip() for clause in clauses) if item]
 
 
+def _unlabelled_method_group(
+    item: str, index_by_label: dict[str, int]
+) -> tuple[int, str] | None:
+    """Group and remainder of a clause that repeats an already labelled method."""
+
+    folded = item.casefold()
+    for label, index in index_by_label.items():
+        if folded.startswith(f"{label} "):
+            remainder = item[len(label) :].strip()
+            if remainder:
+                return index, remainder
+    return None
+
+
 def _join_control_clauses(controls: list[str]) -> str:
     """Group the week's operations by control method: one label, no repeated wording."""
 
@@ -6677,6 +6785,9 @@ def _join_control_clauses(controls: list[str]) -> str:
         for item in _split_control_clauses(_normalize_spaces(control)):
             head, separator, tail = item.partition(": ")
             labelled = bool(separator) and "«" not in head and bool(tail.strip())
+            # The same method spelled without a label joins its own group
+            # instead of repeating the wording of the check.
+            unlabelled_method = _unlabelled_method_group(item, index_by_label)
             if labelled:
                 index = index_by_label.get(head.casefold())
                 if index is None:
@@ -6688,6 +6799,8 @@ def _join_control_clauses(controls: list[str]) -> str:
                 # A clause that is only a quoted operation continues the method
                 # whose label was already stated.
                 index, operation = last_label_index, item
+            elif unlabelled_method is not None:
+                index, operation = unlabelled_method
             else:
                 # A colon inside a quoted operation belongs to the operation
                 # itself, and a method without a label keeps its own clause.
@@ -6701,7 +6814,7 @@ def _join_control_clauses(controls: list[str]) -> str:
             last_label_index = index
     rendered = [
         "; ".join(tails) if not label
-        else f"{label}: " + "; ".join(_drop_repeated_lead(tails))
+        else f"{label}: " + _fold_control_operations(tails)
         for label, tails, _seen in groups
     ]
     return "; ".join(item for item in rendered if item)
@@ -7016,7 +7129,7 @@ def build_lesson_content_v2(
                 theory_text=theory_text,
                 practice_text=practice_text,
                 lesson_type=lesson_type,
-                planned_result=planned_result,
+                planned_result=_fold_week_result(planned_result),
                 assessment_method=assessment,
                 action=derived.frame.action,
                 object=derived.frame.object,
