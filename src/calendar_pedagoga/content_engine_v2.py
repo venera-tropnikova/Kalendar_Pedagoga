@@ -2402,6 +2402,65 @@ def _is_parallel_observable_series(parts: list[str]) -> bool:
     return all(_is_observable_operation_part(part) for part in parts[1:])
 
 
+# Endings that alone prove which cases a form can realise. A tail is judged
+# against the member it would continue, so an ending outside this table proves
+# nothing and the tail stays a separate list item.
+_FORM_CASES: tuple[tuple[str, frozenset[str]], ...] = (
+    (r"(?:ах|ях)$", frozenset({"prep.pl"})),
+    (r"(?:ами|ями)$", frozenset({"ins.pl"})),
+    (r"(?:ам|ям)$", frozenset({"dat.pl"})),
+    (r"(?:ов|ев|ёв)$", frozenset({"gen.pl"})),
+    (r"(?:ния|тия|ствия)$", frozenset({"gen.sg", "nom.pl", "acc.pl"})),
+    (
+        r"(?:[бвгджзклмнпрстфхцчшщ]и|ы)$",
+        frozenset({"gen.sg", "nom.pl", "acc.pl"}),
+    ),
+    (r"(?:о|ё|е)$", frozenset({"nom.sg", "acc.sg"})),
+)
+_OBLIQUE_CASES = frozenset({"gen.sg", "gen.pl", "dat.pl", "ins.pl", "prep.pl"})
+
+
+def _proven_form_cases(word: str) -> frozenset[str]:
+    """Cases the ending can realise; empty when the ending proves none."""
+
+    low = _strip_punct_word(word)[1].casefold()
+    if len(low) < 4 or _is_preposition(low):
+        return frozenset()
+    for pattern, cases in _FORM_CASES:
+        if re.search(pattern, low):
+            return cases
+    return frozenset()
+
+
+def _continues_prepositional_group(kept: str, tail: str) -> bool:
+    """Tail is a further member of a prepositional group still open before it.
+
+    A named activity after a comma is its own list item, so a tail is only a
+    continuation when it starts no clause and no group of its own and its form
+    can still be an oblique case that the open group governs. A form that can
+    only be nominative names a new activity, and an unproven form proves
+    nothing, so both leave the tail dropped.
+    """
+
+    tokens = _normalize_spaces(kept).split()
+    tail_tokens = _normalize_spaces(tail).split()
+    if not tokens or not tail_tokens:
+        return False
+    if _is_preposition(tail_tokens[0]) or _FINITE_VERB_RE.search(tail):
+        return False
+    opened = max(
+        (index for index, token in enumerate(tokens) if _is_preposition(token)),
+        default=-1,
+    )
+    if opened < 0 or opened == len(tokens) - 1:
+        return False
+    member = tokens[-1]
+    if _is_adjective(member):
+        return False
+    shared = _proven_form_cases(member) & _proven_form_cases(tail_tokens[0])
+    return bool(shared & _OBLIQUE_CASES)
+
+
 def _drop_raw_list_tails(text: str) -> str:
     if _has_explicit_action_catalogue(text):
         return text
@@ -2419,6 +2478,8 @@ def _drop_raw_list_tails(text: str) -> str:
         if _looks_like_verbal_noun(first) or re.search(
             r"(?i)(?:нию|тию|анию|ению)$", first
         ):
+            if _continues_prepositional_group(kept[-1], part):
+                kept.append(part)
             continue
         if first[:1].isupper() and not _RESULT_FINITE_RE.match(part):
             if not re.match(r"(?i)^(?:совершает|посещает)\s+", parts[0]):
@@ -6139,6 +6200,33 @@ def _coordinated_action_uncovered(clause: str, result: str) -> bool:
     return False
 
 
+def _list_member_reached(head: str, folded_result: str) -> bool:
+    """The activity named by a list head is present in the result."""
+
+    verb = _conjugate_verbal_noun(head)
+    if verb and verb.casefold() in folded_result:
+        return True
+    lemma = _verbal_noun_lemma(head).casefold()
+    stem = lemma[:-2] if len(lemma) > 5 else lemma
+    return bool(stem) and stem in folded_result
+
+
+def _list_member_uncovered(clause: str, result: str) -> bool:
+    """A comma member of the clause names an activity left out of the result."""
+
+    folded = result.casefold()
+    members = re.split(r",\s+", _normalize_spaces(clause))
+    for member in members[1:]:
+        tokens = member.split()
+        head = _strip_punct_word(tokens[0])[1] if tokens else ""
+        if not head or not _looks_like_verbal_noun(head):
+            continue
+        if _list_member_reached(head, folded):
+            continue
+        return True
+    return False
+
+
 def _ways_catalogue_uncovered(clause: str, result: str) -> bool:
     """A named catalogue of ways stayed outside the performed action."""
 
@@ -6245,6 +6333,7 @@ def _derive_week_fields_v2(
                 not _nonempty_result_in(phrase, original.planned_result)
                 or _coordinated_action_uncovered(clause, original.planned_result)
                 or _ways_catalogue_uncovered(clause, original.planned_result)
+                or _list_member_uncovered(clause, original.planned_result)
             ):
                 uncovered.append(clause)
             continue
@@ -6304,9 +6393,11 @@ def _derive_week_fields_v2(
             controls.append(control)
         # A successful local repair may keep only one coordinated operation.
         # Do not certify the original clause as fully covered in that case.
-        if _coordinated_action_uncovered(
-            clause, local.planned_result
-        ) or _ways_catalogue_uncovered(clause, local.planned_result):
+        if (
+            _coordinated_action_uncovered(clause, local.planned_result)
+            or _ways_catalogue_uncovered(clause, local.planned_result)
+            or _list_member_uncovered(clause, local.planned_result)
+        ):
             uncovered.append(clause)
     if retained and not retained_added:
         results.insert(0, original.planned_result)

@@ -3,6 +3,7 @@ import re
 import pytest
 
 from calendar_pedagoga.content_engine_v2 import (
+    _continues_prepositional_group, _drop_raw_list_tails,
     _result_grammar_issue, _derive_week_fields_v2, derive_fields_v2,
 )
 
@@ -265,6 +266,92 @@ def test_colon_catalogue_after_process_is_not_performed_activity():
     low = result.planned_result.casefold()
     assert "выполняет преодоление" not in low
     assert "преодолевает" not in low
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A further member of an open prepositional group keeps the same case.
+    (
+        "оказывает первую доврачебную помощь при ожогах, обморожениях",
+        "оказывает первую доврачебную помощь при ожогах, обморожениях",
+    ),
+    (
+        "выполняет обязанности по должностям в период подготовки, "
+        "проведения похода и подведения итогов",
+        "выполняет обязанности по должностям в период подготовки, "
+        "проведения похода и подведения итогов",
+    ),
+    # A nominative names a new activity, so it stays a separate list item.
+    (
+        "изучает на местности изображения местных предметов, "
+        "знакомство с различными формами рельефа",
+        "изучает на местности изображения местных предметов",
+    ),
+    # No group is open, so there is nothing the tail could continue.
+    ("закупает продукты, фасовка и упаковка продуктов", "закупает продукты"),
+    # An unproven form proves no agreement with the member before it.
+    (
+        "разрабатывает маршрут с описанием ориентиров, составлением графика",
+        "разрабатывает маршрут с описанием ориентиров",
+    ),
+])
+def test_only_proven_group_continuation_survives_a_comma(text, expected):
+    assert _drop_raw_list_tails(text) == expected
+
+
+@pytest.mark.parametrize("kept, tail", [
+    # Opens a group of its own instead of continuing the one before it.
+    ("выполняет обязанности в период подготовки", "при проведении похода"),
+    # Carries its own finite verb, so it is a clause, not a member.
+    ("оказывает помощь при ожогах", "обрабатывает обморожения"),
+    # Nominative singular cannot be a member of an oblique group.
+    ("изучает изображения на местности предметов", "знакомство"),
+    # No preposition in the kept part, so no group is open.
+    ("закупает продукты", "фасовка"),
+])
+def test_unproven_continuations_are_rejected(kept, tail):
+    assert not _continues_prepositional_group(kept, tail)
+
+
+def test_group_continuation_reaches_the_result():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=(
+            "Основные приёмы оказания первой доврачебной помощи при ожогах, "
+            "обморожениях. Первая помощь утопающему."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert "при ожогах" in low
+    assert "обморожениях" in low
+    assert all(status == "COVERED" for _clause, status in result.clause_coverage)
+
+
+def test_dropped_list_member_is_reported_instead_of_covered():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=(
+            "Изучение на местности изображения местных предметов, "
+            "знакомство с различными формами рельефа. Топографические диктанты."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    assert "знакомств" not in low
+    assert "знакомится" not in low
+    coverage = dict(result.clause_coverage)
+    clause = (
+        "Изучение на местности изображения местных предметов, "
+        "знакомство с различными формами рельефа"
+    )
+    assert coverage[clause] == "NEEDS_REVIEW"
+    assert any(clause in warning for warning in result.warnings)
 
 
 def test_named_techniques_without_process_head_stay_unconverted():
