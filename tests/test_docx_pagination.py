@@ -160,7 +160,15 @@ def test_hyphenated_continuation_repeats_broken_word_but_keeps_source(monkeypatc
 def test_prefix_mismatch_still_fails_closed_on_extra_letters(monkeypatch):
     _pdf(monkeypatch, [[['Month', '19', 'abc']], [['', '', 'XYZ'], ['Month', '20', 'gh']]])
     assert qa._data_row_page_layout_pdf(_source(), b'pdf', 2) is None
-    assert qa._SEGMENTATION_DIAG.get('result') == 'prefix_mismatch'
+    diag = qa._SEGMENTATION_DIAG
+    assert diag.get('result') == 'prefix_mismatch'
+    assert diag.get('matched_length') == 3
+    assert diag.get('mismatch_index') == 3
+    assert diag.get('source_tail_before') == 'abc'
+    assert diag.get('source_tail_after') == 'def'
+    assert diag.get('normalized_expected_source') == 'abcdef'
+    assert diag.get('normalized_pdf_fragment') == 'xyz'
+    assert diag.get('raw_pdf_fragment') == 'XYZ'
 
 
 def test_match_text_ignores_soft_hyphen_and_line_breaks():

@@ -813,6 +813,40 @@ def _normalize_match_text(text: str) -> str:
     )
 
 
+_DIAG_WINDOW = 40
+_DIAG_CLIP = 96
+
+
+def _clip_diag(text: str, limit: int = _DIAG_CLIP) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _prefix_mismatch_windows(
+    target: str, accumulated: str, fragment: str, raw_fragment: str
+) -> dict[str, object]:
+    """Short tails around the first differing character. Never the whole cell."""
+
+    proposed = accumulated + fragment
+    index = 0
+    limit = min(len(target), len(proposed))
+    while index < limit and target[index] == proposed[index]:
+        index += 1
+    return {
+        "matched_length": index,
+        "mismatch_index": index,
+        "source_tail_before": target[max(0, index - _DIAG_WINDOW) : index],
+        "source_tail_after": target[index : index + _DIAG_WINDOW],
+        "normalized_expected_source": _clip_diag(target),
+        "normalized_pdf_fragment": _clip_diag(fragment),
+        "pdf_tail_after": proposed[index : index + _DIAG_WINDOW],
+        "raw_pdf_fragment": _clip_diag(raw_fragment or "", 120),
+        "raw_pdf_fragment_length": len(raw_fragment or ""),
+    }
+
+
 def _absorb_normalized_fragment(target: str, accumulated: str, fragment: str) -> str | None:
     """Append a PDF fragment; a hyphenated word may repeat its already seen stem.
 
@@ -972,6 +1006,12 @@ def _data_row_page_layout_pdf(
                             column=column,
                             layouts_done=len(layouts),
                             total_rows=total_rows,
+                            **_prefix_mismatch_windows(
+                                target[column],
+                                accumulated[column],
+                                fragment_text,
+                                fragment[column] if column < len(fragment) else "",
+                            ),
                         )
                         return None
                     normalized_fragment[column] = absorbed[len(accumulated[column]):]
