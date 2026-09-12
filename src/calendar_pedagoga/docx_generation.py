@@ -38,6 +38,83 @@ ORGANIZATION_YEAR_SPACE_AFTER_PT = 8
 ORGANIZATION_HEADER_TABLE_GAP_PT = 8
 _MONTH_CELL_MARGIN_DXA = 40
 PRINT_TOP_MARGIN_CM = 1.0
+
+
+def _week_from_cells(cells) -> str:
+    if len(cells) < 2:
+        return ""
+    lines = (cells[1] or "").splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _raise_docx_qa(stage: str, message: str, *, content: bytes | None = None, **extra) -> None:
+    """Log fail-closed QA details, then raise the same ValueError as before."""
+
+    from calendar_pedagoga.docx_qa import log_docx_qa_failure
+
+    try:
+        raise ValueError(message)
+    except ValueError as error:
+        log_docx_qa_failure(stage, error, content=content, **extra)
+        raise
+
+
+def _layouts_summary(layouts) -> dict:
+    if not layouts:
+        return {"logical_rows": 0, "pages": None, "split_rows": []}
+    pages = max(layout.span.end_page for layout in layouts)
+    split_rows = [
+        {
+            "logical_row": index + 1,
+            "week": _week_from_cells(layout.segments[0].cells) if layout.segments else "",
+            "pages": [layout.span.start_page, layout.span.end_page],
+            "segments": len(layout.segments),
+        }
+        for index, layout in enumerate(layouts)
+        if len(layout.segments) > 1
+    ]
+    return {
+        "logical_rows": len(layouts),
+        "pages": pages,
+        "first_row_page": layouts[0].span.start_page,
+        "split_rows": split_rows,
+    }
+
+
+def _span_failure(spans, continuation_rows, table) -> dict:
+    """First physical row whose page-span is missing or still crosses a page."""
+
+    rows = table.rows[2:]
+    if spans is None:
+        return {
+            "result": "unavailable",
+            "physical_rows": len(rows),
+            "pages": None,
+        }
+    pages = max((span.end_page for span in spans), default=None)
+    for index, span in enumerate(spans):
+        crosses = span.start_page != span.end_page
+        unsafe = index in continuation_rows and not span.split_safe
+        if not crosses and not unsafe:
+            continue
+        week = _week_from_cells([cell.text for cell in rows[index].cells]) if index < len(rows) else ""
+        return {
+            "result": "crosses_page" if crosses else "unconfirmed_split",
+            "physical_row": index + 1,
+            "week": week,
+            "start_page": span.start_page,
+            "end_page": span.end_page,
+            "split_safe": span.split_safe,
+            "physical_rows": len(spans),
+            "pages": pages,
+        }
+    return {
+        "result": "ok",
+        "physical_rows": len(spans),
+        "pages": pages,
+    }
+
+
 DATA_ROW_LINE_SPACING_TWIPS = 220
 
 
@@ -1245,26 +1322,56 @@ def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset
     logical_rows = [deepcopy(row._tr) for row in table.rows[2:]]
     logical_texts = [[cell.text for cell in row.cells] for row in table.rows[2:]]
     if len(logical_rows) != len(layouts):
-        raise ValueError("Не удалось сопоставить строки календаря с page-segments.")
+        _raise_docx_qa(
+            "apply_page_row_segments",
+            "Не удалось сопоставить строки календаря с page-segments.",
+            logical_rows=len(logical_rows),
+            layout_rows=len(layouts),
+            page_segmentation=_layouts_summary(layouts),
+        )
     for row in list(table.rows[2:]):
         table._tbl.remove(row._tr)
 
     months: list[str] = []
     continuation_rows: set[int] = set()
     physical_index = 0
-    for logical_row, source_cells, layout in zip(logical_rows, logical_texts, layouts):
+    for logical_index, (logical_row, source_cells, layout) in enumerate(
+        zip(logical_rows, logical_texts, layouts)
+    ):
+        week = _week_from_cells(source_cells)
         if not layout.segments:
-            raise ValueError("Получена пустая сегментация строки календаря.")
+            _raise_docx_qa(
+                "apply_page_row_segments",
+                "Получена пустая сегментация строки календаря.",
+                logical_row=logical_index + 1,
+                week=week,
+                physical_rows=physical_index,
+                page_segmentation=_layouts_summary(layouts),
+            )
         for column in range(2, len(source_cells)):
             restored = "".join(segment.cells[column] for segment in layout.segments)
             if restored != source_cells[column]:
-                raise ValueError(
-                    "Page-segmentation не восстанавливает исходное содержимое строки."
+                _raise_docx_qa(
+                    "apply_page_row_segments",
+                    "Page-segmentation не восстанавливает исходное содержимое строки.",
+                    logical_row=logical_index + 1,
+                    week=week,
+                    column=column,
+                    physical_rows=physical_index,
+                    page_segmentation=_layouts_summary(layouts),
                 )
         split = len(layout.segments) > 1
         for segment_index, segment in enumerate(layout.segments):
             if len(segment.cells) != len(logical_row.tc_lst):
-                raise ValueError("Page-segment содержит неполный набор ячеек.")
+                _raise_docx_qa(
+                    "apply_page_row_segments",
+                    "Page-segment содержит неполный набор ячеек.",
+                    logical_row=logical_index + 1,
+                    week=week,
+                    segment_index=segment_index,
+                    physical_rows=physical_index,
+                    page_segmentation=_layouts_summary(layouts),
+                )
             table._tbl.append(deepcopy(logical_row))
             row = table.rows[-1]
             for column, text in enumerate(segment.cells):
@@ -1310,9 +1417,14 @@ def _build_segmented_document(
         or (index in continuation_rows and not span.split_safe)
         for index, span in enumerate(spans)
     ):
-        raise ValueError(
+        _raise_docx_qa(
+            "verify_unmerged_spans",
             "DOCX не прошёл QA: page-segment не помещается на одной странице "
-            "или его идентификаторы не подтверждены render-проверкой."
+            "или его идентификаторы не подтверждены render-проверкой.",
+            content=unmerged,
+            physical_rows=len(months),
+            page_segmentation=_span_failure(spans, continuation_rows, table),
+            layouts=_layouts_summary(layouts),
         )
 
     pages: dict[int, list[int]] = {}
@@ -1332,9 +1444,14 @@ def _build_segmented_document(
         or (index in continuation_rows and not span.split_safe)
         for index, span in enumerate(final_spans)
     ):
-        raise ValueError(
+        _raise_docx_qa(
+            "verify_merged_spans",
             "DOCX не прошёл QA: финальная merge-структура нарушила "
-            "целостность page-segment или его идентификаторов."
+            "целостность page-segment или его идентификаторов.",
+            content=output,
+            physical_rows=len(months),
+            page_segmentation=_span_failure(final_spans, continuation_rows, table),
+            layouts=_layouts_summary(layouts),
         )
     return output
 
@@ -1442,9 +1559,12 @@ def generate_calendar_docx(
         if filled is not None and filled[0].span.start_page == 1:
             layouts = filled
     if layouts is None:
-        raise ValueError(
+        _raise_docx_qa(
+            "measure_preview_layouts",
             "DOCX не прошёл QA: не удалось надёжно определить границы текста "
-            "для page-segmentation."
+            "для page-segmentation.",
+            logical_rows=len(rows),
+            page_segmentation="unavailable",
         )
     return _build_segmented_document(
         _load_template(template), utp, rows, layouts, **header

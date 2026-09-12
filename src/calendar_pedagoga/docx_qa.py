@@ -12,7 +12,9 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
+import traceback
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -21,6 +23,11 @@ from docx.text.paragraph import Paragraph
 from calendar_pedagoga.program_parsing import find_libreoffice
 
 logger = logging.getLogger(__name__)
+
+# Last fail-closed measurement reason. Written only as diagnostics; callers
+# still receive None and must not change QA decisions from this payload.
+_SEGMENTATION_DIAG: dict[str, object] = {}
+_DOCX_QA_LOGGED_ATTR = "_docx_qa_diagnostics_logged"
 
 _WD_ACTIVE_END_PAGE_NUMBER = 3
 _WD_EXPORT_FORMAT_PDF = 17
@@ -485,6 +492,122 @@ def _libreoffice_version(soffice: Path) -> str:
     return output or f"unavailable: return code {result.returncode}"
 
 
+def _record_segmentation_diag(**fields: object) -> None:
+    """Remember why the last page-segmentation attempt returned None."""
+
+    _SEGMENTATION_DIAG.clear()
+    _SEGMENTATION_DIAG.update(fields)
+
+
+def _week_label_from_cells(source_cells: list[list[str]], row_index: int) -> str:
+    if not (0 <= row_index < len(source_cells)) or len(source_cells[row_index]) < 2:
+        return ""
+    lines = (source_cells[row_index][1] or "").splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _active_renderer() -> str:
+    """Prefer the renderer that last measured the document; do not launch Word."""
+
+    measured = _SEGMENTATION_DIAG.get("renderer")
+    if measured in {"Word", "LibreOffice"}:
+        return str(measured)
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return "Word"
+    if find_libreoffice() is not None:
+        return "LibreOffice"
+    return "none"
+
+
+def _times_new_roman_fc_match() -> str:
+    fc_match = shutil.which("fc-match")
+    if fc_match is None:
+        return "fc-match unavailable"
+    try:
+        result = subprocess.run(
+            [fc_match, "Times New Roman"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"fc-match failed: {type(error).__name__}: {error}"
+    output = (result.stdout or result.stderr or "").strip()
+    return output or f"fc-match rc={result.returncode}"
+
+
+def _document_fonts(content: bytes | None) -> list[str]:
+    if not content:
+        return []
+    try:
+        document = Document(BytesIO(content))
+    except Exception:
+        return []
+    seen: list[str] = []
+    names: set[str] = set()
+
+    def add(name: str | None) -> None:
+        if name and name not in names:
+            names.add(name)
+            seen.append(name)
+
+    for paragraph in document.paragraphs[:30]:
+        for run in paragraph.runs:
+            add(run.font.name)
+    if document.tables:
+        for row in document.tables[0].rows[:4]:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        add(run.font.name)
+    return seen
+
+
+def collect_docx_qa_diagnostics(content: bytes | None = None) -> dict[str, object]:
+    """Renderer, font and last segmentation snapshot. Does not decide QA."""
+
+    soffice = find_libreoffice()
+    return {
+        "renderer": _active_renderer(),
+        "libreoffice_version": _libreoffice_version(soffice) if soffice else "unavailable",
+        "times_new_roman_fc_match": _times_new_roman_fc_match(),
+        "document_fonts": _document_fonts(content),
+        "segmentation": dict(_SEGMENTATION_DIAG),
+    }
+
+
+def log_docx_qa_failure(
+    stage: str,
+    error: BaseException,
+    *,
+    content: bytes | None = None,
+    **extra: object,
+) -> None:
+    """Log generation/QA failure details. Does not change the exception."""
+
+    if getattr(error, _DOCX_QA_LOGGED_ATTR, False):
+        return
+    payload = {
+        "stage": stage,
+        "error_type": type(error).__name__,
+        "error_message": str(error),
+        **collect_docx_qa_diagnostics(content),
+        **extra,
+    }
+    text = "DOCX QA diagnostics: " + json.dumps(
+        payload, ensure_ascii=False, default=str, sort_keys=True
+    )
+    logger.error(text, exc_info=error)
+    # Render captures process stderr; Streamlit may not attach this logger.
+    print(text, file=sys.stderr, flush=True)
+    traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
+    setattr(error, _DOCX_QA_LOGGED_ATTR, True)
+
+
 def _log_libreoffice_failure(
     soffice: Path,
     command: list[str],
@@ -737,6 +860,11 @@ def _data_row_page_layout_pdf(
         })
         merged_rows.append(bool(row._tr.xpath('.//w:vMerge')))
     if len(expected) != total_rows:
+        _record_segmentation_diag(
+            result="row_count_mismatch",
+            table_rows=len(expected),
+            total_rows=total_rows,
+        )
         return None
 
     layouts: list[DataRowPageLayout] = []
@@ -744,7 +872,9 @@ def _data_row_page_layout_pdf(
     start_page = None
     complete_identifiers: set[int] = set()
     fragments: list[tuple[int, list[str]]] = []
+    page_count = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        page_count = getattr(document, "page_count", None)
         for page_number, page in enumerate(document, start=1):
             found = page.find_tables().tables
             if not found:
@@ -753,6 +883,16 @@ def _data_row_page_layout_pdf(
             tables = [table for table in found
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
+                _record_segmentation_diag(
+                    result="table_count_mismatch",
+                    page=page_number,
+                    pages=page_count,
+                    matched_tables=len(tables),
+                    logical_row=len(layouts) + 1,
+                    week=_week_label_from_cells(source_cells, len(layouts)),
+                    layouts_done=len(layouts),
+                    total_rows=total_rows,
+                )
                 return None
             for fragment in tables[0].extract():
                 # Word repeats the header on most pages but omits it above the
@@ -763,6 +903,13 @@ def _data_row_page_layout_pdf(
                 if not any(normalized(value) for value in fragment):
                     continue
                 if len(layouts) >= total_rows:
+                    _record_segmentation_diag(
+                        result="extra_table_fragment",
+                        page=page_number,
+                        pages=page_count,
+                        layouts_done=len(layouts),
+                        total_rows=total_rows,
+                    )
                     return None
                 row_index = len(layouts)
                 target = expected[row_index]
@@ -777,6 +924,16 @@ def _data_row_page_layout_pdf(
                     normalized_fragment[column] = normalized(fragment[column])
                     accumulated[column] += normalized_fragment[column]
                     if not target[column].startswith(accumulated[column]):
+                        _record_segmentation_diag(
+                            result="prefix_mismatch",
+                            page=page_number,
+                            pages=page_count,
+                            logical_row=row_index + 1,
+                            week=_week_label_from_cells(source_cells, row_index),
+                            column=column,
+                            layouts_done=len(layouts),
+                            total_rows=total_rows,
+                        )
                         return None
                 fragments.append((page_number, normalized_fragment))
                 if not all(accumulated[column] == target[column] for column in body_columns):
@@ -789,6 +946,16 @@ def _data_row_page_layout_pdf(
                         [len(item[column]) for _page, item in fragments],
                     )
                     if pieces is None:
+                        _record_segmentation_diag(
+                            result="slice_mismatch",
+                            page=page_number,
+                            pages=page_count,
+                            logical_row=row_index + 1,
+                            week=_week_label_from_cells(source_cells, row_index),
+                            column=column,
+                            layouts_done=len(layouts),
+                            total_rows=total_rows,
+                        )
                         return None
                     exact_by_column[column] = pieces
                 segments = []
@@ -811,7 +978,22 @@ def _data_row_page_layout_pdf(
                 complete_identifiers = set()
                 fragments = []
     if len(layouts) != total_rows or start_page is not None:
+        _record_segmentation_diag(
+            result="incomplete_layouts",
+            pages=page_count,
+            logical_row=len(layouts) + 1,
+            week=_week_label_from_cells(source_cells, len(layouts)),
+            layouts_done=len(layouts),
+            open_row=start_page is not None,
+            total_rows=total_rows,
+        )
         return None
+    _record_segmentation_diag(
+        result="ok",
+        pages=page_count,
+        layouts_done=len(layouts),
+        total_rows=total_rows,
+    )
     return tuple(layouts)
 
 
@@ -830,14 +1012,30 @@ def detect_data_row_page_layout(
 
     if total_rows == 0:
         return ()
+    renderer = "Word"
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
+        renderer = "LibreOffice"
         pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
     if pdf is None:
+        _record_segmentation_diag(
+            result="pdf_unavailable",
+            renderer=renderer,
+            total_rows=total_rows,
+        )
         return None
     try:
-        return _data_row_page_layout_pdf(content, pdf, total_rows)
-    except Exception:
+        layouts = _data_row_page_layout_pdf(content, pdf, total_rows)
+        _SEGMENTATION_DIAG["renderer"] = renderer
+        return layouts
+    except Exception as error:
+        _record_segmentation_diag(
+            result="layout_exception",
+            renderer=renderer,
+            error_type=type(error).__name__,
+            error_message=str(error),
+            total_rows=total_rows,
+        )
         logger.debug("PDF row-segment measurement unavailable", exc_info=False)
         return None
 
@@ -853,17 +1051,33 @@ def detect_data_row_page_spans(
     # rows containing vertical identifiers, so on Linux it receives a temporary
     # measurement copy with those directions removed. The original content is
     # still the source of expected cell text and is never modified.
+    renderer = "Word"
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
+        renderer = "LibreOffice"
         pdf = _docx_to_pdf_bytes_libreoffice(
             _pagination_measurement_copy(content)
+        )
+    if pdf is None:
+        _record_segmentation_diag(
+            result="pdf_unavailable",
+            renderer=renderer,
+            total_rows=total_rows,
         )
     if pdf is not None:
         try:
             spans = _data_row_page_spans_pdf(content, pdf, total_rows)
+            _SEGMENTATION_DIAG["renderer"] = renderer
             if spans is not None:
                 return spans
-        except Exception:
+        except Exception as error:
+            _record_segmentation_diag(
+                result="span_exception",
+                renderer=renderer,
+                error_type=type(error).__name__,
+                error_message=str(error),
+                total_rows=total_rows,
+            )
             logger.debug("PDF row-span measurement unavailable", exc_info=False)
 
     def collect(_word, document):

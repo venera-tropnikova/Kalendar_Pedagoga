@@ -1,4 +1,6 @@
 from io import BytesIO
+import json
+import logging
 from types import SimpleNamespace
 
 from docx import Document
@@ -467,6 +469,51 @@ def test_generation_fails_closed_when_physical_segment_still_splits(monkeypatch)
         gen.generate_calendar_docx(
             None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
         )
+
+
+def test_page_segment_failure_logs_diagnostics(monkeypatch, caplog):
+    from calendar_pedagoga import docx_generation as gen
+
+    def populate(document, *args, **kwargs):
+        table = document.add_table(rows=4, cols=8)
+        _repeat_table_header_rows(table)
+        for row in table.rows[2:]:
+            row.cells[0].text = 'Month'
+            row.cells[1].text = '9\n13–19.10'
+        return table, _columns_for_table(table), ('Month', 'Month')
+
+    monkeypatch.setattr(gen, '_load_template', lambda template: Document())
+    monkeypatch.setattr(gen, '_populate_calendar_table', populate)
+    layouts = tuple(
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(1, ('Month', '9\n13–19.10', '', '', '', '', '', '')),),
+        ) for _ in range(2)
+    )
+    monkeypatch.setattr(qa, 'detect_data_row_page_layout', lambda *args, **kwargs: layouts)
+    monkeypatch.setattr(
+        qa, 'detect_data_row_page_spans',
+        lambda *args, **kwargs: (
+            qa.DataRowPageSpan(1, 2, False), qa.DataRowPageSpan(2, 2, True),
+        ),
+    )
+    with caplog.at_level(logging.ERROR, logger=qa.__name__):
+        with pytest.raises(ValueError, match='page-segment'):
+            gen.generate_calendar_docx(
+                None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
+            )
+    record = next(
+        item for item in caplog.records if "DOCX QA diagnostics" in item.message
+    )
+    payload = json.loads(record.message.split(": ", 1)[1])
+    assert payload["stage"] == "verify_unmerged_spans"
+    assert payload["renderer"] in {"Word", "LibreOffice", "none"}
+    assert "libreoffice_version" in payload
+    assert "times_new_roman_fc_match" in payload
+    assert payload["page_segmentation"]["physical_row"] == 1
+    assert payload["page_segmentation"]["week"] == "9"
+    assert payload["physical_rows"] == 2
+    assert record.exc_info is not None
 
 
 def test_generation_fails_closed_when_final_merge_reflows_segment(monkeypatch):
