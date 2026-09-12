@@ -123,16 +123,23 @@ def _source():
     return result.getvalue()
 
 
-def _pdf(monkeypatch, fragments, cols=None):
+def _pdf(monkeypatch, fragments, cols=None, page_texts=None):
     import pymupdf
     cols = cols or len(fragments[0][0])
+    texts = list(page_texts or [])
+    while len(texts) < len(fragments):
+        texts.append('')
     class Pdf:
+        page_count = len(fragments)
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def __iter__(self):
-            for rows in fragments:
+            for rows, text in zip(fragments, texts):
                 table = SimpleNamespace(col_count=cols, extract=lambda rows=rows: [[], []] + rows)
-                yield SimpleNamespace(find_tables=lambda table=table: SimpleNamespace(tables=[table]))
+                yield SimpleNamespace(
+                    find_tables=lambda table=table: SimpleNamespace(tables=[table]),
+                    get_text=lambda *args, text=text, **kwargs: text,
+                )
     monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
 
 
@@ -572,6 +579,8 @@ def test_libreoffice_measurement_removes_vertical_direction_only_from_copy(monke
     table.cell(2, 0).text = 'Month'
     table.cell(2, 1).text = '19'
     table.cell(2, 2).text = '01–07.03'
+    _prevent_row_split(table.rows[0])
+    _prevent_row_split(table.rows[2])
     for cell in (*table.rows[0].cells[:1], *table.rows[2].cells[:3]):
         marker = OxmlElement('w:textDirection')
         marker.set(qn('w:val'), 'btLr')
@@ -597,13 +606,145 @@ def test_libreoffice_measurement_removes_vertical_direction_only_from_copy(monke
     assert qa.detect_data_row_page_spans(original, total_rows=1) == (
         qa.DataRowPageSpan(1, 2, True),
     )
-    assert Document(BytesIO(original)).tables[0]._tbl.xpath('.//w:textDirection')
+    source_doc = Document(BytesIO(original))
+    assert source_doc.tables[0]._tbl.xpath('.//w:textDirection')
+    assert source_doc.tables[0].rows[0]._tr.xpath('./w:trPr/w:cantSplit')
+    assert source_doc.tables[0].rows[2]._tr.xpath('./w:trPr/w:cantSplit')
     measured = Document(BytesIO(captured['copy'])).tables[0]
     assert measured.rows[0]._tr.xpath('.//w:textDirection')
     assert not measured.rows[2]._tr.xpath('.//w:textDirection')
+    assert measured.rows[0]._tr.xpath('./w:trPr/w:cantSplit')
+    assert measured.rows[2]._tr.xpath('./w:trPr/w:cantSplit')
     assert [cell.text for cell in measured.rows[2].cells[:3]] == [
         'Month', '19', '01–07.03',
     ]
+
+
+def test_measurement_copy_keeps_cantsplit_except_allowed_rows():
+    doc = Document()
+    table = doc.add_table(rows=4, cols=8)
+    _repeat_table_header_rows(table)
+    table.rows[2].cells[4].text = 'Practice body'
+    table.rows[3].cells[4].text = 'Next week'
+    for row in table.rows:
+        _prevent_row_split(row)
+    source = BytesIO()
+    doc.save(source)
+    original = source.getvalue()
+
+    first = qa._pagination_measurement_copy(original)
+    retry = qa._pagination_measurement_copy(original, allow_split_rows=frozenset({0}))
+    source_rows = Document(BytesIO(original)).tables[0].rows
+    first_rows = Document(BytesIO(first)).tables[0].rows
+    retry_rows = Document(BytesIO(retry)).tables[0].rows
+
+    assert all(row._tr.xpath('./w:trPr/w:cantSplit') for row in source_rows)
+    assert all(row._tr.xpath('./w:trPr/w:cantSplit') for row in first_rows)
+    assert not retry_rows[2]._tr.xpath('./w:trPr/w:cantSplit')
+    assert retry_rows[3]._tr.xpath('./w:trPr/w:cantSplit')
+    assert [cell.text for cell in source_rows[2].cells] == [
+        cell.text for cell in first_rows[2].cells
+    ]
+    assert [cell.text for cell in source_rows[2].cells] == [
+        cell.text for cell in retry_rows[2].cells
+    ]
+
+
+def _clip_source():
+    doc = Document()
+    table = doc.add_table(rows=4, cols=3)
+    for row, values in zip(
+        table.rows[2:],
+        [('Month', '1', 'aaabbbccc'), ('Month', '2', 'nextrowtext')],
+    ):
+        for cell, value in zip(row.cells, values):
+            cell.text = value
+    result = BytesIO()
+    doc.save(result)
+    return result.getvalue()
+
+
+def test_clipped_prefix_signals_cantsplit_without_accepting_lost_tail(monkeypatch):
+    _pdf(
+        monkeypatch,
+        [[['Month', '1', 'aaabbb']], [['Month', '2', 'nextrowtext']]],
+        page_texts=['aaabbb', 'nextrowtext'],
+    )
+    assert qa._data_row_page_layout_pdf(_clip_source(), b'pdf', 2) is None
+    diag = qa._SEGMENTATION_DIAG
+    assert diag.get('result') == 'clipped_by_cantsplit'
+    assert diag.get('row_index') == 0
+    assert diag.get('clipped_rows') == (0,)
+    assert diag.get('matched_length') == 6
+
+
+def test_foreign_continuation_is_still_prefix_mismatch(monkeypatch):
+    _pdf(
+        monkeypatch,
+        [[['Month', '1', 'aaabbb']], [['Month', '2', 'ZZZ']]],
+        page_texts=['aaabbb', 'ZZZ'],
+    )
+    assert qa._data_row_page_layout_pdf(_clip_source(), b'pdf', 2) is None
+    assert qa._SEGMENTATION_DIAG.get('result') == 'prefix_mismatch'
+
+
+def test_tail_still_in_pdf_is_not_treated_as_clip(monkeypatch):
+    _pdf(
+        monkeypatch,
+        [[['Month', '1', 'aaabbb']], [['Month', '2', 'nextrowtext']]],
+        page_texts=['aaabbbccc', 'nextrowtext'],
+    )
+    assert qa._data_row_page_layout_pdf(_clip_source(), b'pdf', 2) is None
+    assert qa._SEGMENTATION_DIAG.get('result') == 'prefix_mismatch'
+
+
+def test_detect_layout_retries_only_clipped_row(monkeypatch):
+    marked = Document(BytesIO(_clip_source()))
+    for row in marked.tables[0].rows[2:]:
+        _prevent_row_split(row)
+    buffer = BytesIO()
+    marked.save(buffer)
+    source = buffer.getvalue()
+    copies = []
+
+    def libreoffice(content):
+        copies.append(content)
+        return b'pdf'
+
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', lambda content: None)
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', libreoffice)
+
+    calls = {'n': 0}
+
+    def layout(content, pdf, total_rows):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            qa._record_segmentation_diag(
+                result='clipped_by_cantsplit',
+                row_index=0,
+                clipped_rows=(0,),
+            )
+            return None
+        return (
+            qa.DataRowPageLayout(
+                qa.DataRowPageSpan(1, 2, True),
+                (qa.DataRowPageSegment(1, ('Month', '1', 'aaabbbccc')),),
+            ),
+            qa.DataRowPageLayout(
+                qa.DataRowPageSpan(2, 2, True),
+                (qa.DataRowPageSegment(2, ('Month', '2', 'nextrowtext')),),
+            ),
+        )
+
+    monkeypatch.setattr(qa, '_data_row_page_layout_pdf', layout)
+    result = qa.detect_data_row_page_layout(source, total_rows=2)
+    assert result is not None
+    assert len(copies) == 2
+    first_rows = Document(BytesIO(copies[0])).tables[0].rows[2:]
+    retry_rows = Document(BytesIO(copies[1])).tables[0].rows[2:]
+    assert all(row._tr.xpath('./w:trPr/w:cantSplit') for row in first_rows)
+    assert not retry_rows[0]._tr.xpath('./w:trPr/w:cantSplit')
+    assert retry_rows[1]._tr.xpath('./w:trPr/w:cantSplit')
 
 
 def test_single_page_segment_is_kept_together(monkeypatch):

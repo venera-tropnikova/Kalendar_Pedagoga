@@ -860,18 +860,29 @@ def _docx_to_pdf_bytes(content: bytes) -> bytes | None:
     return _docx_to_pdf_bytes_libreoffice(content)
 
 
-def _pagination_measurement_copy(content: bytes) -> bytes:
+def _pagination_measurement_copy(
+    content: bytes,
+    *,
+    allow_split_rows: frozenset[int] = frozenset(),
+) -> bytes:
     """Make vertical identifiers measurable by LibreOffice without changing output.
 
     LibreOffice keeps a table row whole when it contains vertical Month/Week/Date
     text even if ``w:cantSplit`` is absent.  The copy is used only to measure the
-    narrative cells; the returned production DOCX retains its text directions.
+    narrative cells; the production DOCX retains its text directions and
+    keep-together markers.  ``allow_split_rows`` may drop ``w:cantSplit`` only
+    on data rows already proven to clip under LibreOffice.
     """
 
     document = Document(BytesIO(content))
     if not document.tables:
         return content
-    for row in document.tables[0].rows[2:]:
+    for index, row in enumerate(document.tables[0].rows[2:]):
+        if index in allow_split_rows:
+            tr_pr = row._tr.trPr
+            if tr_pr is not None:
+                for marker in list(tr_pr.findall(qn("w:cantSplit"))):
+                    tr_pr.remove(marker)
         # Calendar schema: the first three physical columns are Month, Week
         # and Date. Narrative cells must retain their production geometry even
         # in the measurement copy.
@@ -881,6 +892,65 @@ def _pagination_measurement_copy(content: bytes) -> bytes:
     buffer = BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+_CLIP_TAIL_CONTEXT = 32
+
+
+def _normalized_pdf_text(document) -> str:
+    """Full PDF text layer, or empty when the renderer mock has no text."""
+
+    parts: list[str] = []
+    for page in document:
+        getter = getattr(page, "get_text", None)
+        if getter is None:
+            continue
+        try:
+            parts.append(_normalize_match_text(getter("text")))
+        except TypeError:
+            continue
+    return "".join(parts)
+
+
+def _expected_tail_absent_from_pdf(target: str, accumulated: str, pdf_norm: str) -> bool:
+    """True when the unmatched SOURCE suffix never appears after its proven prefix."""
+
+    if not accumulated or not target.startswith(accumulated):
+        return False
+    tail = target[len(accumulated):]
+    if not tail:
+        return False
+    context = accumulated[-min(_CLIP_TAIL_CONTEXT, len(accumulated)):]
+    return (context + tail) not in pdf_norm
+
+
+def _fragment_belongs_to_next_row(fragment: str, next_target: str | None) -> bool:
+    return bool(fragment) and bool(next_target) and next_target.startswith(fragment)
+
+
+def _is_cantsplit_clip(
+    *,
+    target: str,
+    accumulated: str,
+    fragment: str,
+    next_target: str | None,
+    pdf_norm: str,
+) -> bool:
+    """LibreOffice kept the row whole and dropped the rest of the cell."""
+
+    return (
+        _expected_tail_absent_from_pdf(target, accumulated, pdf_norm)
+        and _fragment_belongs_to_next_row(fragment, next_target)
+    )
+
+
+def _clipped_row_indices() -> tuple[int, ...]:
+    if _SEGMENTATION_DIAG.get("result") != "clipped_by_cantsplit":
+        return ()
+    rows = _SEGMENTATION_DIAG.get("clipped_rows")
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    return tuple(int(index) for index in rows)
 
 
 @dataclass(frozen=True)
@@ -1129,6 +1199,7 @@ def _data_row_page_layout_pdf(
     page_count = None
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         page_count = getattr(document, "page_count", None)
+        pdf_norm = _normalized_pdf_text(document)
         for page_number, page in enumerate(document, start=1):
             found = page.find_tables().tables
             if not found:
@@ -1189,6 +1260,38 @@ def _data_row_page_layout_pdf(
                     )
                     if absorbed is None:
                         week_label = _week_label_from_cells(source_cells, row_index)
+                        next_target = (
+                            expected[row_index + 1][column]
+                            if row_index + 1 < len(expected)
+                            and column < len(expected[row_index + 1])
+                            else None
+                        )
+                        if _is_cantsplit_clip(
+                            target=target[column],
+                            accumulated=accumulated[column],
+                            fragment=fragment_text,
+                            next_target=next_target,
+                            pdf_norm=pdf_norm,
+                        ):
+                            _record_segmentation_diag(
+                                result="clipped_by_cantsplit",
+                                page=page_number,
+                                pages=page_count,
+                                logical_row=row_index + 1,
+                                row_index=row_index,
+                                clipped_rows=(row_index,),
+                                week=week_label,
+                                column=column,
+                                layouts_done=len(layouts),
+                                total_rows=total_rows,
+                                **_prefix_mismatch_windows(
+                                    target[column],
+                                    accumulated[column],
+                                    fragment_text,
+                                    fragment[column] if column < len(fragment) else "",
+                                ),
+                            )
+                            return None
                         if week_label == "9" and column == 4 and page_number == 9:
                             _probe_w9_prefix_mismatch_v2(
                                 target=target[column],
@@ -1285,6 +1388,30 @@ def _data_row_page_spans_pdf(
     return tuple(layout.span for layout in layouts) if layouts is not None else None
 
 
+def _layouts_from_measurement_pdf(
+    content: bytes,
+    total_rows: int,
+    *,
+    allow_split_rows: frozenset[int] = frozenset(),
+) -> tuple[DataRowPageLayout, ...] | None:
+    pdf = _docx_to_pdf_bytes_libreoffice(
+        _pagination_measurement_copy(content, allow_split_rows=allow_split_rows)
+    )
+    if pdf is None:
+        _record_segmentation_diag(
+            result="pdf_unavailable",
+            renderer="LibreOffice",
+            total_rows=total_rows,
+        )
+        return None
+    layouts = _data_row_page_layout_pdf(content, pdf, total_rows)
+    if layouts is not None:
+        _SEGMENTATION_DIAG["renderer"] = "LibreOffice"
+        if allow_split_rows:
+            _SEGMENTATION_DIAG["allow_split_rows"] = tuple(sorted(allow_split_rows))
+    return layouts
+
+
 def detect_data_row_page_layout(
     content: bytes, *, total_rows: int,
 ) -> tuple[DataRowPageLayout, ...] | None:
@@ -1296,14 +1423,26 @@ def detect_data_row_page_layout(
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
         renderer = "LibreOffice"
-        pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
-    if pdf is None:
-        _record_segmentation_diag(
-            result="pdf_unavailable",
-            renderer=renderer,
-            total_rows=total_rows,
-        )
-        return None
+        try:
+            layouts = _layouts_from_measurement_pdf(content, total_rows)
+            if layouts is not None:
+                return layouts
+            clipped = _clipped_row_indices()
+            if clipped:
+                return _layouts_from_measurement_pdf(
+                    content, total_rows, allow_split_rows=frozenset(clipped)
+                )
+            return None
+        except Exception as error:
+            _record_segmentation_diag(
+                result="layout_exception",
+                renderer=renderer,
+                error_type=type(error).__name__,
+                error_message=str(error),
+                total_rows=total_rows,
+            )
+            logger.debug("PDF row-segment measurement unavailable", exc_info=False)
+            return None
     try:
         layouts = _data_row_page_layout_pdf(content, pdf, total_rows)
         _SEGMENTATION_DIAG["renderer"] = renderer
@@ -1335,9 +1474,7 @@ def detect_data_row_page_spans(
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
         renderer = "LibreOffice"
-        pdf = _docx_to_pdf_bytes_libreoffice(
-            _pagination_measurement_copy(content)
-        )
+        pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
     if pdf is None:
         _record_segmentation_diag(
             result="pdf_unavailable",
@@ -1350,6 +1487,19 @@ def detect_data_row_page_spans(
             _SEGMENTATION_DIAG["renderer"] = renderer
             if spans is not None:
                 return spans
+            clipped = _clipped_row_indices()
+            if clipped and renderer == "LibreOffice":
+                retry_pdf = _docx_to_pdf_bytes_libreoffice(
+                    _pagination_measurement_copy(
+                        content, allow_split_rows=frozenset(clipped)
+                    )
+                )
+                if retry_pdf is not None:
+                    spans = _data_row_page_spans_pdf(content, retry_pdf, total_rows)
+                    if spans is not None:
+                        _SEGMENTATION_DIAG["renderer"] = renderer
+                        _SEGMENTATION_DIAG["allow_split_rows"] = tuple(sorted(clipped))
+                        return spans
         except Exception as error:
             _record_segmentation_diag(
                 result="span_exception",
