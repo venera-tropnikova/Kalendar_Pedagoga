@@ -3309,6 +3309,58 @@ def _head_noun_to_genitive(word: str) -> str:
     return f"{prefix}{changed}{suffix}"
 
 
+_PLURAL_ADJ_ENDINGS = ("ые", "ие", "ых", "их")
+_MASCULINE_AGENT_SUFFIX_RE = re.compile(
+    r"(?i)(?:ник|тель|ист|чик|щик|ец|ор|ёр|ер|ант|ент|лог|ик)$"
+)
+
+
+def _is_plural_adjective_run(words: list[str]) -> bool:
+    """True when the modifiers before a noun are plural, so the noun is plural too."""
+
+    for word in words:
+        low = _strip_punct_word(word)[1].casefold()
+        if low.endswith(("ние", "тие")):
+            continue
+        if low.endswith(_PLURAL_ADJ_ENDINGS):
+            return True
+    return False
+
+
+def _noun_to_genitive_plural(word: str) -> str:
+    """Genitive plural of a nominative plural noun; empty when the form is unproven."""
+
+    prefix, core, suffix = _strip_punct_word(word)
+    low = core.casefold()
+    if len(core) < 4:
+        return ""
+    if low.endswith("ия"):
+        changed = core[:-2] + "ий"
+    elif low.endswith(("жи", "чи", "ши", "щи")):
+        # A hushing stem takes «-ей» in either gender: «вещи» → «вещей».
+        changed = core[:-1] + "ей"
+    elif low.endswith(("и", "ы")) and _MASCULINE_AGENT_SUFFIX_RE.search(low[:-1]):
+        # An agent noun is masculine: «путешественники» → «путешественников».
+        changed = core[:-1] + "ов"
+    elif low.endswith("а") and low[-2] not in "аеёиоуыэюя":
+        # Neuter plural drops its ending: «качества» → «качеств».
+        changed = core[:-1]
+    else:
+        # Gender is undecidable here, so the singular rules stay in charge.
+        return ""
+    return f"{prefix}{changed}{suffix}"
+
+
+def _agreeing_noun_to_genitive(noun: str, modifiers: list[str]) -> str:
+    """Genitive of a noun that must keep the number of its own modifiers."""
+
+    if _is_plural_adjective_run(modifiers):
+        plural = _noun_to_genitive_plural(noun)
+        if plural:
+            return plural
+    return _head_noun_to_genitive(noun)
+
+
 def _split_prep_tail(words: list[str]) -> tuple[list[str], list[str]]:
     for index, word in enumerate(words):
         if _is_preposition(word):
@@ -3340,7 +3392,9 @@ def _phrase_to_genitive(phrase: str) -> str:
                 _adj_to_genitive(word)
                 for word in head[:leading_adjectives]
             ],
-            _head_noun_to_genitive(head[leading_adjectives]),
+            _agreeing_noun_to_genitive(
+                head[leading_adjectives], head[:leading_adjectives]
+            ),
             *head[leading_adjectives + 1 :],
         ]
     elif (
@@ -3348,7 +3402,7 @@ def _phrase_to_genitive(phrase: str) -> str:
         and _is_adjective(head[0])
         and any(word.casefold() == "и" for word in head[:-1])
     ):
-        noun = _head_noun_to_genitive(head[-1])
+        noun = _agreeing_noun_to_genitive(head[-1], head[:-1])
         mids = []
         for word in head[:-1]:
             if word.casefold() == "и":
