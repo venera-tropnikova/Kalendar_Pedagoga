@@ -173,7 +173,7 @@ def test_key_specialises_type_where_source_is_enough_and_keeps_generic_otherwise
     assert by_week[16].lesson_type == "дидактическое занятие"
     assert by_week[22].lesson_type == "учебно-тренировочное занятие"
     assert "бассейн" in by_week[22].planned_result.casefold()
-    assert by_week[14].lesson_type == "практикум"
+    assert by_week[14].lesson_type == "практическое занятие"
     assert by_week[19].lesson_type == "практическое занятие"
     for lesson in generated:
         control = lesson.assessment_method.casefold()

@@ -918,6 +918,8 @@ def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
         return None
     if ":" in remainder and lemma in _NOMINAL_PERFORM_LEMMAS | {"преодоление"}:
         return None
+    if _technique_process_lemma(head):
+        remainder = _drop_ways_catalogue_tail(remainder)
     if lemma == "помощь":
         if not _aid_activity_evidence(mods, remainder):
             return None
@@ -1292,19 +1294,23 @@ def _technique_catalogue_head(head: str) -> bool:
     return bool(re.fullmatch(r"способ(?:ы|а|ов)?", core))
 
 
-def _remainder_starts_with_process_noun(remainder: str) -> bool:
-    """«способы передвижения»: the object itself is a performable process."""
+def _leading_ways_catalogue(member: str) -> bool:
+    tokens = _normalize_spaces(member).split()
+    return bool(tokens) and _technique_catalogue_head(_strip_punct_word(tokens[0])[1])
 
-    tokens = _normalize_spaces(remainder).split()
-    if not tokens or _is_preposition(tokens[0]):
-        return False
-    first = tokens[0]
-    lemma = _verbal_noun_lemma(first).casefold()
-    if lemma in _STATE_OR_KNOWLEDGE_LEMMAS:
-        return False
-    if _motion_process_lemma(first):
-        return True
-    return bool(re.search(r"(?:ание|ение|яние|тие)$", lemma))
+
+def _drop_ways_catalogue_tail(remainder: str) -> str:
+    """A catalogue of ways is named, not performed, so it cannot be an object."""
+
+    pieces = re.split(r"(,\s*|\s+и\s+)", _normalize_spaces(remainder))
+    if _leading_ways_catalogue(pieces[0]):
+        return ""
+    kept = pieces[:1]
+    for separator, member in zip(pieces[1::2], pieces[2::2]):
+        if _leading_ways_catalogue(member):
+            break
+        kept.extend((separator, member))
+    return "".join(kept).strip()
 
 
 def _remainder_contains_finite_action(remainder: str) -> bool:
@@ -1331,6 +1337,17 @@ def _technique_process_lemma(head: str) -> str:
     if lemma in {"торможение", "преодоление"}:
         return lemma
     return ""
+
+
+def _performed_process_conjuncts(obj: str) -> list[str]:
+    """Coordinated members of an object that name a closed-class process."""
+
+    conjuncts = []
+    for member in re.split(r",\s*|\s+и\s+", _normalize_spaces(obj)):
+        tokens = member.split()
+        if tokens and _technique_process_lemma(_strip_punct_word(tokens[0])[1]):
+            conjuncts.append(member.strip())
+    return conjuncts
 
 
 def _remainder_is_knowledge_np(remainder: str) -> bool:
@@ -1374,27 +1391,23 @@ def _unconjugated_practice_activity_result(
         return None
     if ":" in remainder or _remainder_contains_finite_action(remainder):
         return None
-    technique_ways = (
-        _technique_catalogue_head(head)
-        and _remainder_starts_with_process_noun(remainder)
-        and not _remainder_is_knowledge_np(remainder)
-    )
+    if _technique_process_lemma(head):
+        remainder = _drop_ways_catalogue_tail(remainder)
     overcoming = (
         _technique_process_lemma(head) == "преодоление"
         and _remainder_is_dependent_object(remainder)
         and not _remainder_is_knowledge_np(remainder)
     )
-    if not remainder.strip() and not technique_ways:
+    if not remainder.strip():
         return None
     if (
-        not technique_ways
-        and not overcoming
+        not overcoming
         and (_remainder_is_quoted_label(remainder) or _remainder_is_knowledge_np(remainder))
     ):
         return None
     has_object = _remainder_is_dependent_object(remainder)
     has_path = _remainder_is_path_or_manner_complement(remainder)
-    if not technique_ways and not overcoming and not has_object and not has_path:
+    if not overcoming and not has_object and not has_path:
         return None
     lemma = _verbal_noun_lemma(head).casefold()
     deverbal_ka = bool(re.search(r"(?i)(?:тка|дка|нка|вка|жка|зка)$", lemma))
@@ -1402,8 +1415,7 @@ def _unconjugated_practice_activity_result(
     # A path PP is activity evidence for an unconjugated process noun;
     # a genitive object after an unknown -ение noun is not, except the
     # closed technique process «преодоление + object».
-    # «способы + process» is technique rehearsal, not a topic label.
-    if technique_ways or overcoming:
+    if overcoming:
         pass
     elif _has_stem(head, _PERFORM_STEMS) or deverbal_ka:
         if not has_object:
@@ -3524,6 +3536,23 @@ def _coordinated_phrase_to_genitive(phrase: str) -> str:
     return " и ".join(_phrase_to_genitive(part) for part in parts)
 
 
+def _process_enumeration_to_genitive(phrase: str) -> str:
+    """Genitive of every coordinated process head; dependents stay verbatim.
+
+    A member that does not open a process of the closed class continues the
+    previous head, so inflecting it would break the source wording.
+    """
+
+    pieces = re.split(r"(,\s*|\s+и\s+)", _normalize_spaces(phrase))
+    rendered = []
+    for index, piece in enumerate(pieces):
+        if index % 2 or not _performed_process_conjuncts(piece):
+            rendered.append(piece)
+            continue
+        rendered.append(_phrase_to_genitive(piece))
+    return "".join(rendered)
+
+
 def _phrase_to_dative_noun(noun: str) -> str:
     low = noun.casefold()
     if low.endswith("ия"):
@@ -4710,6 +4739,10 @@ def type_from_frame(
                 == "творческая работа"
             ):
                 return "творческая работа"
+            if _performed_process_conjuncts(_drop_leading_verb(planned_result)):
+                # Rehearsing the named ways of a movement is a practical lesson;
+                # «практикум» names a workshop built around one task product.
+                return "практическое занятие"
             return "практикум"
     lead = _leading_clause(frame)
     occupation = _clause_occupation_form(lead)
@@ -5940,8 +5973,6 @@ def _bare_list_without_action(source: str) -> bool:
     first = text.split()[0] if text.split() else ""
     if _nominal_activity_lemma(first) in _NOMINAL_PERFORM_LEMMAS:
         return False
-    if _technique_catalogue_head(first):
-        return False
     if _is_leading_form_activity(first) or _participation_lemma(first):
         return False
     if re.search(r"(?i)\b(?:их|его|её|ее)\b", unquoted):
@@ -6108,6 +6139,18 @@ def _coordinated_action_uncovered(clause: str, result: str) -> bool:
     return False
 
 
+def _ways_catalogue_uncovered(clause: str, result: str) -> bool:
+    """A named catalogue of ways stayed outside the performed action."""
+
+    folded = result.casefold()
+    for member in re.split(r"[,;]\s*|\s+и\s+", _normalize_spaces(clause)):
+        if not _leading_ways_catalogue(member):
+            continue
+        if member.strip(" .").casefold() not in folded:
+            return True
+    return False
+
+
 def _derive_week_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
@@ -6201,6 +6244,7 @@ def _derive_week_fields_v2(
             if (
                 not _nonempty_result_in(phrase, original.planned_result)
                 or _coordinated_action_uncovered(clause, original.planned_result)
+                or _ways_catalogue_uncovered(clause, original.planned_result)
             ):
                 uncovered.append(clause)
             continue
@@ -6260,7 +6304,9 @@ def _derive_week_fields_v2(
             controls.append(control)
         # A successful local repair may keep only one coordinated operation.
         # Do not certify the original clause as fully covered in that case.
-        if _coordinated_action_uncovered(clause, local.planned_result):
+        if _coordinated_action_uncovered(
+            clause, local.planned_result
+        ) or _ways_catalogue_uncovered(clause, local.planned_result):
             uncovered.append(clause)
     if retained and not retained_added:
         results.insert(0, original.planned_result)
@@ -6269,10 +6315,13 @@ def _derive_week_fields_v2(
         uncovered = [c for c in uncovered if not _retained_complement_covered(c, original)]
     warnings = tuple(w for w in original.warnings if not w.startswith("Безопасный шаблон CE2:"))
     warnings += tuple("NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + c for c in uncovered)
+    merged_result = _merge_independent_part_results(results)
     return replace(
         original,
-        planned_result=_merge_independent_part_results(results),
-        assessment_method=_join_control_clauses(controls),
+        planned_result=merged_result,
+        assessment_method=_unified_process_performance_control(
+            merged_result, _join_control_clauses(controls)
+        ),
         warnings=tuple(dict.fromkeys(warnings)),
         type_result=original.planned_result,
         clause_coverage=tuple(
@@ -6893,6 +6942,27 @@ def _fold_week_result(result: str) -> str:
 
     return _normalize_spaces(
         " ".join(_fold_repeated_predicates(_result_sentences(result)))
+    )
+
+
+def _unified_process_performance_control(result: str, control: str) -> str:
+    """One observation for a week folded into a single performance of processes.
+
+    Quoting each clause separately would repeat the finite verb and nest the
+    quotes the source already uses for the named ways of a movement.
+    """
+
+    actions = _result_actions(_fold_week_result(result))
+    if len(actions) != 1:
+        return control
+    verb, obj = actions[0]
+    if verb.casefold() != "выполняет" or not obj:
+        return control
+    if len(_performed_process_conjuncts(obj)) < 2:
+        return control
+    return _normalize_spaces(
+        "Педагогическое наблюдение за выполнением "
+        + _process_enumeration_to_genitive(obj)
     )
 
 

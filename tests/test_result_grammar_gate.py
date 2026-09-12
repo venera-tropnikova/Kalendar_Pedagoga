@@ -145,7 +145,6 @@ def test_topic_fallback_is_not_restored_by_citation_gate():
         ("Подъем «лесенкой».", "выполняет подъем «лесенкой»"),
         ("Спуск с холма.", "выполняет спуск с холма"),
         ("Преодоление препятствий на коньках.", "выполняет преодоление препятствий"),
-        ("Способы передвижения на коньках.", "выполняет способы передвижения"),
     ],
 )
 def test_practice_process_actions_become_finite_result(source, fragment):
@@ -170,6 +169,35 @@ def test_practice_process_actions_become_finite_result(source, fragment):
     )
 
 
+@pytest.mark.parametrize(
+    "source, kept",
+    [
+        ("Способы передвижения на коньках.", ""),
+        ("Спуск с холма, способы поворота.", "выполняет спуск с холма"),
+        ("Подъем «лесенкой», способы поворота.", "выполняет подъем «лесенкой»"),
+    ],
+)
+def test_ways_catalogue_is_not_a_performed_object(source, kept):
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=source,
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+    low = result.planned_result.casefold()
+    control = result.assessment_method.casefold()
+    assert "выполняет способ" not in low
+    assert "выполнением способ" not in control
+    if kept:
+        assert kept in low
+        assert "способ" not in low
+        assert "способ" not in control
+    else:
+        assert "по теме" in low or not low.strip()
+
+
 def test_practice_process_list_keeps_control_from_same_result():
     result = derive_fields_v2(
         topic_title="Учебная тема",
@@ -186,9 +214,15 @@ def test_practice_process_list_keeps_control_from_same_result():
     assert "выполняет" in low
     assert "торможение" in low
     assert "по теме" not in low
-    control = result.assessment_method.casefold()
-    assert "по теме" not in control
-    assert "торможен" in control or "выполнен" in control
+    control = result.assessment_method
+    assert "по теме" not in control.casefold()
+    assert control.startswith("Педагогическое наблюдение за выполнением ")
+    assert "торможения" in control
+    # One performance is observed once, so the finite verb is not repeated and
+    # the named ways of the movement keep their own quotes.
+    assert control.casefold().count("выполнен") == 1
+    assert "выполняет" not in control.casefold()
+    assert "»»" not in control
 
 
 def test_theory_process_noun_is_not_wrapped_as_performance():

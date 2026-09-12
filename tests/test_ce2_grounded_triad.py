@@ -1277,35 +1277,45 @@ def test_family_week_keeps_grounded_walk_not_quoted_event():
 
 
 def test_practice_technique_list_uses_source_actions():
-    derived = derive_fields_v2(
-        topic_title="Учебная тема",
-        theory_text="",
-        practice_text=(
-            "Способы передвижения на лыжах. "
-            "Подъем «лесенкой», «ёлочкой». "
-            "Спуск с горы, способы поворота. "
-            "Торможение. "
-            "Преодоление препятствий на лыжах."
-        ),
-        program_content="",
-        theory_hours=0,
-        practice_hours=2,
+    generated = build_lesson_content_v2(
+        (
+            _synthetic_week(
+                (
+                    "3.2",
+                    "Учебная тема",
+                    "Одежда, зимний инвентарь.\n"
+                    "Практика. Способы передвижения на лыжах. "
+                    "Подъем «лесенкой», «ёлочкой». "
+                    "Спуск с горы, способы поворота. "
+                    "Торможение. "
+                    "Преодоление препятствий на лыжах.",
+                    0,
+                    2,
+                )
+            ),
+        )
+    )[0]
+    assert generated.planned_result == (
+        "Выполняет подъем «лесенкой», «ёлочкой», спуск с горы, торможение, "
+        "преодоление препятствий на лыжах."
     )
-    low = derived.planned_result.casefold()
-    assert low.startswith("выполняет")
-    assert "по теме" not in low
-    assert "способы передвижения" in low
-    assert "подъем" in low.replace("ё", "е")
-    assert "спуск" in low
-    assert "торможение" in low
-    assert "преодоление" in low
+    assert generated.assessment_method == (
+        "Педагогическое наблюдение за выполнением подъема «лесенкой», «ёлочкой», "
+        "спуска с горы, торможения, преодоления препятствий на лыжах"
+    )
+    assert generated.lesson_type == "практическое занятие"
+    low = generated.planned_result.casefold()
+    control = generated.assessment_method.casefold()
     assert "тормозит" not in low
     assert "преодолевает" not in low
-    control = derived.assessment_method.casefold()
-    assert control
-    assert "по теме" not in control
-    assert control.startswith("педагогическое наблюдение")
-    assert "выполнен" in control
+    # A catalogue of ways is named, not performed, and its clause is reported.
+    assert "способ" not in low
+    assert "способ" not in control
+    assert any("Способы передвижения на лыжах" in item for item in generated.warnings)
+    # One observation of one performance: no repeated verb, no nested quotes.
+    assert control.count("выполнен") == 1
+    assert "выполняет" not in control
+    assert "»»" not in generated.assessment_method
 
 
 @pytest.mark.parametrize(
