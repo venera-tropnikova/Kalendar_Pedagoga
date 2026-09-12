@@ -905,6 +905,29 @@ def _append_remainder(phrase: str, remainder: str) -> str:
     return _normalize_spaces(f"{phrase} {remainder}")
 
 
+def _starts_direct_activity_catalogue(remainder: str) -> bool:
+    """Whether a colon labels the leading activity itself, not its context.
+
+    A catalogue immediately governed by a nominal process is not evidence that
+    the process is performed (``Преодоление препятствий: крутые склоны``).
+    Colons can also occur inside a proven means phrase, or in a later labelled
+    block kept in the same clause after an abbreviated duration.  Those colons
+    must not invalidate the leading activity.
+    """
+
+    before, separator, _tail = _normalize_spaces(remainder).partition(":")
+    if not separator:
+        return False
+    if re.search(
+        r"(?i)\b(?:при\s+помощи|с\s+помощью|посредством|с\s+использованием)\b",
+        before,
+    ):
+        return False
+    if re.search(r"[.!?]\)\s+[А-ЯЁ][^:]*$", before):
+        return False
+    return True
+
+
 def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
     """Safe NP → finite RESULT. Returns None when the action cannot be proven."""
 
@@ -916,7 +939,10 @@ def _match_nominal_activity_np(text: str) -> tuple[str, str, str, str] | None:
     lemma = _nominal_activity_lemma(head)
     if _remainder_contains_finite_action(remainder):
         return None
-    if ":" in remainder and lemma in _NOMINAL_PERFORM_LEMMAS | {"преодоление"}:
+    if (
+        lemma in _NOMINAL_PERFORM_LEMMAS | {"преодоление"}
+        and _starts_direct_activity_catalogue(remainder)
+    ):
         return None
     if _technique_process_lemma(head):
         remainder = _drop_ways_catalogue_tail(remainder)

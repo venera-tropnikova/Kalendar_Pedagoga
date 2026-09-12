@@ -275,6 +275,48 @@ def test_colon_catalogue_after_process_is_not_performed_activity():
     assert "преодолевает" not in low
 
 
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "Тренировка равновесия при помощи игр на площадке: «Сигнал», «Старт».",
+            "Отрабатывает равновесие при помощи игр на площадке: «Сигнал», «Старт».",
+        ),
+        (
+            "Катание на коньках (5 мин.) Комплекс упражнений: повороты, торможение.",
+            "Выполняет катание на коньках (5 мин.) Комплекс упражнений: "
+            "повороты, торможение.",
+        ),
+    ],
+)
+def test_context_catalogue_does_not_hide_leading_activity(source, expected):
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text=source,
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert result.planned_result == expected
+
+
+def test_direct_catalogue_stays_unconverted_even_with_a_place_phrase():
+    result = derive_fields_v2(
+        topic_title="Учебная тема",
+        theory_text="",
+        practice_text="Преодоление препятствий на маршруте: крутые склоны.",
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    low = result.planned_result.casefold()
+    assert "выполняет преодоление" not in low
+    assert "преодолевает" not in low
+
+
 @pytest.mark.parametrize("text, expected", [
     # A further member of an open prepositional group keeps the same case and
     # is coordinated with the member before it.

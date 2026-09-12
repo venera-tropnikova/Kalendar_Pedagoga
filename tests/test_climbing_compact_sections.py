@@ -529,6 +529,56 @@ def test_training_nominal_produces_observable_grounded_triad() -> None:
     )
 
 
+def test_training_game_catalogue_keeps_climbing_week_actions() -> None:
+    result = derive_fields_v2(
+        topic_title="Знакомство со скалолазанием",
+        theory_text="",
+        practice_text=(
+            "Тренировка постановки ног при помощи игр на скалодроме: "
+            "«Земля, вода, лава», «Выше ноги от земли». "
+            "Тренировка распределения веса центра тяжести на ноги при помощи "
+            "игр на скалодроме: «Обруч», «Подарочек»."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert result.planned_result == (
+        "Отрабатывает постановку ног при помощи игр на скалодроме: "
+        "«Земля, вода, лава», «Выше ноги от земли». Отрабатывает "
+        "распределение веса центра тяжести на ноги при помощи игр на "
+        "скалодроме: «Обруч», «Подарочек»."
+    )
+    assert result.assessment_method
+
+
+def test_later_labelled_ofp_block_does_not_hide_leading_climbing_action() -> None:
+    result = derive_fields_v2(
+        topic_title="Основы скалолазания",
+        theory_text="",
+        practice_text=(
+            "Изучение техники самостраховки. Лазание трасс средней сложности "
+            "на время (5 мин.) Круговое ОФП: планка, прыжки, подъем ног в висе, "
+            "«складочки», стульчик (2 круга). Отработка гимнастической страховки "
+            "напарника."
+        ),
+        program_content="",
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert "Выполняет лазание трасс средней сложности на время (5 мин.)" in (
+        result.planned_result
+    )
+    assert "Круговое ОФП: планка, прыжки, подъем ног в висе" in (
+        result.planned_result
+    )
+    assert "Отрабатывает технику самостраховки" in result.planned_result
+    assert "Отрабатывает гимнастическую страховку напарника" in result.planned_result
+    assert result.assessment_method
+
+
 def test_practical_study_of_technique_becomes_observable_rehearsal() -> None:
     result = derive_fields_v2(
         topic_title="Техника лазания",
