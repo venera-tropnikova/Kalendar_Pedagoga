@@ -207,6 +207,10 @@ _W9_PRACTICE = (
     "Коллективные приседания (50 раз)."
 )
 _W9_PREFIX_LEN = 715
+_W9_INTERIOR_DUPLICATE = (
+    "Круговое ОФП: планка, выпрыгивание, вис на турнике, «складочки», "
+    "обратное отжимание от скамейки (2 круга). Коллективные приседания (40 раз)."
+)
 
 
 def _w9_source():
@@ -262,6 +266,52 @@ def test_w9_repeat_plus_foreign_text_still_fails_closed(monkeypatch):
     assert diag.get('week') == '9'
     assert diag.get('column') == 4
     assert diag.get('matched_length') == _W9_PREFIX_LEN
+
+
+def test_w9_interior_duplicate_continues_next_fragment(monkeypatch):
+    target = qa._normalize_match_text(_W9_PRACTICE)
+    prefix = target[:_W9_PREFIX_LEN]
+    interior = qa._normalize_match_text(_W9_INTERIOR_DUPLICATE)
+    rest = target[_W9_PREFIX_LEN:]
+    assert interior
+    assert interior in prefix
+    assert not prefix.endswith(interior)
+    assert qa._absorb_normalized_fragment(target, prefix, interior) == prefix
+    _pdf(
+        monkeypatch,
+        [
+            [_w9_row(prefix)],
+            [_w9_row(interior)],
+            [_w9_row(rest), ['Ноябрь', '10\n02–08.11', '', '', 'хвост', 'игра', 'далее', 'контроль']],
+        ],
+        cols=8,
+    )
+    layouts = qa._data_row_page_layout_pdf(_w9_source(), b'pdf', 2)
+    assert layouts is not None
+    first = layouts[0].segments
+    assert qa._SEGMENTATION_DIAG.get('result') == 'ok'
+    assert ''.join(segment.cells[4] for segment in first) == _W9_PRACTICE
+
+
+def test_w9_interior_duplicate_plus_foreign_text_fails_closed(monkeypatch):
+    target = qa._normalize_match_text(_W9_PRACTICE)
+    prefix = target[:_W9_PREFIX_LEN]
+    interior = qa._normalize_match_text(_W9_INTERIOR_DUPLICATE)
+    assert qa._absorb_normalized_fragment(target, prefix, interior + 'чужойтекст') is None
+    _pdf(
+        monkeypatch,
+        [
+            [_w9_row(prefix)],
+            [_w9_row(interior + 'чужойтекст')],
+        ],
+        cols=8,
+    )
+    assert qa._data_row_page_layout_pdf(_w9_source(), b'pdf', 2) is None
+    diag = qa._SEGMENTATION_DIAG
+    assert diag.get('result') == 'prefix_mismatch'
+    assert diag.get('week') == '9'
+    assert diag.get('column') == 4
+    assert diag.get('matched_length') >= _W9_PREFIX_LEN
 
 
 def test_physical_page_segments_center_vertical_month_and_week_cells():

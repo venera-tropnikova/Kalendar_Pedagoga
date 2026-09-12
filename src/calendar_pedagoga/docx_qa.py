@@ -862,6 +862,31 @@ def _exact_repeat_of_matched_fragment(
     }
 
 
+def _leading_exact_matched_duplicate_length(
+    fragment: str,
+    accumulated: str,
+    matched_fragments: tuple[str, ...] = (),
+) -> int:
+    """Longest exact leading copy of an already matched span of this cell.
+
+    Approximate or token-wise matches are rejected: the prefix must equal a
+    previous page-fragment or a contiguous substring of *accumulated*.
+    """
+
+    if not fragment or not accumulated:
+        return 0
+    best = 0
+    if fragment.startswith(accumulated):
+        best = len(accumulated)
+    for piece in matched_fragments:
+        if piece and fragment.startswith(piece):
+            best = max(best, len(piece))
+    for length in range(len(fragment), best, -1):
+        if fragment[:length] in accumulated:
+            return length
+    return best
+
+
 def _absorb_normalized_fragment(
     target: str,
     accumulated: str,
@@ -870,9 +895,10 @@ def _absorb_normalized_fragment(
 ) -> str | None:
     """Append a PDF fragment; a hyphenated word may repeat its already seen stem.
 
-    A PDF cell may also append an exact copy of an already matched fragment of
-    this same source cell instead of the source continuation. That duplicate is
-    ignored. Any new or foreign text still fails closed.
+    LibreOffice may also restart an earlier exact span of this same source cell
+    instead of the source continuation. Only that proven duplicate is dropped.
+    Whatever remains must continue *target* from the current match index.
+    Any new, rearranged or missing text still fails closed.
     """
 
     if not fragment:
@@ -897,6 +923,17 @@ def _absorb_normalized_fragment(
         remainder, matched_text, accumulated, matched_fragments
     ):
         return matched_text
+    duplicate = _leading_exact_matched_duplicate_length(
+        fragment, accumulated, matched_fragments
+    )
+    if not duplicate:
+        return None
+    leftover = fragment[duplicate:]
+    if not leftover:
+        return accumulated
+    continued = accumulated + leftover
+    if target.startswith(continued):
+        return continued
     return None
 
 
