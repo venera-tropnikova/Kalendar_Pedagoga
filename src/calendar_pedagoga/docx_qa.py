@@ -7,6 +7,7 @@ from enum import StrEnum
 from io import BytesIO
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -497,6 +498,67 @@ def _record_segmentation_diag(**fields: object) -> None:
 
     _SEGMENTATION_DIAG.clear()
     _SEGMENTATION_DIAG.update(fields)
+
+
+def _running_build_commit() -> str:
+    for key in ("RENDER_GIT_COMMIT", "GIT_COMMIT"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    try:
+        result = subprocess.run(
+            ["git", "-c", "safe.directory=*", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    output = (result.stdout or "").strip()
+    return output or "unknown"
+
+
+def _emit_qa_probe(text: str) -> None:
+    print(text, file=sys.stderr, flush=True)
+    original = getattr(sys, "__stderr__", None)
+    if original is not None and original is not sys.stderr:
+        print(text, file=original, flush=True)
+
+
+def _probe_w9_prefix_mismatch(
+    *,
+    target: str,
+    accumulated: str,
+    fragment: str,
+    matched_fragments: tuple[str, ...],
+) -> None:
+    """Temporary Render probe. Does not decide matching."""
+
+    proposed = accumulated + fragment
+    matched_length = 0
+    limit = min(len(target), len(proposed))
+    while matched_length < limit and target[matched_length] == proposed[matched_length]:
+        matched_length += 1
+    remainder = proposed[matched_length:]
+    already_matched = target[:matched_length]
+    duplicate_length = _leading_exact_matched_duplicate_length(
+        remainder, already_matched, matched_fragments
+    )
+    lines = [
+        "QA_PROBE_W9",
+        f"BUILD_COMMIT={_running_build_commit()}",
+        f"matched_text = {fragment[:715]!r}",
+        f"remainder = {fragment[715:]!r}",
+        f"source_tail = {target[715:815]!r}",
+        "duplicate_offset = 0",
+        f"duplicate_length = {duplicate_length}",
+        f"duplicate_text = {remainder[:duplicate_length]!r}",
+        f"remainder_after_strip = {remainder[duplicate_length:]!r}",
+        f"normalized_fragment = {fragment!r}",
+        f"accumulated_length = {len(accumulated)}",
+        f"proposed_matched_length = {matched_length}",
+    ]
+    _emit_qa_probe("\n".join(lines))
 
 
 def _week_label_from_cells(source_cells: list[list[str]], row_index: int) -> str:
@@ -1078,12 +1140,20 @@ def _data_row_page_layout_pdf(
                         already_matched,
                     )
                     if absorbed is None:
+                        week_label = _week_label_from_cells(source_cells, row_index)
+                        if week_label == "9" and column == 4 and page_number == 9:
+                            _probe_w9_prefix_mismatch(
+                                target=target[column],
+                                accumulated=accumulated[column],
+                                fragment=fragment_text,
+                                matched_fragments=already_matched,
+                            )
                         _record_segmentation_diag(
                             result="prefix_mismatch",
                             page=page_number,
                             pages=page_count,
                             logical_row=row_index + 1,
-                            week=_week_label_from_cells(source_cells, row_index),
+                            week=week_label,
                             column=column,
                             layouts_done=len(layouts),
                             total_rows=total_rows,
