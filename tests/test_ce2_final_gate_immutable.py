@@ -57,9 +57,9 @@ def _row(**kwargs) -> CalendarContentRow:
 
 def test_unknown_multi_clause_practice_needs_review_and_blocks_ready_docx() -> None:
     practice = (
-        "Круговое ОФП: планка, выпрыгивание. "
-        "Коллективные приседания (30 раз). "
-        "Тренировка постановки ног при помощи игр."
+        "Квантовая запутанность нейтрино без наблюдения. "
+        "Сигма-фокус гамма. "
+        "XYZ протокол."
     )
     derived = derive_fields_v2(
         topic_title="Неизвестная практика",

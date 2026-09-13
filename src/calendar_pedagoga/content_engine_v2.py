@@ -150,6 +150,12 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "заслушивание": "заслушивает",
     "прохождение": "проходит",
     "сбор": "собирает",
+    "огибание": "огибает",
+    "переноска": "переносит",
+    "перенос": "переносит",
+    "надевание": "надевает",
+    "выпрыгивание": "выпрыгивает",
+    "преодоление": "преодолевает",
 }
 
 _KNOWLEDGE_NOUNS = {
@@ -910,14 +916,31 @@ def _starts_new_action(tokens: list[str], index: int) -> bool:
 def _has_explicit_action_catalogue(text: str) -> bool:
     """Colon marks accepted parallel objects, not new independent actions."""
     head, separator, tail = text.partition(":")
-    if not separator or not re.search(
-        r"(?i)\b(?:при[её]м|элемент|техник|способ|действ|упражнен)\w*\s*$", head
-    ):
+    if not separator:
+        return False
+    head_low = head.casefold().strip()
+    catalogue_head = bool(
+        re.search(
+            r"(?i)\b(?:при[её]м|элемент|техник|способ|действ|упражнен|препятств|офп)\w*\s*$",
+            head,
+        )
+        or re.search(r"(?i)\b(?:круговое\s+)?офп\b", head_low)
+        or re.search(
+            r"(?i)\b(?:тренировка|преодоление|отработка|выполнение|изучение)\b",
+            head_low,
+        )
+    )
+    if not catalogue_head:
         return False
     members = [item.strip() for item in tail.rstrip(".").split(",")]
-    return len(members) > 1 and all(
-        member and len(member.split()) <= 5
-        and not re.search(r"[.;:!?]", member)
+    if not members or not all(members):
+        return False
+    # Quoted exemplars after an action head stay in one segment.
+    if all(re.fullmatch(r"[«\"].+[»\"]", member) for member in members):
+        return True
+    return all(
+        len(member.split()) <= 8
+        and not re.search(r"[.;!?]", member)
         and not _FINITE_VERB_RE.match(member)
         for member in members
     )
@@ -927,8 +950,26 @@ def _split_action_segments(text: str) -> list[str]:
     """Режет клаузу только перед новым действием, не внутри объекта."""
 
     parts: list[str] = []
-    if _has_explicit_action_catalogue(text):
-        return [text.strip(" ,")]
+    stripped = text.strip(" ,")
+    if _has_explicit_action_catalogue(stripped):
+        return [stripped]
+    # Keep «A, B и C + shared object» as one explicit coordinated action.
+    if re.match(
+        r"(?i)^(?:[А-Яа-яЁё\-]+(?:\s*,\s*[А-Яа-яЁё\-]+)*)\s+и\s+"
+        r"[А-Яа-яЁё\-]+\s+\S+",
+        stripped,
+    ):
+        heads_match = re.match(
+            r"(?i)^((?:[А-Яа-яЁё\-]+(?:\s*,\s*[А-Яа-яЁё\-]+)*))\s+и\s+"
+            r"([А-Яа-яЁё\-]+)\s+",
+            stripped,
+        )
+        if heads_match:
+            heads = [item.strip() for item in heads_match.group(1).split(",")] + [
+                heads_match.group(2)
+            ]
+            if len(heads) >= 2 and all(_is_explicit_action_head_token(head) for head in heads):
+                return [stripped]
     buf: list[str] = []
     tokens = text.split()
     index = 0
@@ -1736,6 +1777,353 @@ def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
     )
 
 
+def _r13_must_abstain_action_reconstruction(text: str) -> bool:
+    """R13 safety BEFORE positive action reconstruction.
+
+    Prohibition, action-scoped negation, alternative OR, bare condition, or an
+    unclear non-student executor must abstain rather than invent a positive RESULT.
+    """
+
+    cleaned = _normalize_spaces(text)
+    if not cleaned:
+        return False
+    if _prohibition_only_source(cleaned):
+        return True
+    low = cleaned.casefold()
+    if re.search(r"(?i)\b(?:запрещ\w*|нельзя|не\s+допускается|не\s+разрешается)\b", low):
+        return True
+    if re.search(
+        r"(?i)\bне\s+(?:выполнять|выполняет|проводить|использовать|применять|"
+        r"начинать|открывать|трогать|лазать)\b",
+        low,
+    ):
+        return True
+    if re.search(r"(?i)\bне\s+[а-яё]+йте(?:сь)?\b", low):
+        return True
+    # Alternative between explicit actions / verbal nouns.
+    if re.search(
+        r"(?i)\b(?:выполнение|изучение|отработка|тренировка|использование|"
+        r"фасовка|упаковка|переноска)\b"
+        r".{0,80}\bили\b.{0,80}\b"
+        r"(?:выполнение|изучение|отработка|тренировка|использование|"
+        r"фасовка|упаковка|переноска|[а-яё]+ни[ея]|[а-яё]+ка)\b",
+        low,
+    ):
+        return True
+    # Condition-only fragment (no governing explicit action head).
+    if re.match(
+        r"(?i)^(?:если|при\s+условии|в\s+случае|без\b(?!\s+ошибок))",
+        low,
+    ) and not _VERBAL_NOUN_FIND_RE.search(cleaned):
+        return True
+    # Unclear non-student executor as the clause subject.
+    if re.match(r"(?i)^(?:педагог|учитель|инструктор|тренер)\b", low) and not re.search(
+        r"(?i)\b(?:ученик|ученица|учащ|обуча|реб[её]нок|дети)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+_EXPLICIT_ACTION_HEADS = frozenset(
+    {
+        "выполнение",
+        "изучение",
+        "знакомство",
+        "отработка",
+        "тренировка",
+        "преодоление",
+        "подготовка",
+        "использование",
+        "надевание",
+        "фасовка",
+        "упаковка",
+        "переноска",
+        "перенос",
+        "составление",
+        "измерение",
+        "оценка",
+        "сбор",
+        "разработка",
+        "проведение",
+        "формирование",
+        "огибание",
+        "постановка",
+    }
+)
+_DRILL_ACTIVITY_RE = re.compile(
+    r"(?i)^(?:приседан|отжиман|выпрыг|подтягиван|прыжк|плаван|"
+    r"вис(?:ы|а|у|ом|ах)?|планка|складочк|стульчик)\w*$"
+)
+
+
+def _is_explicit_action_head_token(word: str) -> bool:
+    core = _token_core(word)
+    if not core:
+        return False
+    lemma = _verbal_noun_lemma(core).casefold()
+    if lemma in _EXPLICIT_ACTION_HEADS or core.casefold() in _EXPLICIT_ACTION_HEADS:
+        return True
+    if _conjugate_verbal_noun(core):
+        return True
+    if _nominal_activity_lemma(core) in _NOMINAL_PERFORM_LEMMAS:
+        return True
+    return False
+
+
+def _is_drill_activity_token(word: str) -> bool:
+    core = re.sub(r"[^\wёЁ]", "", _token_core(word), flags=re.IGNORECASE).casefold()
+    return bool(_DRILL_ACTIVITY_RE.fullmatch(core))
+
+
+def _strip_parenthetical_examples(text: str) -> tuple[str, str]:
+    """Keep governing action text; return (main, example_tail)."""
+
+    cleaned = _normalize_spaces(text)
+    if ":" not in cleaned:
+        return cleaned, ""
+    head, sep, tail = cleaned.partition(":")
+    members = [item.strip() for item in re.split(r"\s*,\s*", tail.strip(" .")) if item.strip()]
+    if members and all(
+        re.fullmatch(r"[«\"].+[»\"]", member) or member.startswith("«") for member in members
+    ):
+        return head.strip(), tail.strip()
+    return cleaned, ""
+
+
+def _conjugate_explicit_action_head(head: str) -> str | None:
+    verb = _conjugate_verbal_noun(head)
+    if verb:
+        return verb
+    lemma = _verbal_noun_lemma(head).casefold()
+    if lemma == "тренировка" or _nominal_activity_lemma(head) == "тренировка":
+        return "отрабатывает"
+    if lemma in _NOMINAL_PERFORM_LEMMAS:
+        return None
+    return None
+
+
+def _reconstruct_coordinated_explicit_actions(
+    text: str,
+) -> tuple[str, str, str, str] | None:
+    """A, B и C + shared object → finite verbs for each explicit action head."""
+
+    cleaned = _normalize_spaces(text).strip(" ,")
+    if not cleaned or re.search(r"(?i)\s+или\s+", cleaned):
+        return None
+    match = re.match(
+        r"(?i)^((?:[А-Яа-яЁё\-]+(?:\s*,\s*[А-Яа-яЁё\-]+)*))\s+и\s+"
+        r"([А-Яа-яЁё\-]+)\s+(.+)$",
+        cleaned,
+    )
+    if not match:
+        return None
+    left_blob, last_head, remainder = match.group(1), match.group(2), match.group(3)
+    heads = [item.strip() for item in left_blob.split(",")] + [last_head]
+    if len(heads) < 2 or not all(_is_explicit_action_head_token(head) for head in heads):
+        return None
+    verbs: list[str] = []
+    for head in heads:
+        verb = _conjugate_explicit_action_head(head)
+        if not verb:
+            return None
+        verbs.append(verb)
+    obj_acc, cond = _complements_after_finite(remainder)
+    phrase = ", ".join(verbs[:-1]) + " и " + verbs[-1] if len(verbs) > 2 else " и ".join(verbs)
+    if obj_acc:
+        phrase += f" {obj_acc}"
+    if cond:
+        phrase += f" {cond}"
+    obj, split_cond = _split_object_and_conditions(remainder)
+    return (
+        _normalize_spaces(phrase),
+        " и ".join(heads),
+        obj,
+        split_cond or cond,
+    )
+
+
+def _reconstruct_action_object_list(text: str) -> tuple[str, str, str, str] | None:
+    """Explicit action head + object / object list (optional colon catalogue)."""
+
+    cleaned = _normalize_spaces(text).strip(" ,")
+    if not cleaned:
+        return None
+    main, example_tail = _strip_parenthetical_examples(cleaned)
+    tokens = main.split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head, remainder = _head_core_and_remainder(rest)
+    lemma = _verbal_noun_lemma(head).casefold()
+    nom = _nominal_activity_lemma(head)
+    ofp = bool(re.fullmatch(r"(?i)офп", head)) or "офп" in main.casefold() and ":" in cleaned
+
+    if ofp or (re.match(r"(?i)^(?:круговое\s+)?офп\b", cleaned) and ":" in cleaned):
+        # Circuit / ОФП catalogue: keep members, do not invent separate drills.
+        label, _, tail = cleaned.partition(":")
+        np_words = [_decap_lexical(tok) for tok in label.split()]
+        phrase = _append_remainder("выполняет " + " ".join(np_words), ": " + tail.strip())
+        obj, cond = _split_object_and_conditions(tail.strip())
+        return phrase, "офп", obj, cond
+
+    if not (
+        lemma in _EXPLICIT_ACTION_HEADS
+        or nom in _NOMINAL_PERFORM_LEMMAS
+        or _conjugate_verbal_noun(head)
+    ):
+        return None
+
+    # Drop colon only when it introduces exemplars; keep object catalogues.
+    work_remainder = remainder
+    if example_tail and ":" in cleaned:
+        work_remainder = remainder.split(":", 1)[0].strip() if ":" in remainder else remainder
+
+    verb = _conjugate_explicit_action_head(head)
+    if verb is None and nom in _NOMINAL_PERFORM_LEMMAS and nom != "тренировка":
+        # Fall through to nominal layer.
+        return None
+    if verb is None:
+        return None
+
+    if lemma == "изучение" and re.search(
+        r"(?i)\b(?:комплекс\w*\s+упражнен|упражнен|техник|выполнен|при[её]м|"
+        r"страхов|самострах|лазани|движен)\w*",
+        work_remainder,
+    ):
+        verb = "отрабатывает"
+
+    if mods and mods[0].casefold().endswith("ое"):
+        verb = "практически " + verb
+
+    obj_acc, cond = _complements_after_finite(work_remainder)
+    phrase = verb
+    if obj_acc:
+        phrase += f" {obj_acc}"
+    if cond:
+        phrase += f" {cond}"
+    # Retain non-example object catalogue after colon (преодоление: A, B).
+    if ":" in remainder and not example_tail:
+        after = remainder.split(":", 1)[1].strip()
+        if after and after.casefold() not in phrase.casefold():
+            phrase = _append_remainder(phrase, ": " + after)
+    obj, split_cond = _split_object_and_conditions(work_remainder)
+    return _normalize_spaces(phrase), lemma or head.casefold(), obj, split_cond or cond
+
+
+def _reconstruct_explicit_drill_np(text: str) -> tuple[str, str, str, str] | None:
+    """Adjective* + drill noun (+ quantity) → выполняет + source NP."""
+
+    cleaned = _normalize_spaces(text).strip(" ,")
+    if not cleaned or ":" in cleaned:
+        return None
+    tokens = cleaned.split()
+    if not tokens:
+        return None
+    # Collect leading adjectives, then a drill head.
+    mods: list[str] = []
+    rest = list(tokens)
+    while rest and _is_adjective(rest[0]) and not _is_drill_activity_token(rest[0]):
+        mods.append(rest.pop(0))
+    if not rest or not _is_drill_activity_token(rest[0]):
+        return None
+    head = rest[0]
+    remainder = " ".join(rest[1:]).strip()
+    # Require quantity or a short drill NP — never bare topic nouns.
+    if remainder and not (
+        _clause_has_performance_quantity(cleaned)
+        or re.match(r"(?i)^\(", remainder)
+        or _is_preposition(remainder.split()[0])
+    ):
+        # Object/PP after drill is allowed; reject long foreign content.
+        if len(remainder.split()) > 6:
+            return None
+    np_words = [_decap_lexical(mod) for mod in mods] + [
+        _decap_lexical(_noun_nom_to_acc(head) if not head.casefold().endswith(("я", "и", "ы")) else head)
+    ]
+    phrase = _append_remainder("выполняет " + " ".join(np_words), remainder)
+    obj, cond = _split_object_and_conditions(remainder)
+    return phrase, head.casefold(), obj, cond
+
+
+def _reconstruct_unconjugated_process_with_object(
+    text: str,
+) -> tuple[str, str, str, str] | None:
+    """Explicit process VN + object/path that lacks a mapped finite verb."""
+
+    cleaned = _normalize_spaces(text).strip(" ,")
+    if not cleaned or ":" in cleaned:
+        return None
+    tokens = cleaned.split()
+    mods, rest = _leading_modifiers(tokens)
+    if not rest:
+        return None
+    head, remainder = _head_core_and_remainder(rest)
+    if not remainder.strip():
+        return None
+    if _conjugate_verbal_noun(head):
+        return None
+    lemma = _verbal_noun_lemma(head).casefold()
+    if (
+        _is_theory_knowledge_token(head)
+        or lemma in _THEORY_KNOWLEDGE_HEADS
+        or lemma in _STATE_OR_KNOWLEDGE_LEMMAS
+        or _clause_is_knowledge_content(cleaned)
+    ):
+        return None
+    if not _is_unconjugated_process_noun(head) and not _is_explicit_action_head_token(head):
+        return None
+    if not (
+        _remainder_is_dependent_object(remainder)
+        or _remainder_is_path_or_manner_complement(remainder)
+    ):
+        return None
+    if _remainder_is_knowledge_np(remainder) or _remainder_is_quoted_label(remainder):
+        return None
+    obj_np = _practice_activity_np_object(mods, head, remainder)
+    obj, cond = _split_object_and_conditions(remainder)
+    return (
+        _normalize_spaces("выполняет " + obj_np),
+        head.casefold(),
+        obj,
+        cond,
+    )
+
+
+def _explicit_action_reconstruction(
+    text: str,
+    *,
+    theory_only: bool,
+) -> tuple[str, str, str, str] | None:
+    """Universal EXPLICIT ACTION RECONSTRUCTION for practice SOURCE clauses.
+
+    Covers: verbal noun → finite, coordinated actions, shared head + objects,
+    action + object list. Does not invent actions for bare topic nouns or theory.
+    """
+
+    if theory_only:
+        return None
+    cleaned = _normalize_spaces(text).strip(" ,")
+    if not cleaned:
+        return None
+    if _r13_must_abstain_action_reconstruction(cleaned):
+        return None
+
+    coordinated = _reconstruct_coordinated_explicit_actions(cleaned)
+    if coordinated:
+        return coordinated
+    listed = _reconstruct_action_object_list(cleaned)
+    if listed:
+        return listed
+    drill = _reconstruct_explicit_drill_np(cleaned)
+    if drill:
+        return drill
+    process = _reconstruct_unconjugated_process_with_object(cleaned)
+    if process:
+        return process
+    return None
+
+
 def _is_shared_object_action_head(word: str) -> bool:
     """True when the token names a proven pupil action, finite or nominal."""
 
@@ -1818,6 +2206,8 @@ def _transform_segment(
     text = _normalize_spaces(segment).strip(" ,")
     if not text:
         return "", "", "", ""
+    if _r13_must_abstain_action_reconstruction(text):
+        return "", "", "", ""
     if _is_non_student_process(text):
         return _characterize(text)
 
@@ -1827,6 +2217,9 @@ def _transform_segment(
         return phrase, action, obj, ""
 
     if not theory_only:
+        reconstructed = _explicit_action_reconstruction(text, theory_only=theory_only)
+        if reconstructed:
+            return reconstructed
         paired = _shared_object_after_paired_verbs(text)
         if paired:
             phrase, action, rest = paired
@@ -3007,6 +3400,8 @@ def _transform_clause_candidate(
     )
     if not source_clause:
         return "", ActionFrame("", "", "", "")
+    if _r13_must_abstain_action_reconstruction(source_clause):
+        return "", ActionFrame(source_clause, "", "", "")
 
     action_parens: list[str] = []
 
