@@ -449,8 +449,27 @@ def _noun_nom_to_acc(word: str) -> str:
     if low.endswith("я") and not low.endswith("ия"):
         return word[:-1] + "ю"
     if low.endswith("а"):
+        # Neuter/inanimate plural -а (правила, средства, места): accusative
+        # equals nominative. Do not invent feminine-looking -у.
+        if _neuter_plural_nom_a(low):
+            return word
         return word[:-1] + "у"
     return word
+
+
+def _neuter_plural_nom_a(low: str) -> bool:
+    """Nominative plural of a neuter -о/-е noun: accusative repeats nominative."""
+
+    if not low.endswith("а") or len(low) < 5:
+        return False
+    stem = low[:-1]
+    # правило→правила, средство→средства, место→места / дело→дела.
+    if stem.endswith(("ств", "ил")):
+        return True
+    vowels = re.findall(r"(?i)[аеёиоуыэюя]", low)
+    if len(vowels) == 2 and re.search(r"(?i)[^аеёиоуыэюя][^аеёиоуыэюя]$", stem):
+        return True
+    return False
 
 
 def _match_caps(src: str, dst: str) -> str:
@@ -1410,14 +1429,51 @@ def _one_participation_object(part: str) -> str | None:
     return _normalize_spaces(" ".join(words))
 
 
+def _split_coordinating_и_outside_quotes(text: str) -> list[str]:
+    """Split on comma / « и » that are not inside «…» or \"…\" quotes."""
+
+    parts: list[str] = []
+    buf: list[str] = []
+    quote_depth = 0
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if ch in {"«", '"'} and quote_depth == 0:
+            quote_depth += 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch in {"»", '"'} and quote_depth:
+            quote_depth = max(0, quote_depth - 1)
+            buf.append(ch)
+            index += 1
+            continue
+        if quote_depth == 0 and text[index : index + 2] == ", ":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            index += 2
+            continue
+        if quote_depth == 0 and text[index : index + 3].casefold() == " и ":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            index += 3
+            continue
+        buf.append(ch)
+        index += 1
+    piece = "".join(buf).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
 def _participation_object_parts(clause: str) -> tuple[list[str], str]:
     text = _normalize_spaces(clause)
     head, _colon, tail = text.partition(":")
-    pieces = [
-        part.strip()
-        for part in re.split(r"(?:,\s+|\s+и\s+)", head)
-        if part.strip()
-    ]
+    pieces = _split_coordinating_и_outside_quotes(head)
     objects = []
     for part in pieces:
         built = _one_participation_object(part)
@@ -1578,17 +1634,21 @@ def _remainder_is_dependent_object(remainder: str) -> bool:
 
 
 # Path/manner PPs specify how a process is performed, not a knowledge field.
-_PATH_MANNER_PREPOSITIONS = frozenset({"по", "вдоль", "через", "вокруг"})
+_PATH_MANNER_PREPOSITIONS = frozenset({"по", "вдоль", "через", "вокруг", "на"})
 
 
 def _remainder_is_path_or_manner_complement(remainder: str) -> bool:
-    """Restrictive path/manner PP: «по маршруту», not a topic field «о X»."""
+    """Restrictive path/manner PP: «по маршруту», «на тему …», not «о X»."""
 
     text = _normalize_spaces(remainder)
     if not text or text.startswith(":") or _remainder_is_quoted_label(text):
         return False
     tokens = text.split()
-    if tokens[0].casefold() not in _PATH_MANNER_PREPOSITIONS:
+    first = tokens[0].casefold()
+    if first not in _PATH_MANNER_PREPOSITIONS:
+        return False
+    # «на» is productive only for topic/theme complements of a product activity.
+    if first == "на" and not re.match(r"(?i)^на\s+тему\b", text):
         return False
     return len(tokens) >= 2 and not _remainder_is_knowledge_np(text)
 
@@ -1603,6 +1663,9 @@ def _is_unconjugated_process_noun(head: str) -> bool:
         return False
     if _is_exercise_word(head):
         return False
+    # Short process/product nouns without a mapped finite verb.
+    if lemma in {"смена", "рисунок", "поделка", "аппликация"}:
+        return True
     return bool(re.search(r"(?:ание|ение|яние|тие)$", lemma))
 
 
@@ -1698,6 +1761,10 @@ def _remainder_is_knowledge_np(remainder: str) -> bool:
 
 def _practice_activity_np_object(mods: list[str], head: str, remainder: str) -> str:
     acc = _proven_feminine_acc(head)
+    if acc is None and head.casefold().endswith("а") and not _neuter_plural_nom_a(
+        head.casefold()
+    ):
+        acc = _noun_nom_to_acc(head)
     noun = _decap_lexical(acc if acc is not None else head)
     words = [_decap_lexical(mod) for mod in mods] + [noun]
     return _append_remainder(" ".join(words), remainder)
@@ -2303,7 +2370,9 @@ def _transform_segment(
 
     if _looks_like_verbal_noun(head):
         if theory_only and (
-            head.casefold() in _KNOWLEDGE_NOUNS or _coordinated_theory_activity(text)
+            head.casefold() in _KNOWLEDGE_NOUNS
+            or _coordinated_theory_activity(text)
+            or _verbal_noun_lemma(head).casefold() == "выбор"
         ):
             named = _name_kinds(text)
             if named:
@@ -2513,6 +2582,8 @@ def _characterize_head_ok(word: str) -> bool:
     core = _strip_punct_word(word)[1].casefold()
     if not core:
         return False
+    if _neuter_plural_nom_a(core):
+        return True
     if re.search(r"[ыиуюеь]$", core):
         return True
     lemma = _verbal_noun_lemma(core).casefold()
@@ -2875,6 +2946,16 @@ def _proven_theory_object(heading: str) -> str | None:
     tokens = text.split()
     if not tokens:
         return None
+    # Frame nouns («выбор / определение X»): characterize the content X.
+    first_lemma = _verbal_noun_lemma(tokens[0]).casefold()
+    if first_lemma in {"выбор", "определение", "анализ", "описание"} and len(tokens) >= 2:
+        rest = " ".join(tokens[1:])
+        obj_acc, cond = _complements_after_finite(rest)
+        if obj_acc:
+            return _normalize_spaces(f"{obj_acc} {cond}".strip())
+        nested = _proven_theory_object(rest)
+        if nested:
+            return nested
     for index, token in enumerate(tokens):
         core = _strip_punct_word(token)[1].casefold()
         if core in _POSSESSIVE_OR_DEICTIC:
@@ -3498,9 +3579,16 @@ def _safe_topic_fields(topic_title: str, *, practical: bool) -> tuple[str, str]:
 def transform_clause_to_result(
     clause: str, *, theory_only: bool, full_source: str, topic_title: str = "",
 ) -> tuple[str, ActionFrame]:
+    # Agglutinated «Играна …» is the game form «Игра на …» (spacing OCR artifact).
+    normalized = re.sub(
+        r"(?i)^играна\b",
+        "Игра на",
+        _normalize_spaces(clause),
+        count=1,
+    )
     try:
         return _transform_clause_candidate(
-            clause, theory_only=theory_only, full_source=full_source, topic_title=topic_title,
+            normalized, theory_only=theory_only, full_source=full_source, topic_title=topic_title,
         )
     except _UncertainGrammar:
         result, _ = _safe_topic_fields(topic_title or clause, practical=not theory_only)
@@ -3688,6 +3776,12 @@ def _is_obligatory_neighbor(selected: str, neighbor: str) -> bool:
         if any(stem in selected_low for stem in ("уклад", "рюкзак", "подгонк", "снаряжен")):
             return any(stem in low for stem in ("уход", "ремонт"))
         return "план" in selected_low or "составлен" in selected_low
+    # Clothing/footwear complements only attach to clothing/equipment selected.
+    if "одежд" in low or "обув" in low:
+        return any(
+            stem in selected_low
+            for stem in ("одежд", "обув", "экипир", "снаряжен", "уклад", "рюкзак")
+        )
     return True
 
 
@@ -4612,7 +4706,7 @@ def _detach_trailing_parens(text: str) -> tuple[str, str]:
 def _regular_feminine_a_noun(low: str) -> bool:
     """Suffixal feminine -а, not the unmarked neuter/inanimate plural -а."""
 
-    return bool(re.search(r"(?i)(?:[кгхжшщч]а|ота|ета|ина|ица|жда)$", low))
+    return bool(re.search(r"(?i)(?:[кгхжшщч]а|ота|ета|ина|ица|жда|ена|ема)$", low))
 
 
 def _adj_to_dative(word: str) -> str:
@@ -6223,7 +6317,7 @@ def _game_participate_object(clause: str, *, more_follow: bool) -> str:
         return body
     text = _normalize_spaces(clause)
     head, colon, tail = text.partition(":")
-    pieces = [part.strip() for part in re.split(r"\s+и\s+", head) if part.strip()]
+    pieces = _split_coordinating_и_outside_quotes(head)
     locatives = [_phrase_to_locative(_lower_lead(part)) for part in pieces]
     if more_follow and len(locatives) > 1:
         body = ", ".join(locatives)
@@ -7292,11 +7386,32 @@ def _coordinated_action_uncovered(clause: str, result: str) -> bool:
     return False
 
 
+def _finite_verbs_for_action_head(head: str) -> tuple[str, ...]:
+    """Finite RESULT verbs that may realize a SOURCE action/process head.
+
+    Keep in sync with transform/reconstruct: «тренировка» → «отрабатывает»,
+    and practical «изучение» of a technique may also surface as «отрабатывает».
+    """
+
+    verbs: list[str] = []
+    explicit = _conjugate_explicit_action_head(head)
+    if explicit:
+        verbs.append(explicit.casefold())
+    mapped = _conjugate_verbal_noun(head)
+    if mapped:
+        low = mapped.casefold()
+        if low not in verbs:
+            verbs.append(low)
+    lemma = _verbal_noun_lemma(head).casefold()
+    if lemma == "изучение" and "отрабатывает" not in verbs:
+        verbs.append("отрабатывает")
+    return tuple(verbs)
+
+
 def _list_member_reached(head: str, folded_result: str) -> bool:
     """The activity named by a list head is present in the result."""
 
-    verb = _conjugate_verbal_noun(head)
-    if verb and verb.casefold() in folded_result:
+    if any(verb in folded_result for verb in _finite_verbs_for_action_head(head)):
         return True
     lemma = _verbal_noun_lemma(head).casefold()
     if lemma and lemma in folded_result:
@@ -7595,6 +7710,9 @@ def _proven_accusative_noun(word: str) -> bool:
         # The -ость suffix builds abstract nouns: inanimate, so the accusative
         # repeats the nominative in both numbers.
         return True
+    # Neuter plural -а keeps nominative form in the accusative (правила, средства).
+    if _neuter_plural_nom_a(core):
+        return True
     return _proven_feminine_acc_form(core)
 
 
@@ -7642,6 +7760,8 @@ def _proven_characterize_object(sentence: str) -> bool:
 def _unproven_object_conjunct(tokens: list[str], head: int) -> bool:
     """An «и» conjunct that cannot carry the case of the object group."""
 
+    head_core = _strip_punct_word(tokens[head])[1].casefold()
+    head_fem_acc = head_core.endswith(("у", "ю"))
     for position in range(head + 1, len(tokens) - 1):
         if _is_preposition(tokens[position]):
             # A prepositional complement ends the object group.
@@ -7650,6 +7770,11 @@ def _unproven_object_conjunct(tokens: list[str], head: int) -> bool:
             continue
         following = tokens[position + 1]
         if _is_adjective(following) or _proven_accusative_noun(following):
+            continue
+        # Soft inanimate feminine after a feminine accusative head
+        # («одежду и обувь»): accusative equals nominative.
+        follow_core = _strip_punct_word(following)[1].casefold()
+        if head_fem_acc and follow_core.endswith("ь") and len(follow_core) >= 4:
             continue
         if position == head + 1:
             # Directly coordinated with the object: the case must be proven.
@@ -8226,6 +8351,19 @@ def _is_metadata_source_clause(text: str) -> bool:
         return True
     if re.fullmatch(r"\d+(?:[.,]\d+)?\s*(?:ч|час|часа|часов)?", low):
         return True
+    # Organizational lesson-phase / assessment wrappers (not pupil content).
+    if re.fullmatch(r"(?:вводн\w*\s+)?инструктаж", low):
+        return True
+    if re.match(r"(?:промежуточн\w*\s+|итоговая\s+)?аттестация\b", low):
+        return True
+    if re.match(r"зач[её]т\b", low):
+        return True
+    if re.match(r"итоговое\s+занятие\b", low):
+        return True
+    if re.match(r"подведение\s+итогов\b", low):
+        return True
+    if re.match(r"перспективы\s+(?:дальнейшего\s+)?обучен", low):
+        return True
     return False
 
 
@@ -8717,8 +8855,28 @@ def _finalize_content_fields(
     """
 
     folded_result = _fold_week_result(candidate.planned_result)
+    result_for_gate = folded_result
+    # Fold only compresses already-proven sentences. If compression makes the
+    # object chain grammar-unsafe and demotes a previously COVERED clause, keep
+    # the unfolded wording — fold must not invent NEEDS_REVIEW.
+    if folded_result != candidate.planned_result:
+        fold_probe = _apply_result_grammar_gate(
+            replace(candidate, planned_result=folded_result),
+            topic_title=topic_title,
+            theory_text=theory_text,
+            practice_text=practice_text,
+            program_content=program_content,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        )
+        prior = dict(candidate.clause_coverage)
+        if any(
+            status == "NEEDS_REVIEW" and prior.get(clause) == "COVERED"
+            for clause, status in fold_probe.clause_coverage
+        ):
+            result_for_gate = candidate.planned_result
     control = _rebuild_control_before_final_gate(
-        folded_result,
+        result_for_gate,
         candidate.assessment_method,
         lesson_type=candidate.lesson_type,
         theory_hours=theory_hours,
@@ -8726,7 +8884,7 @@ def _finalize_content_fields(
     )
     prepared = replace(
         candidate,
-        planned_result=folded_result,
+        planned_result=result_for_gate,
         assessment_method=control,
     )
     # Grammar after fold: a fold that breaks proof demotes clauses to NEEDS_REVIEW.
@@ -9087,6 +9245,18 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
             "изучает",
         }
     )
+    # Knowledge predicates stay one sentence each: folding «характеризует A» +
+    # «характеризует B» into «характеризует A и B» can break object-case proof.
+    knowledge_separate = frozenset(
+        {
+            "характеризует",
+            "раскрывает",
+            "называет",
+            "описывает",
+            "объясняет",
+            "перечисляет",
+        }
+    )
     folded: list[str] = []
     verb: str = ""
     objects: list[str] = []
@@ -9112,6 +9282,13 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
             flush()
             folded.append(sentence)
             continue
+        key = current.casefold()
+        if key in knowledge_separate:
+            flush()
+            folded.append(
+                sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
+            )
+            continue
         # A remnant that still hosts a finite pupil verb is its own sentence,
         # not an object list glued under the previous predicate.
         if any(
@@ -9121,7 +9298,6 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
             flush()
             folded.append(sentence if sentence.endswith((".", "!", "?")) else f"{sentence}.")
             continue
-        key = current.casefold()
         # A finished colon enumeration must not absorb a later independent action.
         if key in resumable and key in slots and not any(":" in item for item in slots[key]):
             prior = slots[key]

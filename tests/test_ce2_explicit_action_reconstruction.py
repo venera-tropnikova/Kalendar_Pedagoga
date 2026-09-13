@@ -97,6 +97,44 @@ def test_shared_head_keeps_both_objects() -> None:
     assert "отрабатывает" in low or "надева" in low
     assert "страховочн" in low
     assert "снаряжен" in low
+    statuses = dict(derived.clause_coverage)
+    assert statuses.get(source.rstrip(".")) == "COVERED" or all(
+        status == "COVERED" for status in statuses.values()
+    )
+
+
+def test_neuter_plural_rules_stay_nominative_accusative() -> None:
+    from calendar_pedagoga.content_engine_v2 import _noun_nom_to_acc, classify_source_clause, METADATA
+
+    assert _noun_nom_to_acc("правила") == "правила"
+    assert _noun_nom_to_acc("средства") == "средства"
+    assert _noun_nom_to_acc("одежда") == "одежду"
+    phrase, _frame = transform_clause_to_result(
+        "Основные правила безопасной страховки.",
+        theory_only=True,
+        full_source="Основные правила безопасной страховки.",
+    )
+    assert phrase.casefold().startswith("характеризует правила")
+    assert "правилу" not in phrase.casefold()
+    assert classify_source_clause("Вводный инструктаж", practice_hours=2) == METADATA
+
+
+def test_clothing_neighbor_not_glued_to_unrelated_technique_topic() -> None:
+    source = (
+        "Теория.\nОсновы техники постановки ног.\n"
+        "Одежда и обувь для занятия скалолазанием."
+    )
+    derived = derive_fields_v2(
+        topic_title="Правильная постановка ног",
+        theory_text=source,
+        practice_text="",
+        program_content=source,
+        theory_hours=2,
+        practice_hours=0,
+    )
+    # Independent knowledge clauses stay separate sentences after fold.
+    assert "постановки ног и одежд" not in derived.planned_result.casefold()
+    assert "одежд" in derived.planned_result.casefold()
 
 
 def test_action_object_list_reconstructs_head() -> None:
