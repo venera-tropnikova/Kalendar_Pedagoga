@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 import re
 
+from calendar_pedagoga.academic_year import APPROVED_WEEK_COUNT
 from calendar_pedagoga.matching import normalize_title
 from calendar_pedagoga.parsing import (
     Hours,
@@ -26,6 +27,19 @@ from calendar_pedagoga.upload_validation import ValidatedUpload
 
 
 AUTO_WORKLOAD_WARNING = "Недельная нагрузка определена автоматически: 36 недель × 2 часа."
+SEPARATE_WEEKLY_REQUIRED = (
+    "Во внешнем УТП не указана постоянная недельная нагрузка. "
+    "Укажите число часов в неделю явно — система не подставляет 2 ч/нед "
+    "и не выводит нагрузку из годового итога."
+)
+SEPARATE_WEEK_GRID_MISMATCH = (
+    f"Календарная сетка строится на {APPROVED_WEEK_COUNT} учебных неделях. "
+    "Число недель во внешнем УТП должно совпадать с сеткой либо не указываться."
+)
+SEPARATE_YEARLY_MISMATCH = (
+    "Годовой итог внешнего УТП не согласуется с числом недель и часов в неделю. "
+    "Уточните нагрузку во внешнем УТП."
+)
 RECONCILE_PASS = "PASS"
 RECONCILE_NOTICE = "NOTICE"
 RECONCILE_LEAD = (
@@ -89,7 +103,7 @@ def _with_metadata(
 
 
 def apply_workload_from_document(result: UtpParseResult) -> UtpParseResult:
-    """Дополнить недели/часы в неделю только при надёжном определении."""
+    """Дополнить недели/часы в неделю для embedded УТП при надёжном определении."""
 
     metadata = result.metadata
     yearly = metadata.hours_per_year
@@ -152,6 +166,46 @@ def apply_workload_from_document(result: UtpParseResult) -> UtpParseResult:
     raise UtpResolutionError(
         "Не удалось надёжно определить число учебных недель и часов в неделю. "
         "Укажите их в УТП или загрузите отдельный учебно-тематический план."
+    )
+
+
+def apply_workload_from_separate(result: UtpParseResult) -> UtpParseResult:
+    """Нагрузка внешнего УТП: явный ч/нед, сетка 36, без hardcode 72→2 и yearly÷weeks.
+
+    Темы и table_totals не меняются. Недели без явного указания берутся только
+    как календарная сетка APPROVED_WEEK_COUNT. Неоднозначность — BLOCK.
+    """
+
+    metadata = result.metadata
+    yearly = metadata.hours_per_year
+    if yearly is None and result.table_totals is not None:
+        yearly = result.table_totals.total
+    weekly = metadata.hours_per_week
+    weeks = metadata.study_weeks
+
+    if weekly is None:
+        raise UtpResolutionError(SEPARATE_WEEKLY_REQUIRED)
+
+    if weeks is None:
+        weeks = APPROVED_WEEK_COUNT
+        provenance = "document_weekly_calendar_grid"
+    else:
+        if weeks != APPROVED_WEEK_COUNT:
+            raise UtpResolutionError(SEPARATE_WEEK_GRID_MISMATCH)
+        provenance = metadata.workload_provenance or "document"
+
+    if yearly is not None and weeks * weekly != yearly:
+        raise UtpResolutionError(SEPARATE_YEARLY_MISMATCH)
+
+    return _with_metadata(
+        result,
+        replace(
+            metadata,
+            hours_per_week=weekly,
+            study_weeks=weeks,
+            hours_per_year=yearly,
+            workload_provenance=provenance,
+        ),
     )
 
 
@@ -354,7 +408,7 @@ def _reconcile_separate(
     extra: tuple[str, ...] = ()
     if status == RECONCILE_NOTICE:
         extra = (RECONCILE_LEAD, *diffs)
-    return apply_workload_from_document(
+    return apply_workload_from_separate(
         _with_metadata(separate, separate.metadata, (*compatibility_notice, *extra))
     )
 
@@ -394,7 +448,7 @@ def resolve_utp(
                 ) from error
             raise UtpResolutionError(str(error)) from error
         except Exception:
-            return apply_workload_from_document(parsed)
+            return apply_workload_from_separate(parsed)
         compatibility = _program_utp_compatibility(
             parsed,
             embedded,
