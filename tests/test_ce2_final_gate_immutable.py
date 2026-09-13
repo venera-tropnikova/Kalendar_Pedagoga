@@ -92,14 +92,14 @@ def test_unknown_multi_clause_practice_needs_review_and_blocks_ready_docx() -> N
 
 
 def test_pipeline_blocks_synthetic_unresolved_week(monkeypatch) -> None:
-    practice = "Альфа, бета, гамма без действия ученика."
+    practice = "Квантовая запутанность нейтрино без наблюдения."
     content = (
         _row(
             program_content_full="Практика.\n" + practice,
             program_content_preview=practice,
-            topic_title="Перечень",
-            source_topic_title="Перечень",
-            program_topic="Перечень",
+            topic_title="Неизвестное обязательное",
+            source_topic_title="Неизвестное обязательное",
+            program_topic="Неизвестное обязательное",
         ),
     )
     with pytest.raises(PipelineError, match="не готов"):

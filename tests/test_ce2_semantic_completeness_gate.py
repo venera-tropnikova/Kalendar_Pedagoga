@@ -151,7 +151,10 @@ def test_bare_list_has_no_invented_action() -> None:
         practice_hours=2,
     )
     assert not derived.planned_result.strip() or "изобретает" not in derived.planned_result.casefold()
-    assert all(status == "NEEDS_REVIEW" for _, status in derived.clause_coverage)
+    assert all(
+        status in {"NEEDS_REVIEW", "OPTIONAL"}
+        for _, status in derived.clause_coverage
+    )
 
 
 def test_control_must_cover_every_result_item() -> None:

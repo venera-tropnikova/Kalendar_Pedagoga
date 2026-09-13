@@ -56,6 +56,7 @@ class ContentEngineV2Result:
     warnings: tuple[str, ...] = ()
     type_result: str | None = None
     clause_coverage: tuple[tuple[str, str], ...] = ()
+    clause_roles: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,9 +72,28 @@ class LessonContentV2Row:
     conditions: str
     warnings: tuple[str, ...]
     clause_coverage: tuple[tuple[str, str], ...] = ()
+    clause_roles: tuple[tuple[str, str], ...] = ()
 
 
-# Универсальные отглагольные пары (морфология, не предмет).
+REQUIRED_ACTION = "REQUIRED_ACTION"
+REQUIRED_KNOWLEDGE = "REQUIRED_KNOWLEDGE"
+REQUIRED_OBJECT = "REQUIRED_OBJECT"
+REQUIRED_CONDITION = "REQUIRED_CONDITION"
+CONTEXT = "CONTEXT"
+EXAMPLE = "EXAMPLE"
+CATALOG = "CATALOG"
+METADATA = "METADATA"
+
+_REQUIRED_SOURCE_ROLES = frozenset(
+    {
+        REQUIRED_ACTION,
+        REQUIRED_KNOWLEDGE,
+        REQUIRED_OBJECT,
+        REQUIRED_CONDITION,
+    }
+)
+_OPTIONAL_SOURCE_ROLES = frozenset({CONTEXT, EXAMPLE, CATALOG, METADATA})
+_OPTIONAL_COVERAGE_STATUS = "OPTIONAL"
 _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "анализ": "анализирует",
     "выбор": "выбирает",
@@ -1006,6 +1026,7 @@ def _is_leading_form_activity(token: str) -> bool:
 # but that lemma has no proven finite conjugation. Map only onto verbs that
 # are already in the proven predicate set. Never invent a verb from a suffix.
 _NOMINAL_PERFORM_LEMMAS = frozenset({
+    "вис",
     "висы",
     "закаливание",
     "катание",
@@ -1017,6 +1038,10 @@ _NOMINAL_PERFORM_LEMMAS = frozenset({
     "тренировка",
 })
 _ACTIVITY_GLOSS_RE = re.compile(r"\s+[–—−]\s+|\s+-\s+")
+_PERFORMANCE_QUANTITY_RE = re.compile(
+    r"(?i)\(\s*\d+\s*(?:раз(?:а)?|подход(?:а|ов)?|круг(?:а|ов)?)\s*\)"
+    r"|\b\d+\s*(?:раз(?:а)?|подход(?:а|ов)?|круг(?:а|ов)?)\b"
+)
 
 
 def _nominal_activity_lemma(word: str) -> str:
@@ -1025,10 +1050,88 @@ def _nominal_activity_lemma(word: str) -> str:
         return "помощь"
     if re.fullmatch(r"поездк[аиуеы]|поездок", core):
         return "поездка"
+    # Orthographic variants of the same perform lemma (ь/ие).
+    if re.fullmatch(r"лазань[еяюи]", core):
+        return "лазание"
+    if re.fullmatch(r"вис(?:ы|а|у|ом|ах)?", core):
+        return "вис"
     motion = _motion_process_lemma(word)
     if motion:
         return motion
     return _verbal_noun_lemma(word).casefold()
+
+
+def _token_is_pupil_activity(word: str) -> bool:
+    """True when a token itself names a pupil perform/process activity."""
+
+    if not word:
+        return False
+    core = _token_core(word).strip("«»\"„“")
+    if not core:
+        return False
+    lemma = _nominal_activity_lemma(core)
+    if lemma in _NOMINAL_PERFORM_LEMMAS:
+        return True
+    if _is_travel_word(core) or _is_walk_word(core) or _is_exercise_word(core):
+        return True
+    if _is_leading_form_activity(core) or _participation_lemma(core):
+        return True
+    if _is_action_head(core):
+        return True
+    # Physical drill nouns: приседания, отжимания, выпрыгивания…
+    if re.match(
+        r"(?i)^(?:приседан|отжиман|выпрыг|подтягиван|прыжк|плаваен)\w*$",
+        re.sub(r"[^\wёЁ]", "", core),
+    ):
+        return True
+    return False
+
+
+def _clause_has_performance_quantity(text: str) -> bool:
+    return bool(_PERFORMANCE_QUANTITY_RE.search(text or ""))
+
+
+def _theory_channel_only(*, theory_hours: int, practice_hours: int) -> bool:
+    return bool(theory_hours) and not bool(practice_hours)
+
+
+def _practice_channel_only(*, theory_hours: int, practice_hours: int) -> bool:
+    return bool(practice_hours) and not bool(theory_hours)
+
+
+def _explicit_pupil_perform_clause(text: str) -> bool:
+    """Perform evidence stronger than a bare theory verbal noun (-ование/-ение)."""
+
+    cleaned = _normalize_spaces(text)
+    if not cleaned:
+        return False
+    if _CONTROL_RESULT_VERB_RE.search(cleaned):
+        return True
+    if _clause_has_performance_quantity(cleaned):
+        return True
+    tokens = [_token_core(token).strip("«»\"„“") for token in cleaned.split()]
+    for token in tokens[:8]:
+        if not token:
+            continue
+        lemma = _nominal_activity_lemma(token)
+        if lemma in _NOMINAL_PERFORM_LEMMAS:
+            return True
+        if (
+            _is_travel_word(token)
+            or _is_walk_word(token)
+            or _is_exercise_word(token)
+            or _is_leading_form_activity(token)
+            or _participation_lemma(token)
+        ):
+            return True
+        if re.match(
+            r"(?i)^(?:приседан|отжиман|выпрыг|подтягиван|прыжк)\w*$",
+            re.sub(r"[^\wёЁ]", "", token),
+        ):
+            return True
+    if _ACTIVITY_START_RE.match(cleaned):
+        return True
+    return False
 
 
 def _decap_lexical(word: str) -> str:
@@ -7635,6 +7738,276 @@ def _try_recover_clause_result(
     return None
 
 
+def _clause_has_pupil_action(text: str) -> bool:
+    """Positive evidence that the clause names a pupil action/process."""
+
+    cleaned = _normalize_spaces(text)
+    if not cleaned:
+        return False
+    if _CONTROL_RESULT_VERB_RE.search(cleaned):
+        return True
+    if _VERBAL_NOUN_FIND_RE.search(cleaned):
+        return True
+    tokens = cleaned.split()
+    # Scan the clause: modifiers before the activity noun must not hide it
+    # («Коллективные приседания», «Круговое ОФП: … выпрыгивание …»).
+    if any(_token_is_pupil_activity(token) for token in tokens[:8]):
+        return True
+    # Quantity of repetitions/approaches marks a pupil perform unit.
+    if _clause_has_performance_quantity(cleaned) and any(
+        len(_token_core(token)) >= 4 for token in tokens
+    ):
+        return True
+    return False
+
+
+def _clause_is_knowledge_content(text: str) -> bool:
+    """Independent knowledge/study content (not a bare example or list)."""
+
+    cleaned = _normalize_spaces(text)
+    if not cleaned or _bare_list_without_action(cleaned):
+        return False
+    if _knowledge_label_over_catalogue(cleaned):
+        return True
+    tokens = cleaned.split()
+    if any(_is_theory_knowledge_token(token) for token in tokens[:4]):
+        return True
+    first = tokens[0] if tokens else ""
+    lemma = _verbal_noun_lemma(first).casefold()
+    core = _strip_punct_word(first)[1].casefold()
+    if lemma in {
+        "изучение",
+        "знакомство",
+        "характеристика",
+        "анализ",
+        "описание",
+        "функция",
+        "свойство",
+        "особенность",
+        "различие",
+        "принцип",
+        "правило",
+        "закон",
+        "роль",
+        "вид",
+        "тип",
+        "назначение",
+        "применение",
+        "состав",
+        "структура",
+        "механизм",
+        "процесс",
+        "явление",
+    } or core in {
+        "функции",
+        "свойства",
+        "особенности",
+        "различия",
+        "принципы",
+        "правила",
+        "законы",
+        "роли",
+        "виды",
+        "типы",
+    }:
+        return True
+    return False
+
+
+def _sibling_has_pupil_action(siblings: tuple[str, ...], clause: str) -> bool:
+    """Action sibling for object/condition attachment — knowledge heads do not count."""
+
+    for item in siblings:
+        if item == clause:
+            continue
+        if _clause_has_pupil_action(item) and not _clause_is_knowledge_content(item):
+            return True
+    return False
+
+
+def _is_metadata_source_clause(text: str) -> bool:
+    low = _normalize_spaces(text).casefold().strip(" .:")
+    if low in {"теория", "практика", "содержание", "тема"}:
+        return True
+    if re.fullmatch(r"\d+(?:[.,]\d+)?\s*(?:ч|час|часа|часов)?", low):
+        return True
+    return False
+
+
+def _is_example_source_clause(text: str) -> bool:
+    cleaned = _normalize_spaces(text)
+    low = cleaned.casefold()
+    if low.startswith("например") or low.startswith("к примеру"):
+        return True
+    # Whole clause is one quoted exemplar / name list.
+    if re.fullmatch(r"[«\"].+[»\"]", cleaned):
+        return True
+    # Parenthetical exemplar payload with no governing action outside.
+    if cleaned.startswith("(") and cleaned.endswith(")") and not _clause_has_pupil_action(
+        cleaned.strip("()")
+    ):
+        return True
+    return False
+
+
+def _is_anaphoric_context_clause(text: str, previous: str | None) -> bool:
+    """Positive CONTEXT signals: gloss/anaphora of already stated content."""
+
+    cleaned = _normalize_spaces(text)
+    low = cleaned.casefold()
+    if not cleaned:
+        return False
+    if re.match(r"(?i)^(?:их|его|её|ее|такой|такая|такое|такие|данного|данной)\b", low):
+        return True
+    if re.match(r"(?i)^(?:то есть|т\.е\.|включая|в том числе|а именно)\b", low):
+        return True
+    # Short possessive gloss like «их смысл» after a knowledge clause.
+    if previous and re.fullmatch(r"(?i)их\s+\w{3,20}", low):
+        return True
+    if previous and _clause_is_knowledge_content(previous) and re.fullmatch(
+        r"(?i)(?:смысл|значение|содержание|назначение)\b.*", low
+    ):
+        # Standalone gloss head elaborating the prior knowledge NP.
+        if not _clause_has_pupil_action(cleaned) and len(cleaned.split()) <= 4:
+            return True
+    return False
+
+
+def _is_condition_fragment(text: str) -> bool:
+    low = _normalize_spaces(text).casefold()
+    if re.match(
+        r"(?i)^(?:при|при помощи|с помощью|в зависимости|если|когда|без|не\b)",
+        low,
+    ):
+        return True
+    if re.fullmatch(r"\(?\d+\s*раз(?:а)?\)?", low):
+        return True
+    if re.match(r"(?i)^(?:педагог|учитель|инструктор|тренер|спортсмен|страховщик)\b", low):
+        # Role of executor without its own finite pupil action.
+        if not _clause_has_pupil_action(text):
+            return True
+    return False
+
+
+def _is_object_fragment(text: str, *, has_sibling_action: bool) -> bool:
+    if not has_sibling_action:
+        return False
+    cleaned = _normalize_spaces(text)
+    # Never demote a standalone pupil action to OBJECT merely because a
+    # sibling also has an action (rule: pupil action → REQUIRED_ACTION).
+    if _clause_has_pupil_action(cleaned) or _clause_is_knowledge_content(cleaned):
+        return False
+    if _clause_has_performance_quantity(cleaned):
+        return False
+    if _is_example_source_clause(cleaned) or _bare_list_without_action(cleaned):
+        return False
+    tokens = cleaned.split()
+    if not tokens or len(tokens) > 8:
+        return False
+    # Dependent NP / named object without its own predicate.
+    first = tokens[0]
+    if _is_preposition(first):
+        return False
+    return not bool(_CONTROL_RESULT_VERB_RE.search(cleaned))
+
+def classify_source_clause(
+    clause: str,
+    *,
+    previous: str | None = None,
+    siblings: tuple[str, ...] = (),
+    theory_hours: int = 0,
+    practice_hours: int = 0,
+) -> str:
+    """Classify one SOURCE clause before derive. Never marks CONTEXT for inability."""
+
+    text = _normalize_spaces(clause)
+    if _is_metadata_source_clause(text):
+        return METADATA
+    if _is_example_source_clause(text):
+        return EXAMPLE
+    # Knowledge-label catalogues stay optional CATALOG.
+    if _knowledge_label_over_catalogue(text) and not _explicit_pupil_perform_clause(text):
+        return CATALOG
+    # Bare practice enumerations without a governing perform stay CATALOG.
+    # The same shape on the theory channel is REQUIRED_KNOWLEDGE (topic list).
+    if _bare_list_without_action(text) and not _explicit_pupil_perform_clause(text):
+        if _practice_channel_only(theory_hours=theory_hours, practice_hours=practice_hours):
+            return CATALOG
+        return REQUIRED_KNOWLEDGE
+    if _is_anaphoric_context_clause(text, previous):
+        return CONTEXT
+
+    sibling_action = _sibling_has_pupil_action(siblings, clause)
+    if _is_condition_fragment(text) and sibling_action:
+        return REQUIRED_CONDITION
+    if _is_object_fragment(text, has_sibling_action=sibling_action):
+        return REQUIRED_OBJECT
+
+    # Knowledge heads (строение, функции, значение…) are REQUIRED_KNOWLEDGE even
+    # when morphology overlaps with verbal nouns; pupil perform lemmas stay actions.
+    if _clause_is_knowledge_content(text):
+        first = text.split()[0] if text.split() else ""
+        perform = _nominal_activity_lemma(first) in _NOMINAL_PERFORM_LEMMAS
+        study = _verbal_noun_lemma(first).casefold() in {
+            "изучение",
+            "знакомство",
+            "характеристика",
+            "анализ",
+            "описание",
+        }
+        if _is_theory_knowledge_token(first) or (study and not perform):
+            return REQUIRED_KNOWLEDGE
+        if not _explicit_pupil_perform_clause(text):
+            return REQUIRED_KNOWLEDGE
+        if _theory_channel_only(theory_hours=theory_hours, practice_hours=practice_hours):
+            return REQUIRED_KNOWLEDGE
+
+    if _explicit_pupil_perform_clause(text) or _clause_has_pupil_action(text):
+        if _theory_channel_only(
+            theory_hours=theory_hours, practice_hours=practice_hours
+        ) and not _explicit_pupil_perform_clause(text):
+            return REQUIRED_KNOWLEDGE
+        return REQUIRED_ACTION
+    if _clause_is_knowledge_content(text):
+        return REQUIRED_KNOWLEDGE
+
+    # Fail closed for independent unknown content: required by hour channel.
+    if practice_hours and not theory_hours:
+        return REQUIRED_ACTION
+    if theory_hours and not practice_hours:
+        return REQUIRED_KNOWLEDGE
+    if practice_hours:
+        return REQUIRED_ACTION
+    return REQUIRED_KNOWLEDGE
+
+
+def classify_source_clauses(
+    clauses: list[str] | tuple[str, ...],
+    *,
+    theory_hours: int = 0,
+    practice_hours: int = 0,
+) -> tuple[tuple[str, str], ...]:
+    """Role map for the week's selected SOURCE clauses."""
+
+    items = tuple(_normalize_spaces(clause) for clause in clauses if _normalize_spaces(clause))
+    roles: list[tuple[str, str]] = []
+    for index, clause in enumerate(items):
+        previous = items[index - 1] if index else None
+        role = classify_source_clause(
+            clause,
+            previous=previous,
+            siblings=items,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        )
+        roles.append((clause, role))
+    return tuple(roles)
+
+
+def _role_is_required(role: str) -> bool:
+    return role in _REQUIRED_SOURCE_ROLES
+
+
 def _selected_source_clauses(
     *,
     theory_text: str,
@@ -7686,7 +8059,7 @@ def _apply_semantic_completeness_gate(
     occurrence_index: int = 0,
     practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
-    """Universal gate: no mandatory SOURCE meaning may vanish silently."""
+    """Universal FINAL gate: only REQUIRED_* SOURCE meaning may force BLOCK."""
 
     source_clauses = _selected_source_clauses(
         theory_text=theory_text,
@@ -7697,14 +8070,24 @@ def _apply_semantic_completeness_gate(
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
     )
+    clause_roles = classify_source_clauses(
+        source_clauses,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    role_map = dict(clause_roles)
     prior_status = {
         clause: status
         for clause, status in candidate.clause_coverage
-        if status in {"COVERED", "NEEDS_REVIEW"}
+        if status in {"COVERED", "NEEDS_REVIEW", _OPTIONAL_COVERAGE_STATUS}
     }
     coverage_map = dict(prior_status)
     for clause in source_clauses:
-        coverage_map.setdefault(clause, "NEEDS_REVIEW")
+        role = role_map.get(clause, REQUIRED_ACTION)
+        if not _role_is_required(role):
+            coverage_map[clause] = _OPTIONAL_COVERAGE_STATUS
+        else:
+            coverage_map.setdefault(clause, "NEEDS_REVIEW")
 
     result = candidate.planned_result
     control = candidate.assessment_method
@@ -7712,6 +8095,11 @@ def _apply_semantic_completeness_gate(
     recovered_controls: list[str] = []
 
     for clause in source_clauses:
+        role = role_map.get(clause, REQUIRED_ACTION)
+        if not _role_is_required(role):
+            # CONTEXT/EXAMPLE/CATALOG/METADATA stay in SOURCE; no RESULT obligation.
+            coverage_map[clause] = _OPTIONAL_COVERAGE_STATUS
+            continue
         prior = prior_status.get(clause)
         # Intentional NEEDS_REVIEW stays review: do not invent a RESULT.
         if prior == "NEEDS_REVIEW":
@@ -7730,7 +8118,7 @@ def _apply_semantic_completeness_gate(
         if prior == "COVERED" and not preserved:
             coverage_map[clause] = "NEEDS_REVIEW"
             warnings.append(
-                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                "NEEDS_REVIEW: обязательный смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
                 + clause
             )
             continue
@@ -7767,6 +8155,11 @@ def _apply_semantic_completeness_gate(
     reconciled: list[tuple[str, str]] = []
     seen: set[str] = set()
     for clause in source_clauses:
+        role = role_map.get(clause, REQUIRED_ACTION)
+        if not _role_is_required(role):
+            reconciled.append((clause, _OPTIONAL_COVERAGE_STATUS))
+            seen.add(clause)
+            continue
         status = coverage_map.get(clause, "NEEDS_REVIEW")
         if status == "COVERED" and not _clause_meaning_preserved_in_result(
             clause,
@@ -7777,7 +8170,7 @@ def _apply_semantic_completeness_gate(
         ):
             status = "NEEDS_REVIEW"
             warnings.append(
-                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                "NEEDS_REVIEW: обязательный смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
                 + clause
             )
         if status not in {"COVERED", "NEEDS_REVIEW"}:
@@ -7786,6 +8179,10 @@ def _apply_semantic_completeness_gate(
         seen.add(clause)
     for clause, status in candidate.clause_coverage:
         if clause in seen:
+            continue
+        role = role_map.get(clause)
+        if role is not None and not _role_is_required(role):
+            reconciled.append((clause, _OPTIONAL_COVERAGE_STATUS))
             continue
         status = status if status in {"COVERED", "NEEDS_REVIEW"} else "NEEDS_REVIEW"
         if status == "COVERED" and not _clause_meaning_preserved_in_result(
@@ -7797,13 +8194,23 @@ def _apply_semantic_completeness_gate(
         ):
             status = "NEEDS_REVIEW"
             warnings.append(
-                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                "NEEDS_REVIEW: обязательный смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
                 + clause
             )
         reconciled.append((clause, status))
 
     if not reconciled and source_clauses:
-        reconciled = [(clause, "NEEDS_REVIEW") for clause in source_clauses]
+        reconciled = []
+        for clause in source_clauses:
+            role = role_map.get(clause, REQUIRED_ACTION)
+            reconciled.append(
+                (
+                    clause,
+                    _OPTIONAL_COVERAGE_STATUS
+                    if not _role_is_required(role)
+                    else "NEEDS_REVIEW",
+                )
+            )
 
     control = _rebuild_control_from_accepted_result(
         result,
@@ -7827,6 +8234,7 @@ def _apply_semantic_completeness_gate(
         planned_result=result,
         assessment_method=control,
         clause_coverage=tuple(reconciled),
+        clause_roles=clause_roles,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -7980,34 +8388,43 @@ def derive_fields_v2(
 
 
 def week_has_unresolved_mandatory_review(row: LessonContentV2Row) -> bool:
-    """True when a mandatory SOURCE-clause stayed NEEDS_REVIEW after FINAL gate."""
+    """True when a REQUIRED_* SOURCE-clause stayed NEEDS_REVIEW after FINAL gate."""
 
-    return any(status == "NEEDS_REVIEW" for _, status in row.clause_coverage)
+    role_map = dict(row.clause_roles)
+    for clause, status in row.clause_coverage:
+        if status != "NEEDS_REVIEW":
+            continue
+        role = role_map.get(clause, REQUIRED_ACTION)
+        if _role_is_required(role):
+            return True
+    if (row.planned_result or "").strip() and not _control_covers_all_result_items(
+        row.planned_result, row.assessment_method
+    ):
+        return True
+    return False
 
 
 def unresolved_mandatory_review_blocks(
     rows: tuple[LessonContentV2Row, ...],
 ) -> tuple[tuple[int, tuple[str, ...]], ...]:
-    """Weeks that must block ready DOCX: unresolved mandatory NEEDS_REVIEW."""
+    """Weeks that must block ready DOCX: unresolved REQUIRED_* NEEDS_REVIEW."""
 
     blocks: list[tuple[int, tuple[str, ...]]] = []
     for row in rows:
         if not week_has_unresolved_mandatory_review(row):
             continue
+        role_map = dict(row.clause_roles)
         clauses = tuple(
-            clause for clause, status in row.clause_coverage if status == "NEEDS_REVIEW"
+            clause
+            for clause, status in row.clause_coverage
+            if status == "NEEDS_REVIEW"
+            and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
         )
-        result_empty = not (row.planned_result or "").strip()
-        control_empty = not (row.assessment_method or "").strip()
-        control_incomplete = bool((row.planned_result or "").strip()) and (
-            control_empty
-            or not _control_covers_all_result_items(
-                row.planned_result, row.assessment_method
-            )
-        )
-        # Unresolved mandatory clause means RESULT coverage is incomplete even
-        # when some other clauses produced text.
-        if result_empty or control_empty or control_incomplete or clauses:
+        if not clauses and (row.planned_result or "").strip() and not _control_covers_all_result_items(
+            row.planned_result, row.assessment_method
+        ):
+            clauses = ("CONTROL не покрывает финальный RESULT",)
+        if clauses or not (row.planned_result or "").strip():
             blocks.append((row.source.week_number, clauses))
     return tuple(blocks)
 
@@ -8915,6 +9332,7 @@ def build_lesson_content_v2(
                 conditions=final.frame.conditions,
                 warnings=tuple(dict.fromkeys((*warnings, *final.warnings))),
                 clause_coverage=final.clause_coverage,
+                clause_roles=final.clause_roles,
             )
         )
     return tuple(result)

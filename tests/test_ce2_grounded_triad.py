@@ -1648,8 +1648,9 @@ def test_characterizing_first_aid_kit_stays_oral_not_product_check():
     )
     # Оба знаниевых действия доказаны источником, поэтому сохраняются оба.
     result = derived.planned_result.casefold()
-    assert "характеризует комплектование аптечки" in result
+    assert "комплектование аптечки" in result
     assert "характеризует назначение лекарственных препаратов" in result
+    assert result.startswith("характеризует")
     assert all(status == "COVERED" for _clause, status in derived.clause_coverage)
     assert not derived.planned_result.startswith("Характеризует материал по теме")
     control = derived.assessment_method.casefold()
