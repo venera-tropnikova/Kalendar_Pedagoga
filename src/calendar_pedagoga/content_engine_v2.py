@@ -1449,29 +1449,75 @@ def _care_and_repair_result(segment: str) -> tuple[str, str, str] | None:
     )
 
 
+def _is_shared_object_action_head(word: str) -> bool:
+    """True when the token names a proven pupil action, finite or nominal."""
+
+    if _looks_like_verbal_noun(word):
+        return True
+    return _nominal_activity_lemma(word) in _NOMINAL_PERFORM_LEMMAS
+
+
+def _legacy_paired_verbal_shape(word: str) -> bool:
+    """Former paired-verb morphology: deverbal -ние / -ка only."""
+
+    return bool(re.fullmatch(r"(?i)(?:[А-Яа-яЁё]+ние|[А-Яа-яЁё]+ка)", word))
+
+
 def _shared_object_after_paired_verbs(segment: str) -> tuple[str, str, str] | None:
+    """Two coordinated actions that share one trailing object stay both kept.
+
+    Finite -ние/-ка pairs («изучение и отработка X») conjugate as before. When
+    either side is only a proven nominal activity (for example «ремонт и сдача
+    инвентаря»), both nouns are kept under «выполняет» so the middle action of
+    a week chain cannot silently disappear.
+    """
+
     match = re.match(
-        r"(?i)^((?:[А-Яа-яЁё]+ние|[А-Яа-яЁё]+ка))\s+и\s+"
-        r"((?:[А-Яа-яЁё]+ние|[А-Яа-яЁё]+ка))\s+(.+)$",
-        segment.strip(),
+        r"(?i)^([А-Яа-яЁё\-]+)\s+и\s+([А-Яа-яЁё\-]+)\s+(.+)$",
+        _normalize_spaces(segment).strip(),
     )
     if not match:
         return None
     first, second, remainder = match.group(1), match.group(2), match.group(3)
-    if not (_looks_like_verbal_noun(first) and _looks_like_verbal_noun(second)):
-        return None
     verb1 = _conjugate_verbal_noun(first)
     verb2 = _conjugate_verbal_noun(second)
-    if not verb1 or not verb2:
+    if (
+        verb1
+        and verb2
+        and _legacy_paired_verbal_shape(first)
+        and _legacy_paired_verbal_shape(second)
+    ):
+        obj_acc, cond = _complements_after_finite(remainder)
+        phrase = f"{verb1} и {verb2}"
+        if obj_acc:
+            phrase += f" {obj_acc}"
+        if cond:
+            phrase += f" {cond}"
+        obj, _split_cond = _split_object_and_conditions(remainder)
+        return (
+            _normalize_spaces(phrase),
+            f"{first} и {second}",
+            _normalize_spaces(f"{obj} {cond}"),
+        )
+
+    nom1 = _nominal_activity_lemma(first) in _NOMINAL_PERFORM_LEMMAS
+    nom2 = _nominal_activity_lemma(second) in _NOMINAL_PERFORM_LEMMAS
+    if not (nom1 or nom2):
         return None
-    obj_acc, cond = _complements_after_finite(remainder)
-    phrase = f"{verb1} и {verb2}"
-    if obj_acc:
-        phrase += f" {obj_acc}"
-    if cond:
-        phrase += f" {cond}"
-    obj, _split_cond = _split_object_and_conditions(remainder)
-    return _normalize_spaces(phrase), f"{first} и {second}", _normalize_spaces(f"{obj} {cond}")
+    if not (
+        _is_shared_object_action_head(first) and _is_shared_object_action_head(second)
+    ):
+        return None
+    # Keep the source complement (often genitive under the nouns) verbatim.
+    acc1 = _decap_lexical(_noun_nom_to_acc(first))
+    acc2 = _decap_lexical(_noun_nom_to_acc(second))
+    phrase = _normalize_spaces(f"выполняет {acc1} и {acc2} {remainder}")
+    obj, cond = _split_object_and_conditions(remainder)
+    return (
+        phrase,
+        f"{first} и {second}",
+        _normalize_spaces(f"{obj} {cond}".strip()),
+    )
 
 
 def _transform_segment(
@@ -6187,6 +6233,7 @@ def _coordinated_action_uncovered(clause: str, result: str) -> bool:
 
     if " и " not in clause.casefold():
         return False
+    folded = result.casefold()
     for head, verb in _VERBAL_NOUN_TO_VERB.items():
         if not re.search(r"(?i)\b" + re.escape(head) + r"\b", clause):
             continue
@@ -6195,7 +6242,17 @@ def _coordinated_action_uncovered(clause: str, result: str) -> bool:
             or clause.casefold().startswith(head + " ")
         ):
             continue
-        if verb not in result.casefold():
+        if verb not in folded and not _list_member_reached(head, folded):
+            return True
+    for head in _NOMINAL_PERFORM_LEMMAS:
+        if not re.search(r"(?i)\b" + re.escape(head) + r"\b", clause):
+            continue
+        if not (
+            re.search(r"(?i)\s+и\s+" + re.escape(head) + r"\b", clause)
+            or clause.casefold().startswith(head + " ")
+        ):
+            continue
+        if not _list_member_reached(head, folded):
             return True
     return False
 
@@ -6207,6 +6264,11 @@ def _list_member_reached(head: str, folded_result: str) -> bool:
     if verb and verb.casefold() in folded_result:
         return True
     lemma = _verbal_noun_lemma(head).casefold()
+    if lemma and lemma in folded_result:
+        return True
+    acc = _noun_nom_to_acc(head).casefold()
+    if acc and acc in folded_result:
+        return True
     stem = lemma[:-2] if len(lemma) > 5 else lemma
     return bool(stem) and stem in folded_result
 
@@ -6219,7 +6281,7 @@ def _list_member_uncovered(clause: str, result: str) -> bool:
     for member in members[1:]:
         tokens = member.split()
         head = _strip_punct_word(tokens[0])[1] if tokens else ""
-        if not head or not _looks_like_verbal_noun(head):
+        if not head or not _is_shared_object_action_head(head):
             continue
         if _list_member_reached(head, folded):
             continue
