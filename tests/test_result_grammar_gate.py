@@ -291,7 +291,7 @@ def test_colon_catalogue_after_process_is_not_performed_activity():
     # An unproven form proves no agreement with the member before it.
     (
         "разрабатывает маршрут с описанием ориентиров, составлением графика",
-        "разрабатывает маршрут с описанием ориентиров",
+        "разрабатывает маршрут с описанием ориентиров, составлением графика",
     ),
 ])
 def test_only_proven_group_continuation_survives_a_comma(text, expected):
@@ -330,7 +330,7 @@ def test_group_continuation_reaches_the_result():
     assert all(status == "COVERED" for _clause, status in result.clause_coverage)
 
 
-def test_dropped_list_member_is_reported_instead_of_covered():
+def test_coordinated_acquaintance_reaches_result_and_coverage():
     result = derive_fields_v2(
         topic_title="Учебная тема",
         theory_text="",
@@ -343,15 +343,16 @@ def test_dropped_list_member_is_reported_instead_of_covered():
         practice_hours=2,
     )
     low = result.planned_result.casefold()
-    assert "знакомств" not in low
-    assert "знакомится" not in low
+    assert "знакомится" in low
+    assert "форм" in low and "рельеф" in low
+    assert "диктант" in low
     coverage = dict(result.clause_coverage)
     clause = (
         "Изучение на местности изображения местных предметов, "
         "знакомство с различными формами рельефа"
     )
-    assert coverage[clause] == "NEEDS_REVIEW"
-    assert any(clause in warning for warning in result.warnings)
+    assert coverage[clause] == "COVERED"
+    assert all(status == "COVERED" for status in coverage.values())
 
 
 def test_named_techniques_without_process_head_stay_unconverted():

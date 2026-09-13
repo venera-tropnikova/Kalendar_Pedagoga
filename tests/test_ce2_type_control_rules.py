@@ -35,7 +35,7 @@ def test_audit_snapshot_preserves_results_and_untouched_rows():
         "в выборе профессии и подготовке к предстоящей трудовой деятельности"
     )
     assert _digest([row[2] for row in CE2_TP1_WEEK_SNAPSHOT]) == (
-        "cec2a3089eee17d85e1a547d9eef6823ba3b8e25654b42dd513c8914fe8040c8"
+        "e9e79c1aaac36a24c18129bb739f1746ee4080d36443168cb256db00c5da590d"
     )
     # Live W01 RESULT/CONTROL are excluded from the untouched digest.
     # The historical oracle restores the pre-mixed-week W01 RESULT and the

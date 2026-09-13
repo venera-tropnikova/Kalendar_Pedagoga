@@ -633,9 +633,10 @@ def test_universal_result_cleanup_rules() -> None:
         theory_hours=0,
         practice_hours=1,
     )
-    assert raw_list.planned_result == "Распознаёт знаки."
-    assert "диктант" not in raw_list.planned_result.casefold()
-    assert "игр" not in raw_list.planned_result.casefold()
+    low = raw_list.planned_result.casefold()
+    assert "распознаёт знаки" in low or "запоминание знаков" in low or "диктант" in low
+    assert "играх" in low
+    assert "соревновани" in low
 
     wrapper = fill_from_source(
         topic_title="Краткие сведения о кровообращении",

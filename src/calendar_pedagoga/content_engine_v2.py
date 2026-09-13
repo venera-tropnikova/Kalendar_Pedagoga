@@ -128,6 +128,8 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "оценка": "оценивает",
     "отбор": "отбирает",
     "заслушивание": "заслушивает",
+    "прохождение": "проходит",
+    "сбор": "собирает",
 }
 
 _KNOWLEDGE_NOUNS = {
@@ -332,10 +334,13 @@ def _noun_gen_to_acc(word: str) -> str:
         return word + "а"
     if low.endswith(("ую", "юю", "ию")):
         return word
-    if low.endswith("ений") and len(word) > 5:
+    if low.endswith(("ений", "яний", "аний")) and len(word) > 5:
         return word[:-2] + "ия"
     if low.endswith("ций") and len(word) > 5:
         return word[:-1] + "и"
+    # Soft gen.pl «линий» → «линии» (not hard «-ей»).
+    if low.endswith("ий") and len(word) > 4 and word[-3].casefold() not in "аеёиоуыэюя":
+        return word[:-2] + "ии"
     if low.endswith(("ов", "ев", "ёв")) and len(word) > 4:
         stem = word[:-2]
         last = stem[-1:].casefold()
@@ -452,10 +457,10 @@ def _noun_acc_features(original: str, acc: str) -> tuple[bool, str]:
     out = acc.casefold()
     if src.endswith(("ения", "ания", "яния")):
         return False, "n"
-    plural = src.endswith(("ов", "ев", "ёв", "ей", "ений", "ок")) or bool(
+    plural = src.endswith(("ов", "ев", "ёв", "ей", "ений", "яний", "аний", "ий", "ок")) or bool(
         re.search(r"(?i)[аеёиоуыэюя][шж]$", src)
     )
-    if out.endswith(("ые", "ки", "ши", "жи")):
+    if out.endswith(("ые", "ие", "ки", "ши", "жи", "ии")):
         plural = True
     elif len(out) > 3 and out.endswith(("ы", "и")) and not out.endswith(("ие", "ние")):
         plural = True
@@ -559,9 +564,28 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
                 has_post_head = True
             continue
         if not seen_noun and not colon_list and _is_adjective(core):
-            pending.append(token)
-            continue
+            # Soft gen.pl nouns («линий») share the adjective -ий ending. After a
+            # gen.pl adjective they are the noun head, not another modifier.
+            pending_adjs = pending_cores()
+            if (
+                pending_adjs
+                and re.search(r"(?i)(?:ых|их)$", pending_adjs[-1][2])
+                and core.casefold().endswith(("ий", "ений", "яний", "аний"))
+                and _noun_gen_to_acc(core) != core
+            ):
+                pass
+            else:
+                pending.append(token)
+                continue
         if case == "acc" and not colon_list and (not seen_noun or prefix.startswith("(")):
+            # Parenthetical exemplars («треугольники, …») are already direct-case
+            # illustrations, not genitive objects awaiting conversion.
+            if prefix.startswith("(") and seen_noun:
+                if pending:
+                    apply_pending(False, "m")
+                out.append(token)
+                has_post_head = True
+                continue
             acc_core = _noun_gen_to_acc(core)
             plural, gender = _noun_acc_features(core, acc_core)
             apply_pending(plural, gender)
@@ -741,13 +765,20 @@ def _token_core(token: str) -> str:
 
 def _is_action_head(word: str) -> bool:
     low = word.casefold()
+    lemma = _verbal_noun_lemma(word).casefold()
+    nominative = lemma == re.sub(r"[^\wёЁ]", "", word).casefold()
     return bool(
         word
         and (
             _looks_like_verbal_noun(word)
             or _is_exercise_word(word)
             or _is_walk_word(word)
+            or _is_leading_form_activity(word)
             or low.startswith("викторин")
+            or low.startswith("диктант")
+            or low.startswith("соревнован")
+            # Bare process nouns («движение по …») start their own segment.
+            or (nominative and _is_unconjugated_process_noun(word))
             # Bare setting / directed-action NPs start their own segment so they
             # are not glued as objects of a previous finite verb.
             or low.startswith("имитац")
@@ -814,7 +845,10 @@ def _starts_new_action(tokens: list[str], index: int) -> bool:
             continue
         if _is_action_head(core):
             return True
-        if _is_adjective(core) and not _looks_like_verbal_noun(core):
+        low = core.casefold()
+        if low == "мини" or (
+            _is_adjective(core) and not _looks_like_verbal_noun(core)
+        ):
             look += 1
             continue
         return False
@@ -853,10 +887,17 @@ def _split_action_segments(text: str) -> list[str]:
         is_break = False
         if buf and core:
             in_prepositional = any(_is_preposition(item) for item in buf)
-            nominative_action = _is_exercise_word(core) or (
-                _looks_like_verbal_noun(core)
-                and _verbal_noun_lemma(core).casefold()
-                == re.sub(r"[^\wёЁ]", "", core).casefold()
+            nominative_action = (
+                _is_exercise_word(core)
+                or _is_leading_form_activity(core)
+                or (
+                    (
+                        _looks_like_verbal_noun(core)
+                        or _is_unconjugated_process_noun(core)
+                    )
+                    and _verbal_noun_lemma(core).casefold()
+                    == re.sub(r"[^\wёЁ]", "", core).casefold()
+                )
             )
             low_core = core.casefold()
             # Bare simulation / directed-action NPs are new activities even after
@@ -892,8 +933,12 @@ def _split_action_segments(text: str) -> list[str]:
 def _leading_modifiers(tokens: list[str]) -> tuple[list[str], list[str]]:
     mods: list[str] = []
     rest = list(tokens)
-    while rest and _is_adjective(rest[0]) and not _looks_like_verbal_noun(rest[0]):
-        mods.append(rest.pop(0))
+    while rest and not _looks_like_verbal_noun(rest[0]):
+        core = re.sub(r"[^\wёЁ]", "", rest[0], flags=re.IGNORECASE).casefold()
+        if core == "мини" or (_is_adjective(rest[0]) and not _is_leading_form_activity(rest[0])):
+            mods.append(rest.pop(0))
+            continue
+        break
     return mods, rest
 
 
@@ -920,8 +965,10 @@ def _is_leading_form_activity(token: str) -> bool:
         return False
     if _is_walk_word(token) or _is_exercise_word(token) or _is_leading_game_form(token):
         return True
-    return bool(re.match(r"(?i)^викторин\w*$", token))
-
+    core = re.sub(r"[^\wёЁ]", "", token, flags=re.IGNORECASE).casefold()
+    if core.startswith(("викторин", "диктант", "соревнован", "конкурс")):
+        return True
+    return False
 
 # Closed nominal-activity frames: the source names an observable activity NP,
 # but that lemma has no proven finite conjugation. Map only onto verbs that
@@ -1104,6 +1151,8 @@ _PARTICIPATION_CASES = frozenset({
     "конкурсах",
     "соревнованиях",
     "соревновании",
+    "диктанте",
+    "диктантах",
     "походе",
     "походах",
 })
@@ -1122,6 +1171,12 @@ def _participation_lemma(token: str) -> str | None:
         return "викторина"
     if core.startswith("заняти"):
         return "занятие"
+    if core.startswith("диктант"):
+        return "диктант"
+    if core.startswith("соревнован"):
+        return "соревнование"
+    if core.startswith("конкурс"):
+        return "конкурс"
     if core == "поход":
         return "поход"
     if re.fullmatch(r"походы|походов|походам|походами|походах", core):
@@ -1135,6 +1190,9 @@ def _participation_locative(lemma: str) -> str:
         "эстафета": "эстафетах",
         "викторина": "викторине",
         "занятие": "занятиях",
+        "диктант": "диктантах",
+        "соревнование": "соревнованиях",
+        "конкурс": "конкурсах",
         "поход": "походе",
         "походы": "походах",
     }[lemma]
@@ -1779,6 +1837,18 @@ def _transform_segment(
         if named:
             return named
         return _characterize(text)
+    # Practice «способы + process NP with a dependent object» (methods of
+    # disinfecting water) is knowledge of methods. A ways label whose process
+    # only takes a path PP («способы передвижения на лыжах») stays unconverted
+    # so neighbouring technique drills remain the performed RESULT.
+    if not theory_only and _leading_ways_catalogue(text) and ":" not in text:
+        tokens = _normalize_spaces(text).split()
+        if (
+            len(tokens) >= 3
+            and _looks_like_verbal_noun(tokens[1])
+            and not _is_preposition(tokens[2])
+        ):
+            return _characterize(text)
     return text, "", "", ""
 
 
@@ -2455,7 +2525,7 @@ def _agree_capacity_role(text: str) -> str:
 
 _DANGLING_PRONOUN_RE = re.compile(r"(?i)^(ее|её|его|их)\s+(.+)$")
 _RESULT_FINITE_RE = re.compile(
-    r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)\b"
+    r"(?i)^[А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)(?:ся|сь)?\b"
 )
 _FINITE_VERB_RE = _RESULT_FINITE_RE
 _KNOWLEDGE_WRAPPER_RE = re.compile(
@@ -2506,7 +2576,7 @@ def _merge_repeated_verbs(text: str, *, only: frozenset[str] | None = None) -> s
     parts = re.split(r",\s+", text)
     if len(parts) < 2:
         return text
-    verb_re = re.compile(r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют))\s+")
+    verb_re = re.compile(r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют)(?:ся|сь)?)\s+")
     merged: list[str] = []
     prev_verb = ""
     for part in parts:
@@ -2567,6 +2637,7 @@ _FORM_CASES: tuple[tuple[str, frozenset[str]], ...] = (
     (r"(?:ах|ях)$", frozenset({"prep.pl"})),
     (r"(?:ами|ями)$", frozenset({"ins.pl"})),
     (r"(?:ам|ям)$", frozenset({"dat.pl"})),
+    (r"(?:ом|ем|ём|ью)$", frozenset({"ins.sg"})),
     (r"(?:ов|ев|ёв)$", frozenset({"gen.pl"})),
     (r"(?:ния|тия|ствия)$", frozenset({"gen.sg", "nom.pl", "acc.pl"})),
     (
@@ -2575,7 +2646,7 @@ _FORM_CASES: tuple[tuple[str, frozenset[str]], ...] = (
     ),
     (r"(?:о|ё|е)$", frozenset({"nom.sg", "acc.sg"})),
 )
-_OBLIQUE_CASES = frozenset({"gen.sg", "gen.pl", "dat.pl", "ins.pl", "prep.pl"})
+_OBLIQUE_CASES = frozenset({"gen.sg", "gen.pl", "dat.pl", "ins.pl", "ins.sg", "prep.pl"})
 
 
 def _proven_form_cases(word: str) -> frozenset[str]:
@@ -2612,11 +2683,24 @@ def _continues_prepositional_group(kept: str, tail: str) -> bool:
     )
     if opened < 0 or opened == len(tokens) - 1:
         return False
-    member = tokens[-1]
-    if _is_adjective(member):
+    if _is_adjective(tokens[-1]):
         return False
-    shared = _proven_form_cases(member) & _proven_form_cases(tail_tokens[0])
-    return bool(shared & _OBLIQUE_CASES)
+    tail_cases = _proven_form_cases(tail_tokens[0]) & _OBLIQUE_CASES
+    if not tail_cases:
+        return False
+    # Compare with any governed member after the preposition, not only the last
+    # token: «с описанием ориентиров, составлением …» keeps the instrumental
+    # series even when a genitive complement sits between the heads.
+    for member in reversed(tokens[opened + 1 :]):
+        if _is_preposition(member):
+            continue
+        member_oblique = _proven_form_cases(member) & _OBLIQUE_CASES
+        # «описанием» shares the adjective -ем ending; oblique proof wins.
+        if _is_adjective(member) and not member_oblique:
+            continue
+        if member_oblique & tail_cases:
+            return True
+    return False
 
 
 def _drop_raw_list_tails(text: str) -> str:
@@ -2691,8 +2775,8 @@ def _keep_strongest_phrase(phrases: list[str]) -> list[str]:
     ]
     kept = {best, *siblings}
     ordered = [item for item in phrases if item in kept]
-    if score(best)[0] >= 3 and sum(1 for item in pool if score(item)[0] >= 3) == 1:
-        return ordered or [best]
+    # One exercise wrapper must not erase other independently proven actions
+    # («знакомится…», «участвует в играх», «проходит…»).
     if len(phrases) < 3:
         return phrases
     return ordered or [best]
@@ -3623,7 +3707,15 @@ def _align_control_to_result(control: str, result: str) -> str:
 
 
 def _result_restates_named_form(result: str) -> bool:
-    return bool(re.match(r"(?i)участвует в .*(викторин|диктант)", result or ""))
+    text = result or ""
+    if not re.match(r"(?i)участвует в .*(викторин|диктант)", text):
+        return False
+    # A RESULT that also keeps independent drills is not a mere form restatement.
+    return not re.search(
+        r"(?i)\b(?:выполняет|изучает|знакомится|определяет|измеряет|"
+        r"собирает|проходит|оценивает|разрабатывает|составляет)\b",
+        text,
+    )
 
 
 def _title_has_knowledge_beyond_form(title: str) -> bool:
@@ -4269,8 +4361,12 @@ def _has_event_participation(text: str) -> bool:
 
 def _activity_event_type(result: str, clause: str) -> str:
     """Lesson events from selected activity. Control methods never become TYPE."""
-    result_low = result.casefold()
+    result_low = (result or "").casefold().strip()
     clause_low = clause.casefold()
+    # Only a leading event predicate makes the lesson an event. Trailing
+    # «участвует в … соревнованиях» after map/drill actions must not reclassify.
+    if not re.match(r"(?i)^(?:выступает\b|участвует\s+в\b)", result_low):
+        return ""
     blob = _normalize_spaces(f"{result} {clause}")
     if not _has_event_participation(blob):
         return ""
@@ -4278,6 +4374,14 @@ def _activity_event_type(result: str, clause: str) -> str:
         stem in result_low for stem in _EVENT_KIND_STEMS
     ) else clause_low
     if "соревнован" in event_src:
+        # Pedagogical mini-competitions beside drills/dictations are lesson
+        # forms, not a competition-week TYPE.
+        if re.search(
+            r"(?i)\b(?:мини\s+соревнован|диктант|упражнен|изучает|знакомится|"
+            r"выполняет|определяет|измеряет)\b",
+            result_low,
+        ):
+            return ""
         if "туристск" in event_src:
             return "туристские соревнования"
         return "соревнования"
@@ -4330,7 +4434,7 @@ def _practice_activity_type(result: str, clause: str) -> str:
         return "практикум по организации бивака"
     if "обязанност" in result_low and "должност" in selected:
         return "практикум по исполнению должностей"
-    if re.search(r"(?i)\bзнак[аиуов]?\b", result_low):
+    if re.search(r"(?i)\bзнак\w*", result_low):
         if "топограф" in selected:
             return "практикум по работе с топографическими знаками"
         return "практикум по работе со знаками"
@@ -4970,16 +5074,22 @@ def type_from_frame(
         if re.match(r"(?i)^участвует\s+в\b", planned_result):
             if "дидактическ" in result and re.search(r"(?i)\bигр", planned_result):
                 return "дидактическое занятие"
-            if re.search(r"(?i)\b(?:играх|игре|эстафет)", planned_result):
+            if re.search(r"(?i)занятиях\s+в\s+бассейне", planned_result):
+                return "учебно-тренировочное занятие"
+            if re.search(r"(?i)занятиях\s+на\s+скалодроме", planned_result):
+                return "учебно-тренировочное занятие"
+            signs_type = _practice_activity_type(planned_result, frame.clause)
+            if signs_type:
+                return signs_type
+            if re.search(r"(?i)\b(?:играх|игре|эстафет)", planned_result) and not re.search(
+                r"(?i)\b(?:диктант|упражнен|выполняет)\b",
+                planned_result,
+            ):
                 return "игра"
             if "викторин" in result:
                 return "викторина"
             if re.search(r"(?i)\bпоход", planned_result):
                 return "поход"
-            if re.search(r"(?i)занятиях\s+в\s+бассейне", planned_result):
-                return "учебно-тренировочное занятие"
-            if re.search(r"(?i)занятиях\s+на\s+скалодроме", planned_result):
-                return "учебно-тренировочное занятие"
         if result.startswith("выполняет практическое задание по теме"):
             # The generic safe RESULT intentionally carries no activity form.
             # Recover TYPE only from the row-local practical source and

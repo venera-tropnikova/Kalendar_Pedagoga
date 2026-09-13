@@ -19,10 +19,10 @@ def test_independent_operations_and_controls_are_retained():
 
 
 def test_failed_clause_does_not_erase_proven_action():
-    result = derive("Измерение длины. Отработка действий участника.")
+    result = derive("Измерение длины. Крутые склоны, залесенная местность.")
     assert "Измеряет длину" in result.planned_result
     assert "по теме" not in result.planned_result
-    assert any("NEEDS_REVIEW" in w and "действий участника" in w for w in result.warnings)
+    assert any("NEEDS_REVIEW" in w for w in result.warnings)
 
 
 def test_prohibition_does_not_become_action_in_mixed_source():

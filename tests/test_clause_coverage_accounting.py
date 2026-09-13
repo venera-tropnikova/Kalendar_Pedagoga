@@ -17,9 +17,9 @@ def test_each_clause_has_status_and_empty_local_result_is_not_lost():
     result = derive("Измерение длины. Знакомство с краеведческими объектами г.Салавата и Башкортостана.")
     assert result.clause_coverage
     assert all(status in {"COVERED", "NEEDS_REVIEW"} for _, status in result.clause_coverage)
-    unknown = [(clause, status) for clause, status in result.clause_coverage if "Знакомство" in clause]
-    assert unknown and unknown[0][1] == "NEEDS_REVIEW"
-    assert any("Знакомство" in warning for warning in result.warnings)
+    acquaintance = [(clause, status) for clause, status in result.clause_coverage if "Знакомство" in clause]
+    assert acquaintance and acquaintance[0][1] == "COVERED"
+    assert "знакомится" in result.planned_result.casefold()
     assert "Измеряет длину" in result.planned_result
 
 
