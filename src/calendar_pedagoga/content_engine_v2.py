@@ -7831,35 +7831,20 @@ def _apply_semantic_completeness_gate(
     )
 
 
-def derive_fields_v2(
-    *, topic_title: str, theory_text: str, practice_text: str,
-    program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
-    occurrence_index: int = 0, practice_appearance_count: int = 0,
+def _derive_fields_before_final_gate(
+    *,
+    topic_title: str,
+    theory_text: str,
+    practice_text: str,
+    program_content: str = "",
+    theory_hours: int = 0,
+    practice_hours: int = 0,
+    occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
-    """Gate finished RESULT; reconcile SOURCE coverage; sync CONTROL to RESULT."""
+    """SOURCE → derive → enrich → grammar. No fold and no final gate yet."""
+
     original = _derive_week_fields_v2(
-        topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
-        program_content=program_content, theory_hours=theory_hours,
-        practice_hours=practice_hours, occurrence_index=occurrence_index,
-        practice_appearance_count=practice_appearance_count,
-    )
-    original = _enrich_result_with_title_complements(
-        original,
-        topic_title=topic_title,
-        theory_hours=theory_hours,
-        practice_hours=practice_hours,
-    )
-    gated = _apply_result_grammar_gate(
-        original,
-        topic_title=topic_title,
-        theory_text=theory_text,
-        practice_text=practice_text,
-        program_content=program_content,
-        theory_hours=theory_hours,
-        practice_hours=practice_hours,
-    )
-    return _apply_semantic_completeness_gate(
-        gated,
         topic_title=topic_title,
         theory_text=theory_text,
         practice_text=practice_text,
@@ -7868,6 +7853,186 @@ def derive_fields_v2(
         practice_hours=practice_hours,
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
+    )
+    original = _enrich_result_with_title_complements(
+        original,
+        topic_title=topic_title,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    return _apply_result_grammar_gate(
+        original,
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+
+
+def _rebuild_control_before_final_gate(
+    result: str,
+    control: str,
+    *,
+    lesson_type: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> str:
+    """Fold-aware CONTROL sync that still runs before the FINAL gate."""
+
+    if _control_has_multisentence_quotes(control):
+        rebuilt = _quoted_actions_control(result)
+        if rebuilt:
+            control = rebuilt
+    control = _prefer_quoted_control_if_incomplete(result, control)
+    control = _unified_process_performance_control(result, control)
+    return _rebuild_control_from_accepted_result(
+        result,
+        control,
+        lesson_type=lesson_type,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+
+
+def _finalize_content_fields(
+    candidate: ContentEngineV2Result,
+    *,
+    topic_title: str,
+    theory_text: str,
+    practice_text: str,
+    program_content: str,
+    theory_hours: int,
+    practice_hours: int,
+    occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    """Fold → rebuild CONTROL → FINAL semantic + grammar + CONTROL coverage gate.
+
+    After this returns, TYPE/RESULT/CONTROL are immutable for the DOCX path.
+    """
+
+    folded_result = _fold_week_result(candidate.planned_result)
+    control = _rebuild_control_before_final_gate(
+        folded_result,
+        candidate.assessment_method,
+        lesson_type=candidate.lesson_type,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    prepared = replace(
+        candidate,
+        planned_result=folded_result,
+        assessment_method=control,
+    )
+    # Grammar after fold: a fold that breaks proof demotes clauses to NEEDS_REVIEW.
+    after_grammar = _apply_result_grammar_gate(
+        prepared,
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    return _apply_semantic_completeness_gate(
+        after_grammar,
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+
+
+def derive_fields_v2(
+    *, topic_title: str, theory_text: str, practice_text: str,
+    program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
+    occurrence_index: int = 0, practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    """Full CE2 path ending at the FINAL immutable content gate."""
+
+    prepared = _derive_fields_before_final_gate(
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+    return _finalize_content_fields(
+        prepared,
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+
+
+def week_has_unresolved_mandatory_review(row: LessonContentV2Row) -> bool:
+    """True when a mandatory SOURCE-clause stayed NEEDS_REVIEW after FINAL gate."""
+
+    return any(status == "NEEDS_REVIEW" for _, status in row.clause_coverage)
+
+
+def unresolved_mandatory_review_blocks(
+    rows: tuple[LessonContentV2Row, ...],
+) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    """Weeks that must block ready DOCX: unresolved mandatory NEEDS_REVIEW."""
+
+    blocks: list[tuple[int, tuple[str, ...]]] = []
+    for row in rows:
+        if not week_has_unresolved_mandatory_review(row):
+            continue
+        clauses = tuple(
+            clause for clause, status in row.clause_coverage if status == "NEEDS_REVIEW"
+        )
+        result_empty = not (row.planned_result or "").strip()
+        control_empty = not (row.assessment_method or "").strip()
+        control_incomplete = bool((row.planned_result or "").strip()) and (
+            control_empty
+            or not _control_covers_all_result_items(
+                row.planned_result, row.assessment_method
+            )
+        )
+        # Unresolved mandatory clause means RESULT coverage is incomplete even
+        # when some other clauses produced text.
+        if result_empty or control_empty or control_incomplete or clauses:
+            blocks.append((row.source.week_number, clauses))
+    return tuple(blocks)
+
+
+def format_unresolved_review_block_message(
+    blocks: tuple[tuple[int, tuple[str, ...]], ...],
+) -> str:
+    """User-facing reason: which weeks remain incomplete after FINAL gate."""
+
+    if not blocks:
+        return ""
+    parts: list[str] = []
+    for week_number, clauses in blocks:
+        sample = "; ".join(clauses[:3])
+        if len(clauses) > 3:
+            sample += f" … (+{len(clauses) - 3})"
+        if sample:
+            parts.append(f"неделя {week_number}: {sample}")
+        else:
+            parts.append(f"неделя {week_number}")
+    return (
+        "Календарный план не готов: после финального semantic gate остались "
+        "незакрытые обязательные SOURCE-фрагменты (NEEDS_REVIEW). "
+        "DOCX как готовый документ не выдаётся. "
+        + " | ".join(parts)
     )
 
 
@@ -8582,9 +8747,11 @@ def _derive_week_part(
     topic_totals: dict[tuple[str | None, str, str], tuple[int, int]],
     occurrence_index: int,
     practice_appearance_count: int = 0,
+    *,
+    finalize: bool = True,
 ) -> ContentEngineV2Result:
     theory_text, practice_text = _part_texts(part, topic_totals)
-    return derive_fields_v2(
+    kwargs = dict(
         topic_title=_weekly_source_topic(part),
         theory_text=theory_text,
         practice_text=practice_text,
@@ -8594,6 +8761,9 @@ def _derive_week_part(
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
     )
+    if finalize:
+        return derive_fields_v2(**kwargs)
+    return _derive_fields_before_final_gate(**kwargs)
 
 
 def _weekly_source_topic(part: WeekTopicPart | CalendarContentRow) -> str:
@@ -8638,6 +8808,7 @@ def build_lesson_content_v2(
     """Построить поля 2.0 по календарным строкам.
 
     Pipeline вызывает только при внутреннем флаге USE_CONTENT_ENGINE_V2.
+    RESULT/CONTROL/TYPE выходят только из FINAL gate и дальше не меняются.
     """
 
     result: list[LessonContentV2Row] = []
@@ -8661,6 +8832,7 @@ def build_lesson_content_v2(
                         _topic_hour_totals(parts),
                         occurrence_index,
                         count if part.practice_hours else 0,
+                        finalize=False,
                     )
                 )
             lesson_type, planned_result, assessment = _merge_week_part_fields(
@@ -8676,6 +8848,25 @@ def build_lesson_content_v2(
             clause_coverage = tuple(
                 entry for item in derived_parts for entry in item.clause_coverage
             )
+            merged = replace(
+                derived,
+                lesson_type=lesson_type,
+                planned_result=planned_result,
+                assessment_method=assessment,
+                theory_text=theory_text,
+                practice_text=practice_text,
+                warnings=tuple(dict.fromkeys((*warnings, *extra_warnings))),
+                clause_coverage=clause_coverage,
+            )
+            final = _finalize_content_fields(
+                merged,
+                topic_title=_weekly_source_topic(row),
+                theory_text=theory_text,
+                practice_text=practice_text,
+                program_content=row.program_content_full or "",
+                theory_hours=row.theory_hours,
+                practice_hours=row.practice_hours,
+            )
         else:
             key = _content_occurrence_key(row)
             occurrence_index = 0
@@ -8683,7 +8874,7 @@ def build_lesson_content_v2(
             if row.practice_hours:
                 occurrence_index = practice_occurrences.get(key, 0)
                 practice_occurrences[key] = occurrence_index + 1
-            derived = derive_fields_v2(
+            prepared = _derive_fields_before_final_gate(
                 topic_title=_weekly_source_topic(row),
                 theory_text=theory_text,
                 practice_text=practice_text,
@@ -8695,33 +8886,35 @@ def build_lesson_content_v2(
             )
             lesson_type = _aggregate_week_lesson_type(
                 parts,
-                [derived],
+                [prepared],
                 theory_text=theory_text,
                 practice_text=practice_text,
             )
-            planned_result = derived.planned_result
-            assessment = derived.assessment_method
-            extra_warnings = derived.warnings
-            clause_coverage = derived.clause_coverage
-        planned_result = _fold_week_result(planned_result)
-        if _control_has_multisentence_quotes(assessment):
-            rebuilt = _quoted_actions_control(planned_result)
-            if rebuilt:
-                assessment = rebuilt
-        assessment = _prefer_quoted_control_if_incomplete(planned_result, assessment)
+            prepared = replace(prepared, lesson_type=lesson_type)
+            final = _finalize_content_fields(
+                prepared,
+                topic_title=_weekly_source_topic(row),
+                theory_text=theory_text,
+                practice_text=practice_text,
+                program_content=row.program_content_full or "",
+                theory_hours=row.theory_hours,
+                practice_hours=row.practice_hours,
+                occurrence_index=occurrence_index,
+                practice_appearance_count=count if row.practice_hours else 0,
+            )
         result.append(
             LessonContentV2Row(
                 source=row,
                 theory_text=theory_text,
                 practice_text=practice_text,
-                lesson_type=lesson_type,
-                planned_result=planned_result,
-                assessment_method=assessment,
-                action=derived.frame.action,
-                object=derived.frame.object,
-                conditions=derived.frame.conditions,
-                warnings=tuple(dict.fromkeys((*warnings, *extra_warnings))),
-                clause_coverage=clause_coverage,
+                lesson_type=final.lesson_type,
+                planned_result=final.planned_result,
+                assessment_method=final.assessment_method,
+                action=final.frame.action,
+                object=final.frame.object,
+                conditions=final.frame.conditions,
+                warnings=tuple(dict.fromkeys((*warnings, *final.warnings))),
+                clause_coverage=final.clause_coverage,
             )
         )
     return tuple(result)

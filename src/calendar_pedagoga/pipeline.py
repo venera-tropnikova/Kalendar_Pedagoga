@@ -19,7 +19,12 @@ from calendar_pedagoga.organization_template import (
     OrganizationTemplateError,
     validate_organization_template,
 )
-from calendar_pedagoga.content_engine_v2 import LessonContentV2Row, build_lesson_content_v2
+from calendar_pedagoga.content_engine_v2 import (
+    LessonContentV2Row,
+    build_lesson_content_v2,
+    format_unresolved_review_block_message,
+    unresolved_mandatory_review_blocks,
+)
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow, resolve_lesson_content
 from calendar_pedagoga.organization_template import CalendarTemplateSelection
@@ -63,7 +68,11 @@ def _build_pipeline_lesson_content(
     use_content_engine_v2: bool,
 ) -> tuple[LessonContentRow, ...]:
     if use_content_engine_v2:
-        return _lesson_rows_from_v2(build_lesson_content_v2(content_rows))
+        v2_rows = build_lesson_content_v2(content_rows)
+        blocks = unresolved_mandatory_review_blocks(v2_rows)
+        if blocks:
+            raise PipelineError(format_unresolved_review_block_message(blocks))
+        return _lesson_rows_from_v2(v2_rows)
     return build_lesson_content(content_rows)
 
 
@@ -118,9 +127,10 @@ def run_calendar_pipeline(
         source_utp_name,
         match_reviews=match_reviews,
     )
+    use_ce2 = _content_engine_v2_enabled(use_content_engine_v2)
     lesson_rows = _build_pipeline_lesson_content(
         content_rows,
-        use_content_engine_v2=_content_engine_v2_enabled(use_content_engine_v2),
+        use_content_engine_v2=use_ce2,
     )
 
     ai_result = None
@@ -146,7 +156,11 @@ def run_calendar_pipeline(
         except OrganizationTemplateError as error:
             raise PipelineError(str(error)) from error
 
-    resolved = resolve_lesson_content(lesson_rows, ai_result)
+    resolved = resolve_lesson_content(
+        lesson_rows,
+        ai_result,
+        freeze_pedagogical_fields=use_ce2 and not use_ai,
+    )
     try:
         docx_bytes = generate_calendar_docx(
             utp,

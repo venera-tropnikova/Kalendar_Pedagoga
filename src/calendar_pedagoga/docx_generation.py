@@ -28,6 +28,7 @@ from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.content_generation import WeekTopicPart
 from calendar_pedagoga.academic_year import normalize_academic_year
 from calendar_pedagoga.program_parsing import infer_study_year_number
+from calendar_pedagoga.generator_revision import generator_provenance
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1307,10 +1308,73 @@ def _populate_calendar_table(
     return table, columns, months
 
 
+def _inject_generator_provenance(content: bytes) -> bytes:
+    """Attach hidden custom properties without changing visible document body."""
+
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    props = generator_provenance(_PROJECT_ROOT)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        (
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/'
+            '2006/docPropsVTypes">'
+        ),
+    ]
+    for index, (name, value) in enumerate(props.items(), start=1):
+        safe_name = name.replace('"', "")
+        safe_value = (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        lines.append(
+            f'<property fmtid="{{D5CDD505-2E9C-101B-9397-08002B2CF9AE}}" '
+            f'pid="{index + 1}" name="{safe_name}">'
+            f"<vt:lpwstr>{safe_value}</vt:lpwstr></property>"
+        )
+    lines.append("</Properties>")
+    custom_xml = "\n".join(lines).encode("utf-8")
+
+    source = BytesIO(content)
+    target = BytesIO()
+    with ZipFile(source, "r") as zin, ZipFile(target, "w", compression=ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                if "docProps/custom.xml" not in text:
+                    overlay = (
+                        '<Override PartName="/docProps/custom.xml" '
+                        'ContentType="application/vnd.openxmlformats-officedocument.'
+                        'custom-properties+xml"/>'
+                    )
+                    text = text.replace("</Types>", overlay + "</Types>")
+                data = text.encode("utf-8")
+            elif info.filename == "_rels/.rels":
+                text = data.decode("utf-8")
+                if "custom-properties" not in text:
+                    rel = (
+                        '<Relationship Id="rIdGeneratorCustom" '
+                        'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        'relationships/custom-properties" Target="docProps/custom.xml"/>'
+                    )
+                    text = text.replace("</Relationships>", rel + "</Relationships>")
+                data = text.encode("utf-8")
+            elif info.filename == "docProps/custom.xml":
+                continue
+            zout.writestr(info, data)
+        zout.writestr("docProps/custom.xml", custom_xml)
+    return target.getvalue()
+
+
 def _save_document(document) -> bytes:
     buffer = BytesIO()
     document.save(buffer)
-    return buffer.getvalue()
+    return _inject_generator_provenance(buffer.getvalue())
 
 
 def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset[int]]:

@@ -4092,7 +4092,7 @@ def run_app() -> None:
                 if program is not None
                 else ()
             )
-        except (ScheduleValidationError, ValueError) as error:
+        except (PipelineError, ScheduleValidationError, ValueError) as error:
             st.error(f"Не удалось построить календарное распределение: {error}")
             st.session_state["analysis_ready"] = False
             return
