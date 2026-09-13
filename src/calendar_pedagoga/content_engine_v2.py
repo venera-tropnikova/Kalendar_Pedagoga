@@ -578,12 +578,18 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
                 pending.append(token)
                 continue
         if case == "acc" and not colon_list and (not seen_noun or prefix.startswith("(")):
-            # Parenthetical exemplars («треугольники, …») are already direct-case
-            # illustrations, not genitive objects awaiting conversion.
+            # Parenthetical exemplars that are already direct-case stay as-is.
+            # A genitive apposition («лагеря (бивака)») must follow the head
+            # into the accusative («лагерь (бивак)»).
             if prefix.startswith("(") and seen_noun:
                 if pending:
                     apply_pending(False, "m")
-                out.append(token)
+                acc_paren = _noun_gen_to_acc(core)
+                if acc_paren != core:
+                    core = acc_paren
+                    out.append(f"{prefix}{core}{suffix}")
+                else:
+                    out.append(token)
                 has_post_head = True
                 continue
             acc_core = _noun_gen_to_acc(core)
@@ -757,6 +763,13 @@ def _is_exercise_word(word: str) -> bool:
 def _is_walk_word(word: str) -> bool:
     core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE).casefold()
     return bool(re.match(r"(?:прогулк\w*|экскурси[яиею])$", core))
+
+
+def _is_travel_word(word: str) -> bool:
+    """Named travel activity («путешествия»), not the agent «путешественник»."""
+
+    core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE).casefold()
+    return bool(re.match(r"путешеств(?:ие|ия|ию|ий|ием|иями)?$", core))
 
 
 def _token_core(token: str) -> str:
@@ -1740,29 +1753,38 @@ def _transform_segment(
         inflected = _inflect_object_phrase(remainder, case="acc")
         return _normalize_spaces(f"проводит {inflected}"), "проведение", remainder, ""
 
-    if _is_walk_word(head):
+    travel_head = _is_travel_word(head) and not theory_only
+    if _is_walk_word(head) or travel_head:
         walk_words: list[str] = []
         idx = 0
         while idx < len(rest) and (
             _is_walk_word(re.sub(r"[^\wёЁ]", "", rest[idx]))
+            or _is_travel_word(re.sub(r"[^\wёЁ]", "", rest[idx]))
             or rest[idx].casefold() in {"и", "или"}
         ):
             walk_words.append(rest[idx])
             idx += 1
         remainder = " ".join(rest[idx:]).strip()
-        obj, cond = _split_object_and_conditions(remainder)
-        lowered_walks = []
-        for word in walk_words:
-            if word.casefold() in {"и", "или"}:
-                lowered_walks.append(word.casefold())
-            elif word[:1].isupper() and not re.match(r"^[А-ЯЁ]{2,}$", word):
-                lowered_walks.append(word[:1].lower() + word[1:])
-            else:
-                lowered_walks.append(word)
-        phrase = "совершает " + " ".join(lowered_walks)
-        if remainder:
-            phrase += f" {remainder}"
-        return _normalize_spaces(phrase), " ".join(walk_words), obj, cond
+        # Bare «путешествия» in theory/lists is knowledge, not a pupil trip.
+        # A path PP («по карте») proves the map-travel practice activity.
+        if travel_head and not _is_walk_word(head) and not re.match(
+            r"(?i)^по\b", remainder
+        ):
+            pass
+        else:
+            obj, cond = _split_object_and_conditions(remainder)
+            lowered_walks = []
+            for word in walk_words:
+                if word.casefold() in {"и", "или"}:
+                    lowered_walks.append(word.casefold())
+                elif word[:1].isupper() and not re.match(r"^[А-ЯЁ]{2,}$", word):
+                    lowered_walks.append(word[:1].lower() + word[1:])
+                else:
+                    lowered_walks.append(word)
+            phrase = "совершает " + " ".join(lowered_walks)
+            if remainder:
+                phrase += f" {remainder}"
+            return _normalize_spaces(phrase), " ".join(walk_words), obj, cond
 
     if _looks_like_verbal_noun(head):
         if theory_only and (
@@ -4663,6 +4685,13 @@ def _process_control(result: str, lesson_type: str) -> str:
         return "педагогическое наблюдение за выполнением " + _phrase_to_genitive(focus)
     if "экскурси" in type_low or low.startswith("совершает прогул") or low.startswith("совершает экскурси"):
         return "педагогическое наблюдение на экскурсии"
+    if re.match(r"(?i)^совершает\b", result):
+        # Map-travel and other совершает activities keep the finite wording in
+        # CONTROL; a genitive paraphrase of a quoted label is not proven.
+        return (
+            "Педагогическое наблюдение: проверяется действие "
+            + _format_control_action_quote(result)
+        )
     return ""
 
 
@@ -4917,17 +4946,25 @@ def _control_covers_operation(control: str, verb: str, obj: str) -> bool:
     return False
 
 
+def _format_control_action_quote(phrase: str) -> str:
+    """Quote a RESULT sentence for CONTROL without nesting identical guillemets."""
+
+    capped = _cap_sentence(_normalize_spaces(phrase)).rstrip(".")
+    if "«" in capped or "»" in capped:
+        inner = capped.replace("«", "„").replace("»", "“")
+        return f"«{inner}»"
+    return f"«{capped}»"
+
+
 def _quoted_actions_control(result: str) -> str:
     """One quoted finite action per RESULT sentence; no multi-sentence quotes."""
 
-    segments = _result_control_segments(result)
-    if not segments:
-        return ""
     quotes: list[str] = []
-    for verb, obj in segments:
-        phrase = _cap_sentence(_normalize_spaces(f"{verb} {obj}")).rstrip(".")
-        if phrase:
-            quotes.append(f"«{phrase}»")
+    for sentence in _result_sentences(result):
+        phrase = _normalize_spaces(sentence).rstrip(".")
+        if not phrase or not _leading_finite_verb(phrase):
+            continue
+        quotes.append(_format_control_action_quote(phrase))
     if not quotes:
         return ""
     if len(quotes) == 1:
@@ -6035,7 +6072,7 @@ def _quality_issue(
         if clause_words - source_words:
             return "source_leakage"
     allowed = _proven_finite_predicates()
-    first = result.split()[0].casefold()
+    first = _finite_token(result.split()[0])
     if first not in allowed:
         return "unproven_predicate"
     broken_genitive_plural = re.match(
@@ -6058,7 +6095,7 @@ def _quality_issue(
     ):
         return "unproven_object_case"
     for left, right in re.findall(r"(?i)\b(\w+)\s+и\s+(\w+)", result):
-        if left.casefold() in allowed and right.casefold() not in allowed:
+        if _finite_token(left) in allowed and _finite_token(right) not in allowed:
             return "unproven_coordinated_predicate"
     for match in re.finditer(r"(?i)\bучаствует\s+в\s+([^.,;:]+)", result):
         words = match.group(1).casefold().split()
@@ -6538,6 +6575,32 @@ def _derive_selected_fields_v2(
     )
 
 
+def _selected_proof_absent_from_result(phrase: str, result: str) -> bool:
+    """True when the selected frame's proven finite activity is not in RESULT."""
+
+    folded = _normalize_spaces(result).casefold()
+    if not phrase or not folded:
+        return True
+    verb = _leading_finite_verb(phrase).casefold()
+    if not verb:
+        return True
+    if verb == "участвует":
+        return "участвует" not in folded and "викторин" not in folded
+    if verb == "совершает":
+        return "совершает" not in folded and "путешеств" not in folded
+    if verb == "проводит":
+        return "проводит" not in folded and "викторин" not in folded
+    obj = _drop_leading_verb(phrase).casefold()
+    stems = [
+        token
+        for token in re.findall(r"[а-яё]{4,}", obj)
+        if token not in _PREPOSITIONS and not _is_adjective(token)
+    ]
+    if stems and any(stem[:4] in folded for stem in stems):
+        return False
+    return verb not in folded
+
+
 def _nonempty_result_in(candidate: str, result: str) -> bool:
     candidate = _normalize_spaces(candidate).strip(" .").casefold()
     return bool(candidate and candidate in _normalize_spaces(result).casefold())
@@ -6722,12 +6785,49 @@ def _derive_week_fields_v2(
                 practice_hours=practice_hours,
             )
             phrase = proof.planned_result
-            if (
-                not _nonempty_result_in(phrase, original.planned_result)
-                or _coordinated_action_uncovered(clause, original.planned_result)
+            exact = _nonempty_result_in(phrase, original.planned_result)
+            incomplete = (
+                _coordinated_action_uncovered(clause, original.planned_result)
                 or _ways_catalogue_uncovered(clause, original.planned_result)
                 or _list_member_uncovered(clause, original.planned_result)
-            ):
+            )
+            absent = _selected_proof_absent_from_result(phrase, original.planned_result)
+            # TYPE may keep this frame while RESULT still came from another
+            # unit: restore only when the activity itself is missing.
+            if absent and not exact:
+                if (
+                    phrase
+                    and proof.assessment_method
+                    and not proof.warnings
+                    and "по теме" not in phrase.casefold()
+                    and not _quality_issue(
+                        phrase,
+                        proof.assessment_method,
+                        source=clause,
+                        clause=proof.frame.clause,
+                    )
+                ):
+                    if phrase not in results:
+                        results.append(phrase)
+                    quoted = (
+                        ("Устный опрос" if not practice_hours else "Педагогическое наблюдение")
+                        + ": проверяется действие "
+                        + _format_control_action_quote(phrase)
+                    )
+                    control = quoted
+                    if not practice_hours:
+                        areas = [
+                            _oral_object_for_control(obj)
+                            for _verb, obj in _result_control_segments(phrase)
+                            if obj
+                        ]
+                        if areas and all(areas):
+                            control = "Устный опрос по: " + _join_and(areas)
+                    if control not in controls:
+                        controls.append(control)
+                else:
+                    uncovered.append(clause)
+            elif incomplete:
                 uncovered.append(clause)
             continue
         if (_prohibition_only_source(clause) or _bare_list_without_action(clause)
@@ -6769,7 +6869,8 @@ def _derive_week_fields_v2(
         # objects can lose conditions or attach them to a different action.
         quoted = (
             ("Устный опрос" if not practice_hours else "Педагогическое наблюдение")
-            + ": проверяется действие «" + local.planned_result.rstrip(".") + "»"
+            + ": проверяется действие "
+            + _format_control_action_quote(local.planned_result)
         )
         # An oral check names the area it asks about. The quoted RESULT stays
         # only where the object case of that area is not proven.
@@ -6807,6 +6908,9 @@ def _derive_week_fields_v2(
         rebuilt = _quoted_actions_control(_fold_week_result(merged_result))
         if rebuilt:
             assessment = rebuilt
+    assessment = _prefer_quoted_control_if_incomplete(
+        _fold_week_result(merged_result), assessment
+    )
     return replace(
         original,
         planned_result=merged_result,
@@ -7330,7 +7434,10 @@ def _join_and(parts: list[str]) -> str:
 
 
 def _leading_finite_verb(text: str) -> str:
-    match = re.match(r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет))\b", text.strip())
+    match = re.match(
+        r"(?i)^([А-Яа-яЁё]+(?:ет|ит|ёт|ут|ют|ает|яет)(?:ся|сь)?)\b",
+        text.strip(),
+    )
     return match.group(1) if match else ""
 
 
@@ -7446,17 +7553,18 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
             flush()
             folded.append(sentence)
             continue
-        if re.search(
-            r"(?i)(?<![А-Яа-яЁё])(?:выполняет|определяет|составляет|подготавливает|"
-            r"характеризует|раскрывает|совершает|участвует|называет|измеряет|"
-            r"строит|ремонтирует|оценивает|изготавливает)\b",
-            obj,
+        # A remnant that still hosts a finite pupil verb is its own sentence,
+        # not an object list glued under the previous predicate.
+        if any(
+            _is_action_finite_token(token)
+            for token in re.findall(r"[А-Яа-яЁё]+", obj)
         ):
             flush()
             folded.append(sentence if sentence.endswith((".", "!", "?")) else f"{sentence}.")
             continue
         key = current.casefold()
-        if key in resumable and key in slots:
+        # A finished colon enumeration must not absorb a later independent action.
+        if key in resumable and key in slots and not any(":" in item for item in slots[key]):
             prior = slots[key]
             if obj.casefold() not in {item.casefold() for item in prior}:
                 prior.append(obj)
@@ -7502,6 +7610,24 @@ def _fold_week_result(result: str) -> str:
     return _normalize_spaces(
         " ".join(_fold_repeated_predicates(_result_sentences(result)))
     )
+
+
+def _prefer_quoted_control_if_incomplete(result: str, control: str) -> str:
+    """Rebuild quoted CONTROL when a shortened process fragment misses an action."""
+
+    # Never rewrite an oral theory CONTROL into observation quotes.
+    if re.search(r"(?i)устный опрос", control or ""):
+        return control
+    # Quoted actions plus a separate «наблюдение за …» process fragment leave a
+    # truncated check for the same week; rebuild from the finished RESULT.
+    if (
+        re.search(r"(?i)проверя(?:ется|ются)\s+действи", control or "")
+        and re.search(r"(?i);\s*педагогическое наблюдение за\b", control or "")
+    ):
+        rebuilt = _quoted_actions_control(result)
+        if rebuilt:
+            return rebuilt
+    return control
 
 
 def _unified_process_performance_control(result: str, control: str) -> str:
@@ -7638,7 +7764,9 @@ def _unlabelled_method_group(
     for label, index in index_by_label.items():
         if folded.startswith(f"{label} "):
             remainder = item[len(label) :].strip()
-            if remainder:
+            # «педагогическое наблюдение за техникой …» is a complete method
+            # phrase, not a tail of «Педагогическое наблюдение: проверяется …».
+            if remainder and not re.match(r"(?i)^(за|при)\b", remainder):
                 return index, remainder
     return None
 
@@ -7998,6 +8126,7 @@ def build_lesson_content_v2(
             rebuilt = _quoted_actions_control(planned_result)
             if rebuilt:
                 assessment = rebuilt
+        assessment = _prefer_quoted_control_if_incomplete(planned_result, assessment)
         result.append(
             LessonContentV2Row(
                 source=row,
