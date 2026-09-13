@@ -68,7 +68,17 @@ def test_positive_map_travel_and_local_quiz_reach_result_control() -> None:
     assert "путешеств" in result and "по карте" in result
     assert "викторин" in result
     assert "путешеств" in control and "викторин" in control
-    assert all(status == "COVERED" for _clause, status in derived.clause_coverage)
+    assert all(status in {"COVERED", "NEEDS_REVIEW"} for _clause, status in derived.clause_coverage)
+    practice_statuses = {
+        clause: status
+        for clause, status in derived.clause_coverage
+        if any(
+            marker in clause.casefold()
+            for marker in ("знакомств", "путешеств", "викторин")
+        )
+    }
+    assert practice_statuses
+    assert all(status == "COVERED" for status in practice_statuses.values())
 
 
 def test_negative_bare_travel_without_path_pp_stays_non_trip() -> None:

@@ -7339,12 +7339,504 @@ def _sync_control_after_result_gate(
     return text
 
 
+def _apply_result_grammar_gate(
+    original: ContentEngineV2Result,
+    *,
+    topic_title: str,
+    theory_text: str,
+    practice_text: str,
+    program_content: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> ContentEngineV2Result:
+    """Drop or repair RESULT sentences that fail the grammar gate."""
+
+    predicates = "|".join(re.escape(v) for v in _proven_finite_predicates())
+    sentences = re.split(
+        rf"(?i)(?<=[.!?])\s+(?=(?:{predicates})\b)",
+        original.planned_result,
+    )
+    rejected = [s for s in sentences if _result_grammar_issue(s)]
+    if not rejected:
+        return original
+    replacements: dict[str, str] = {}
+    restored: set[str] = set()
+    for clause, status in original.clause_coverage:
+        safe = _safe_operation_result(
+            clause,
+            practical=bool(practice_hours and _nonempty_result_in(clause, practice_text)),
+        )
+        if status != "COVERED" or not safe:
+            continue
+        proof = _derive_selected_fields_v2(
+            topic_title=topic_title,
+            theory_text="",
+            practice_text=clause,
+            program_content=clause,
+            practice_hours=practice_hours,
+        )
+        for sentence in rejected:
+            if _normalize_spaces(proof.planned_result).casefold() == _normalize_spaces(
+                sentence
+            ).casefold():
+                replacements[sentence] = safe
+                restored.add(clause)
+    for sentence in rejected:
+        if sentence in replacements:
+            continue
+        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
+            continue
+        if not _admissible_knowledge_object(_knowledge_result_object(sentence)):
+            continue
+        for clause, status in original.clause_coverage:
+            if status != "COVERED" or not _knowledge_result_cites_clause(sentence, clause):
+                continue
+            replacements[sentence] = sentence
+            restored.add(clause)
+            break
+    source_text = _normalize_spaces(f"{theory_text} {program_content}")
+    knowledge_source = any(_is_theory_knowledge_token(word) for word in source_text.split())
+    for sentence in rejected if knowledge_source else ():
+        if sentence in replacements:
+            continue
+        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
+            continue
+        trimmed = _proven_object_prefix(sentence, source_text)
+        if trimmed:
+            replacements[sentence] = trimmed
+    retained = " ".join(
+        replacements.get(s, s) for s in sentences if s not in rejected or s in replacements
+    )
+    coverage = []
+    for clause, status in original.clause_coverage:
+        if status == "COVERED" and clause not in restored:
+            proof = _derive_selected_fields_v2(
+                topic_title=topic_title,
+                theory_text=clause if not practice_hours else "",
+                practice_text=clause if practice_hours else "",
+                program_content=clause,
+                theory_hours=theory_hours,
+                practice_hours=practice_hours,
+            )
+            proof_text = proof.planned_result.casefold().replace("раскрывает", "характеризует")
+            retained_text = retained.casefold().replace("раскрывает", "характеризует")
+            if not _nonempty_result_in(proof_text, retained_text):
+                status = "NEEDS_REVIEW"
+        coverage.append((clause, status))
+    warnings = list(original.warnings)
+    if any(s not in replacements for s in rejected):
+        warnings.append(
+            "NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: "
+            + original.frame.clause
+        )
+    for clause, status in coverage:
+        if status == "NEEDS_REVIEW":
+            warnings.append(
+                "NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: "
+                + clause
+            )
+    assessment = _sync_control_after_result_gate(original.assessment_method, replacements)
+    return replace(
+        original,
+        planned_result=retained,
+        assessment_method=assessment,
+        type_result=original.type_result
+        if original.type_result is not None
+        else original.planned_result,
+        clause_coverage=tuple(coverage),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _meaning_stems(text: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[а-яё]{4,}", _normalize_spaces(text).casefold())
+        if token not in _PREPOSITIONS and not _is_adjective(token)
+    ]
+
+
+def _clause_meaning_preserved_in_result(
+    clause: str,
+    result: str,
+    *,
+    topic_title: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> bool:
+    """COVERED requires accepted RESULT to keep the clause's distinctive meaning."""
+
+    folded = _normalize_spaces(result).casefold()
+    if not folded:
+        return False
+    for sentence in _result_sentences(result):
+        if _knowledge_result_cites_clause(sentence, clause):
+            return True
+    proof = _derive_selected_fields_v2(
+        topic_title=topic_title,
+        theory_text=clause if not practice_hours else "",
+        practice_text=clause if practice_hours else "",
+        program_content=clause,
+        theory_hours=theory_hours if not practice_hours else 0,
+        practice_hours=practice_hours,
+    ).planned_result
+    if proof.strip():
+        obj = _drop_leading_verb(proof)
+        stems = _meaning_stems(obj) or _meaning_stems(proof)
+        if stems and any(stem[:4] in folded for stem in stems):
+            return True
+        verb = _leading_finite_verb(proof).casefold()
+        if verb and not stems:
+            return verb in folded
+    # Fall back to source stems when local proof is empty but RESULT still cites them.
+    stems = _meaning_stems(clause)
+    return bool(stems) and any(stem[:4] in folded for stem in stems)
+
+
+def _control_covers_all_result_items(result: str, control: str) -> bool:
+    """Every accepted RESULT obligation must be checkable from CONTROL."""
+
+    result = _normalize_spaces(result)
+    control = _normalize_spaces(control)
+    if not result.strip():
+        return True
+    if not control.strip():
+        return False
+    control_low = control.casefold()
+    # Compact named-form controls already selected from RESULT (викторина, диктант).
+    sentences = [s for s in _result_sentences(result) if _leading_finite_verb(s)]
+    if len(sentences) <= 1:
+        named = _named_form_control(result, ActionFrame("", "", "", ""), "")
+        if named and named.casefold() == control_low:
+            return True
+    obligations = _control_result_obligations(result)
+    if not obligations:
+        obligations = [(verb, obj) for verb, obj in _result_control_segments(result) if obj]
+    if not obligations:
+        return True
+    for verb, obj in obligations:
+        if verb.casefold() in _KNOWLEDGE_RESULT_VERBS:
+            stems = _meaning_stems(obj)
+            if stems and any(stem[:4] in control_low for stem in stems):
+                continue
+            if _control_covers_operation(control, verb, obj):
+                continue
+            return False
+        if _control_covers_operation(control, verb, obj):
+            continue
+        # Process CONTROL may name the activity without repeating the finite verb.
+        activity_tokens = re.findall(r"[а-яё]{4,}", obj.casefold()) or re.findall(
+            r"[а-яё]{4,}", verb.casefold()
+        )
+        if activity_tokens and any(token[:4] in control_low for token in activity_tokens):
+            continue
+        return False
+    return True
+
+
+def _rebuild_control_from_accepted_result(
+    result: str,
+    control: str,
+    *,
+    lesson_type: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> str:
+    """CONTROL may only cite accepted RESULT items; keep valid oral/named forms."""
+
+    if not _normalize_spaces(result).strip():
+        return _normalize_spaces(control)
+    if _control_covers_all_result_items(result, control):
+        return control
+    # Named-form CONTROL is valid only for a single named activity RESULT.
+    sentences = [s for s in _result_sentences(result) if _leading_finite_verb(s)]
+    if len(sentences) <= 1:
+        named = _named_form_control(result, ActionFrame("", "", "", ""), lesson_type)
+        if named and (
+            not control.strip()
+            or named.casefold() == control.casefold()
+            or named.casefold() in control.casefold()
+        ):
+            return named
+    rebuilt = _control_from_proven_result(result, lesson_type=lesson_type)
+    if rebuilt and _control_covers_all_result_items(result, rebuilt):
+        return rebuilt
+    aligned = _align_control_to_result(control or rebuilt, result)
+    if aligned and _control_covers_all_result_items(result, aligned):
+        return aligned
+    # Keep a non-empty process CONTROL that already names the RESULT activity.
+    if control.strip():
+        result_stems = _meaning_stems(_drop_leading_verb(result)) or _meaning_stems(result)
+        if result_stems and any(stem[:4] in control.casefold() for stem in result_stems):
+            return control
+    if practice_hours and not theory_hours:
+        quoted = _quoted_actions_control(result)
+        if quoted and _control_covers_all_result_items(result, quoted):
+            return quoted
+    # Append only missing action obligations; leave oral heads intact.
+    text = _normalize_spaces(aligned or rebuilt or control)
+    for verb, obj in _control_result_obligations(result):
+        if verb.casefold() in _KNOWLEDGE_RESULT_VERBS:
+            continue
+        if _control_covers_operation(text, verb, obj):
+            continue
+        piece = f"проверка действия «{verb} {obj}»".rstrip()
+        text = f"{text}; {piece}" if text else piece
+    return text
+
+
+def _try_recover_clause_result(
+    clause: str,
+    *,
+    topic_title: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> ContentEngineV2Result | None:
+    """Return a quality-safe local RESULT for a SOURCE clause, or None."""
+
+    if _bare_list_without_action(clause) or _prohibition_only_source(clause):
+        return None
+    if re.search(r"(?i)\b(?:педагог|учитель|инструктор|тренер)\b", clause):
+        return None
+    # Prefer the lane suggested by hours; try the other lane as fallback.
+    orders: tuple[tuple[bool, bool], ...]
+    if practice_hours and not theory_hours:
+        orders = ((False, True),)
+    elif theory_hours and not practice_hours:
+        orders = ((True, False),)
+    else:
+        orders = ((False, True), (True, False))
+    for theory_only, practical in orders:
+        local = _derive_selected_fields_v2(
+            topic_title=topic_title,
+            theory_text=clause if theory_only else "",
+            practice_text=clause if practical else "",
+            program_content=clause,
+            theory_hours=max(1, theory_hours) if theory_only else 0,
+            practice_hours=max(1, practice_hours) if practical else 0,
+        )
+        if (
+            not local.planned_result
+            or not local.assessment_method
+            or local.warnings
+            or "по теме" in local.planned_result.casefold()
+            or "по теме" in local.assessment_method.casefold()
+            or _quality_issue(
+                local.planned_result,
+                local.assessment_method,
+                source=clause,
+                clause=local.frame.clause,
+            )
+        ):
+            continue
+        if not practice_hours and theory_only and not _proven_theory_object(clause):
+            continue
+        return local
+    return None
+
+
+def _selected_source_clauses(
+    *,
+    theory_text: str,
+    practice_text: str,
+    program_content: str,
+    theory_hours: int,
+    practice_hours: int,
+    occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
+) -> list[str]:
+    """Independent SOURCE clauses of the assigned week/slot only."""
+
+    if practice_hours and practice_appearance_count > 1 and practice_text.strip():
+        units = _coalesce_activity_units(practice_units_from_text(practice_text))
+        slots, _flags = assign_distributed_practice_slots(units, practice_appearance_count)
+        if slots:
+            selected = list(slots[min(occurrence_index, len(slots) - 1)])
+            return [
+                clause
+                for clause in selected
+                if clause.casefold().strip(" .:") not in {"теория", "практика"}
+            ]
+    if theory_hours and practice_hours:
+        pooled = f"{theory_text}\n{practice_text}".strip()
+    else:
+        pooled = _week_result_source(
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+            theory_text=theory_text,
+            practice_text=practice_text,
+            program_content=program_content,
+        )
+    return [
+        clause
+        for clause in _clause_units(pooled)
+        if clause.casefold().strip(" .:") not in {"теория", "практика"}
+    ]
+
+
+def _apply_semantic_completeness_gate(
+    candidate: ContentEngineV2Result,
+    *,
+    topic_title: str,
+    theory_text: str,
+    practice_text: str,
+    program_content: str,
+    theory_hours: int,
+    practice_hours: int,
+    occurrence_index: int = 0,
+    practice_appearance_count: int = 0,
+) -> ContentEngineV2Result:
+    """Universal gate: no mandatory SOURCE meaning may vanish silently."""
+
+    source_clauses = _selected_source_clauses(
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
+    )
+    prior_status = {
+        clause: status
+        for clause, status in candidate.clause_coverage
+        if status in {"COVERED", "NEEDS_REVIEW"}
+    }
+    coverage_map = dict(prior_status)
+    for clause in source_clauses:
+        coverage_map.setdefault(clause, "NEEDS_REVIEW")
+
+    result = candidate.planned_result
+    control = candidate.assessment_method
+    warnings = list(candidate.warnings)
+    recovered_controls: list[str] = []
+
+    for clause in source_clauses:
+        prior = prior_status.get(clause)
+        # Intentional NEEDS_REVIEW stays review: do not invent a RESULT.
+        if prior == "NEEDS_REVIEW":
+            coverage_map[clause] = "NEEDS_REVIEW"
+            continue
+        preserved = _clause_meaning_preserved_in_result(
+            clause,
+            result,
+            topic_title=topic_title,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        )
+        if prior == "COVERED" and preserved:
+            coverage_map[clause] = "COVERED"
+            continue
+        if prior == "COVERED" and not preserved:
+            coverage_map[clause] = "NEEDS_REVIEW"
+            warnings.append(
+                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                + clause
+            )
+            continue
+        # prior is None: clause was absent from accounting — try one safe recovery.
+        local = _try_recover_clause_result(
+            clause,
+            topic_title=topic_title,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        )
+        if local is None:
+            coverage_map[clause] = "NEEDS_REVIEW"
+            continue
+        if _nonempty_result_in(local.planned_result, result) or not _selected_proof_absent_from_result(
+            local.planned_result, result
+        ):
+            coverage_map[clause] = "COVERED"
+            continue
+        recovered_controls.append(local.assessment_method)
+        coverage_map[clause] = "COVERED"
+        result = _merge_independent_part_results([result, local.planned_result])
+
+    if recovered_controls:
+        control = _join_control_clauses(
+            [control, *recovered_controls] if control.strip() else recovered_controls
+        )
+        control = _unified_process_performance_control(result, control)
+        if _control_has_multisentence_quotes(control):
+            rebuilt = _quoted_actions_control(_fold_week_result(result))
+            if rebuilt:
+                control = rebuilt
+        control = _prefer_quoted_control_if_incomplete(_fold_week_result(result), control)
+
+    reconciled: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for clause in source_clauses:
+        status = coverage_map.get(clause, "NEEDS_REVIEW")
+        if status == "COVERED" and not _clause_meaning_preserved_in_result(
+            clause,
+            result,
+            topic_title=topic_title,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        ):
+            status = "NEEDS_REVIEW"
+            warnings.append(
+                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                + clause
+            )
+        if status not in {"COVERED", "NEEDS_REVIEW"}:
+            status = "NEEDS_REVIEW"
+        reconciled.append((clause, status))
+        seen.add(clause)
+    for clause, status in candidate.clause_coverage:
+        if clause in seen:
+            continue
+        status = status if status in {"COVERED", "NEEDS_REVIEW"} else "NEEDS_REVIEW"
+        if status == "COVERED" and not _clause_meaning_preserved_in_result(
+            clause,
+            result,
+            topic_title=topic_title,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        ):
+            status = "NEEDS_REVIEW"
+            warnings.append(
+                "NEEDS_REVIEW: смысл SOURCE не сохранён в принятом RESULT; SOURCE: "
+                + clause
+            )
+        reconciled.append((clause, status))
+
+    if not reconciled and source_clauses:
+        reconciled = [(clause, "NEEDS_REVIEW") for clause in source_clauses]
+
+    control = _rebuild_control_from_accepted_result(
+        result,
+        control,
+        lesson_type=candidate.lesson_type,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    if result.strip() and not _control_covers_all_result_items(result, control):
+        warnings.append("NEEDS_REVIEW: CONTROL не покрывает все принятые RESULT-items")
+        control = _rebuild_control_from_accepted_result(
+            result,
+            "",
+            lesson_type=candidate.lesson_type,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+        )
+
+    return replace(
+        candidate,
+        planned_result=result,
+        assessment_method=control,
+        clause_coverage=tuple(reconciled),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
 def derive_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
     occurrence_index: int = 0, practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
-    """Gate finished RESULT; sync CONTROL quotes when RESULT wording is repaired."""
+    """Gate finished RESULT; reconcile SOURCE coverage; sync CONTROL to RESULT."""
     original = _derive_week_fields_v2(
         topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
         program_content=program_content, theory_hours=theory_hours,
@@ -7357,84 +7849,25 @@ def derive_fields_v2(
         theory_hours=theory_hours,
         practice_hours=practice_hours,
     )
-    predicates = "|".join(re.escape(v) for v in _proven_finite_predicates())
-    sentences = re.split(rf"(?i)(?<=[.!?])\s+(?=(?:{predicates})\b)", original.planned_result)
-    rejected = [s for s in sentences if _result_grammar_issue(s)]
-    if not rejected:
-        return original
-    replacements: dict[str, str] = {}
-    restored: set[str] = set()
-    for clause, status in original.clause_coverage:
-        safe = _safe_operation_result(
-            clause, practical=bool(practice_hours and _nonempty_result_in(clause, practice_text)),
-        )
-        if status != "COVERED" or not safe:
-            continue
-        proof = _derive_selected_fields_v2(
-            topic_title=topic_title, theory_text="", practice_text=clause,
-            program_content=clause, practice_hours=practice_hours,
-        )
-        for sentence in rejected:
-            if _normalize_spaces(proof.planned_result).casefold() == _normalize_spaces(sentence).casefold():
-                replacements[sentence] = safe
-                restored.add(clause)
-    for sentence in rejected:
-        if sentence in replacements:
-            continue
-        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
-            continue
-        # A citation is kept only when the object is an admissible knowledge
-        # field as well: quoting the clause does not license every government.
-        if not _admissible_knowledge_object(_knowledge_result_object(sentence)):
-            continue
-        for clause, status in original.clause_coverage:
-            if status != "COVERED" or not _knowledge_result_cites_clause(sentence, clause):
-                continue
-            replacements[sentence] = sentence
-            restored.add(clause)
-            break
-    source_text = _normalize_spaces(f"{theory_text} {program_content}")
-    knowledge_source = any(_is_theory_knowledge_token(word) for word in source_text.split())
-    for sentence in rejected if knowledge_source else ():
-        # A knowledge nominalization with one unsafe conjunct keeps its proven
-        # part; the clause itself stays NEEDS_REVIEW for the dropped remainder.
-        if sentence in replacements:
-            continue
-        if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
-            continue
-        trimmed = _proven_object_prefix(sentence, source_text)
-        if trimmed:
-            replacements[sentence] = trimmed
-    retained = " ".join(replacements.get(s, s) for s in sentences if s not in rejected or s in replacements)
-    coverage = []
-    for clause, status in original.clause_coverage:
-        if status == "COVERED" and clause not in restored:
-            proof = _derive_selected_fields_v2(
-                topic_title=topic_title, theory_text=clause if not practice_hours else "",
-                practice_text=clause if practice_hours else "", program_content=clause,
-                theory_hours=theory_hours, practice_hours=practice_hours,
-            )
-            # The existing mixed-week join can vary this predicate without
-            # changing its object; do not invalidate that established proof.
-            proof_text = proof.planned_result.casefold().replace("раскрывает", "характеризует")
-            retained_text = retained.casefold().replace("раскрывает", "характеризует")
-            if not _nonempty_result_in(proof_text, retained_text):
-                status = "NEEDS_REVIEW"
-        coverage.append((clause, status))
-    warnings = list(original.warnings)
-    if any(s not in replacements for s in rejected):
-        warnings.append("NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: " + original.frame.clause)
-    for clause, status in coverage:
-        if status == "NEEDS_REVIEW":
-            warnings.append("NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: " + clause)
-    assessment = _sync_control_after_result_gate(original.assessment_method, replacements)
-    return replace(
+    gated = _apply_result_grammar_gate(
         original,
-        planned_result=retained,
-        assessment_method=assessment,
-        type_result=original.type_result if original.type_result is not None else original.planned_result,
-        clause_coverage=tuple(coverage),
-        warnings=tuple(dict.fromkeys(warnings)),
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    return _apply_semantic_completeness_gate(
+        gated,
+        topic_title=topic_title,
+        theory_text=theory_text,
+        practice_text=practice_text,
+        program_content=program_content,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+        occurrence_index=occurrence_index,
+        practice_appearance_count=practice_appearance_count,
     )
 
 
