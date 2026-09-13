@@ -13,8 +13,15 @@ def test_approved_operation_keeps_all_source(source, expected):
     assert result.planned_result == expected
     assert result.clause_coverage == ((source, "COVERED"),)
     assert not any("грамматическая безопасность" in w for w in result.warnings)
-    assert result.assessment_method == before.assessment_method
     assert result.frame == before.frame
+    # Rejected finite wording must not remain in CONTROL after the RESULT gate.
+    assert "строит на бумаге заданных" not in result.assessment_method.casefold()
+    assert "изготавливает сувениры, масок" not in result.assessment_method.casefold()
+    low = result.assessment_method.casefold()
+    if "построение" in source.casefold():
+        assert "построени" in low or "выполняет построение" in low
+    if "изготовление" in source.casefold():
+        assert "изготовлен" in low or "выполняет изготовление" in low
 
 
 @pytest.mark.parametrize("source", [

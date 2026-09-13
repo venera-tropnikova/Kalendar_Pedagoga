@@ -41,7 +41,8 @@ def test_review_keeps_source_control_type_and_safe_independent_action():
     after = derive_fields_v2(**args)
     assert "Выполняет построение на бумаге заданных азимутов." in after.planned_result
     assert "Измеряет пульс" in after.planned_result
-    assert after.assessment_method == before.assessment_method
+    assert "выполняет построение на бумаге заданных азимутов" in after.assessment_method.casefold()
+    assert "строит на бумаге заданных" not in after.assessment_method.casefold()
     assert after.frame == before.frame
     assert dict(after.clause_coverage)["Построение на бумаге заданных азимутов"] == "COVERED"
     assert dict(after.clause_coverage)["Измерение пульса"] == "COVERED"

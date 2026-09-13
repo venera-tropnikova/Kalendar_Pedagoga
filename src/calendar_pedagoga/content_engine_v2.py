@@ -7069,12 +7069,35 @@ def _safe_operation_result(clause: str, *, practical: bool) -> str:
     return "Выполняет " + text[0].lower() + text[1:] + "."
 
 
+def _sync_control_after_result_gate(
+    control: str,
+    replacements: dict[str, str],
+) -> str:
+    """Quoted CONTROL must cite the gated RESULT wording, not the rejected form.
+
+    The grammar gate may replace «строит на бумаге заданных …» with
+    «выполняет построение на бумаге заданных …»; CONTROL quotes built before
+    the gate still named the unsafe finite form.
+    """
+
+    text = _normalize_spaces(control)
+    if not text or not replacements:
+        return text
+    for old, new in replacements.items():
+        old_core = _normalize_spaces(old).rstrip(".")
+        new_core = _normalize_spaces(new).rstrip(".")
+        if not old_core or old_core.casefold() == new_core.casefold():
+            continue
+        text = re.sub(re.escape(old_core), new_core, text, flags=re.IGNORECASE)
+    return text
+
+
 def derive_fields_v2(
     *, topic_title: str, theory_text: str, practice_text: str,
     program_content: str = "", theory_hours: int = 0, practice_hours: int = 0,
     occurrence_index: int = 0, practice_appearance_count: int = 0,
 ) -> ContentEngineV2Result:
-    """Gate finished RESULT only; keep source, TYPE inputs and CONTROL intact."""
+    """Gate finished RESULT; sync CONTROL quotes when RESULT wording is repaired."""
     original = _derive_week_fields_v2(
         topic_title=topic_title, theory_text=theory_text, practice_text=practice_text,
         program_content=program_content, theory_hours=theory_hours,
@@ -7151,10 +7174,14 @@ def derive_fields_v2(
     for clause, status in coverage:
         if status == "NEEDS_REVIEW":
             warnings.append("NEEDS_REVIEW: грамматическая безопасность результата не доказана; SOURCE: " + clause)
+    assessment = _sync_control_after_result_gate(original.assessment_method, replacements)
     return replace(
-        original, planned_result=retained,
+        original,
+        planned_result=retained,
+        assessment_method=assessment,
         type_result=original.type_result if original.type_result is not None else original.planned_result,
-        clause_coverage=tuple(coverage), warnings=tuple(dict.fromkeys(warnings)),
+        clause_coverage=tuple(coverage),
+        warnings=tuple(dict.fromkeys(warnings)),
     )
 
 
