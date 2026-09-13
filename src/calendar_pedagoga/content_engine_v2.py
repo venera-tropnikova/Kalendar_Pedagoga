@@ -84,6 +84,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "изучение": "изучает",
     "использование": "использует",
     "конструирование": "конструирует",
+    "копирование": "копирует",
     "наблюдение": "наблюдает",
     "оказание": "оказывает",
     "определение": "определяет",
@@ -620,17 +621,48 @@ def _split_object_and_conditions(remainder: str) -> tuple[str, str]:
 
 
 def _complements_after_finite(remainder: str) -> tuple[str, str]:
-    """Direct object may be inflected; a leading governed PP is copied as-is."""
+    """Direct object may be inflected; a leading governed PP is copied as-is.
+
+    When a short PP is followed by the verbal-noun patient still in the
+    genitive («на кальку участка карты»), that patient becomes accusative
+    after the finite verb («на кальку участок карты»).
+    """
 
     text = _normalize_spaces(remainder)
     if not text:
         return "", ""
-    first = _strip_punct_word(text.split()[0])[1]
+    tokens = text.split()
+    first = _strip_punct_word(tokens[0])[1]
     if _is_preposition(first):
-        return "", text
+        repaired = _short_pp_genitive_patient_to_acc(tokens)
+        return "", repaired if repaired else text
     obj, cond = _split_object_and_conditions(text)
     obj_acc = _inflect_object_phrase(obj, case="acc") if obj else ""
     return obj_acc, cond
+
+
+def _short_pp_genitive_patient_to_acc(tokens: list[str]) -> str | None:
+    """«на кальку участка …» → «на кальку участок …» for a finite RESULT."""
+
+    if len(tokens) < 3:
+        return None
+    prep = _strip_punct_word(tokens[0])[1]
+    gov = _strip_punct_word(tokens[1])[1]
+    if not _is_preposition(prep) or not gov:
+        return None
+    if _is_preposition(gov) or gov.casefold() in {"и", "или"}:
+        return None
+    patient = " ".join(tokens[2:])
+    head = _strip_punct_word(tokens[2])[1]
+    if not head or _is_preposition(head):
+        return None
+    # Proven genitive patient of the source verbal noun, not another PP.
+    if not re.search(r"(?i)(?:а|я|ов|ев|ёв|ей|ий)$", head):
+        return None
+    patient_acc = _inflect_object_phrase(patient, case="acc")
+    if not patient_acc or patient_acc.casefold() == patient.casefold():
+        return None
+    return _normalize_spaces(f"{tokens[0]} {tokens[1]} {patient_acc}")
 
 
 def _verbal_noun_lemma(word: str) -> str:
