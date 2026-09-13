@@ -396,6 +396,26 @@ def _noun_gen_to_acc(word: str) -> str:
     return word
 
 
+def _parenthetical_apposition_acc(word: str, *, suffix: str = "") -> str | None:
+    """Accusative for a gen.sg paren apposition; None keeps the token as written.
+
+    Single appositions follow the head: «шага (пары шагов)» → «шаг (пару шагов)»,
+    «лагеря (бивака)» → «лагерь (бивак)». Comma-separated exemplar lists
+    («треугольники, „бабочки“ и т.п.») stay in direct case.
+    """
+
+    core = _strip_punct_word(word)[1]
+    if not core:
+        return None
+    # Exemplar catalogues name forms in direct case; do not re-inflect them.
+    if "," in suffix or "и т.п" in suffix.casefold() or "и т.д" in suffix.casefold():
+        return None
+    acc = _noun_gen_to_acc(core)
+    if acc == core:
+        return None
+    return acc
+
+
 def _noun_nom_to_acc(word: str) -> str:
     low = word.casefold()
     if low.endswith("ия") and len(word) > 3:
@@ -578,16 +598,15 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
                 pending.append(token)
                 continue
         if case == "acc" and not colon_list and (not seen_noun or prefix.startswith("(")):
-            # Parenthetical exemplars that are already direct-case stay as-is.
-            # A genitive apposition («лагеря (бивака)») must follow the head
-            # into the accusative («лагерь (бивак)»).
+            # Parenthetical exemplar lists («треугольники, …») stay in direct case.
+            # A gen.sg apposition («лагеря (бивака)», «шага (пары шагов)») follows
+            # the head into the accusative.
             if prefix.startswith("(") and seen_noun:
                 if pending:
                     apply_pending(False, "m")
-                acc_paren = _noun_gen_to_acc(core)
-                if acc_paren != core:
-                    core = acc_paren
-                    out.append(f"{prefix}{core}{suffix}")
+                acc_paren = _parenthetical_apposition_acc(core, suffix=suffix)
+                if acc_paren is not None:
+                    out.append(f"{prefix}{acc_paren}{suffix}")
                 else:
                     out.append(token)
                 has_post_head = True

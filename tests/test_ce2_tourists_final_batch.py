@@ -133,10 +133,49 @@ def test_positive_camp_parenthetical_agrees_with_accusative_head() -> None:
     assert _inflect_object_phrase("лагеря (бивака)", case="acc") == "лагерь (бивак)"
 
 
+def test_positive_direct_case_paren_exemplars_stay_nominative() -> None:
+    """Paren examples like «треугольники» must not become «треугольнику»."""
+
+    source = (
+        "Движение по азимуту, прохождение азимутальных отрезков, "
+        "азимутальных построений (треугольники, «бабочки» и т.п.)."
+    )
+    phrase, _frame = transform_clause_to_result(
+        source, theory_only=False, full_source=source
+    )
+    assert "(треугольники, «бабочки» и т.п.)" in phrase
+    assert "треугольнику" not in phrase.casefold()
+    derived = derive_fields_v2(
+        topic_title="Компас. Работа с компасом",
+        theory_text="",
+        practice_text=(
+            "Ориентирование карты по компасу. "
+            "Упражнения на засечки: определение азимута на заданный предмет "
+            "(обратная засечка) и нахождение ориентиров по заданному азимуту "
+            "(прямая засечка). "
+            + source
+        ),
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    assert "(треугольники, «бабочки» и т.п.)" in derived.planned_result
+    assert "треугольнику" not in derived.planned_result.casefold()
+    assert "треугольники" in derived.assessment_method.casefold()
+    assert "треугольнику" not in derived.assessment_method.casefold()
+
+
 def test_negative_already_accusative_parenthetical_is_not_rewritten() -> None:
     # Direct-case exemplars stay; only genitive appositions convert with the head.
     assert "бивак)" in _inflect_object_phrase("лагеря (бивака)", case="acc")
     assert _inflect_object_phrase("лагеря (бивака)", case="acc") != "лагеря (бивака)"
+    kept = _inflect_object_phrase(
+        "азимутальных построений (треугольники, «бабочки» и т.п.)", case="acc"
+    )
+    assert "(треугольники, «бабочки» и т.п.)" in kept
+    assert "треугольнику" not in kept
+    # Feminine gen.sg apposition still follows the head (пары → пару).
+    assert "(пару шагов)" in _inflect_object_phrase("шага (пары шагов)", case="acc")
 
 
 
