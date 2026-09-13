@@ -109,6 +109,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "рисование": "рисует",
     "свертывание": "свертывает",
     "смешивание": "смешивает",
+    "соблюдение": "соблюдает",
     "составление": "составляет",
     "укладка": "укладывает",
     "упаковка": "упаковывает",
@@ -1683,6 +1684,15 @@ def _transform_segment(
         verb = _conjugate_verbal_noun(head)
         if verb:
             remainder = _keep_proven_action_complements(" ".join(rest[1:]).strip())
+            if verb == "соблюдает" and re.match(
+                r"(?i)^(?:правил|норм|требован|положен)\w*",
+                remainder,
+            ):
+                # Observance of rules/norms is knowledge content, not a drill.
+                named = _name_kinds(text)
+                if named:
+                    return named
+                return _characterize(text)
             if (
                 not theory_only
                 and head.casefold() == "изучение"
@@ -2908,7 +2918,7 @@ def _action_class(clause: str, *, theory_only: bool = False) -> int:
         return 3
     if _has_stem(lead, _PRODUCE_STEMS + ("ориентир", "измерен")):
         return 3
-    if re.match(r"(?i)^(определен|изучен|знакомств|поняти|значен|соблюден)", first):
+    if re.match(r"(?i)^(определен|изучен|знакомств|поняти|значен)", first):
         return 0
     if _looks_like_verbal_noun(first):
         return 2
