@@ -177,7 +177,7 @@ _STATE_OR_KNOWLEDGE_LEMMAS = _KNOWLEDGE_NOUNS | {
 
 _EFFECT_FRAME_RE = re.compile(
     r"(?i)под воздействием|под влиянием|в результате\s+|"
-    r"влияние\s+\w+\s+на|"
+    r"влияние\s+(?:[а-яё-]+\s+){1,6}на\b|"
     r"^(совершенствование|укрепление|улучшение)\s+"
     r"(функций|функции|здоровья|организма|работоспособности)"
 )
@@ -6449,6 +6449,22 @@ def _prohibition_only_source(source: str) -> bool:
     return True
 
 
+def _comma_continues_prepositional_complement(text: str) -> bool:
+    """Trailing «на X, Y» with a bare final noun is one complement, not a list.
+
+    Parallel modified NPs after a preposition («по спортивному туризму,
+    спортивному ориентированию») stay ordinary enumerations.
+    """
+
+    return bool(
+        re.search(
+            r"(?i)\b(?:на|для|о|об|обо|про|по|при|за|через)\s+"
+            r"[^,;]{2,100},\s*[а-яё-]{3,}\s*$",
+            text,
+        )
+    )
+
+
 def _bare_list_without_action(source: str) -> bool:
     """A standalone enumeration is not evidence of a pupil's action."""
     units = [u for u in _clause_units(source) if u.casefold() not in {"практика", "теория"}]
@@ -6468,6 +6484,13 @@ def _bare_list_without_action(source: str) -> bool:
     if _nominal_activity_lemma(first) in _NOMINAL_PERFORM_LEMMAS:
         return False
     if _is_leading_form_activity(first) or _participation_lemma(first):
+        return False
+    if _comma_continues_prepositional_complement(unquoted):
+        return False
+    if first.casefold() in _STATE_OR_KNOWLEDGE_LEMMAS and re.search(
+        r"(?i)\b(?:на|для|о|об|обо|про|по|при)\b", unquoted
+    ):
+        # «Влияние … на X, Y» is a knowledge frame, not an item list.
         return False
     if re.search(r"(?i)\b(?:их|его|её|ее)\b", unquoted):
         return False  # Dependent description/anaphora is not a standalone list.
@@ -6623,6 +6646,107 @@ def _selected_proof_absent_from_result(phrase: str, result: str) -> bool:
 def _nonempty_result_in(candidate: str, result: str) -> bool:
     candidate = _normalize_spaces(candidate).strip(" .").casefold()
     return bool(candidate and candidate in _normalize_spaces(result).casefold())
+
+
+def _title_complement_segments(topic_title: str) -> list[str]:
+    """Coordinated title tails after the first segment (topic head)."""
+
+    parts = [
+        part.strip().rstrip(".")
+        for part in re.split(r",\s*", topic_title or "")
+        if part.strip()
+    ]
+    return parts[1:] if len(parts) >= 2 else []
+
+
+def _title_segment_is_actionable(segment: str) -> bool:
+    """Keep only title tails with a proven verbal-noun → finite mapping."""
+
+    tokens = segment.split()
+    if not tokens:
+        return False
+    first = _strip_punct_word(tokens[0])[1]
+    # Require a conjugated pupil verb: bare knowledge nouns in the title
+    # («предупреждение…», «преодоление…») stay outside this restore path.
+    return bool(_conjugate_verbal_noun(first))
+
+
+def _enrich_result_with_title_complements(
+    candidate: ContentEngineV2Result,
+    *,
+    topic_title: str,
+    theory_hours: int,
+    practice_hours: int,
+) -> ContentEngineV2Result:
+    """Bring actionable title tails into RESULT/CONTROL when still uncovered."""
+
+    if not candidate.planned_result.strip() or not topic_title.strip():
+        return candidate
+    extras_result: list[str] = []
+    extras_control: list[str] = []
+    merged_so_far = candidate.planned_result
+    for segment in _title_complement_segments(topic_title):
+        if not _title_segment_is_actionable(segment):
+            continue
+        prefer_practice = bool(practice_hours)
+        orders = ((False, True) if prefer_practice else (True, False))
+        proof = None
+        for theory_only in orders:
+            local = _derive_selected_fields_v2(
+                topic_title=topic_title,
+                theory_text=segment if theory_only else "",
+                practice_text="" if theory_only else segment,
+                program_content=segment,
+                theory_hours=max(1, theory_hours) if theory_only else 0,
+                practice_hours=0 if theory_only else max(1, practice_hours),
+            )
+            if (
+                not local.planned_result
+                or not local.assessment_method
+                or local.warnings
+                or "по теме" in local.planned_result.casefold()
+                or _quality_issue(
+                    local.planned_result,
+                    local.assessment_method,
+                    source=segment,
+                    clause=local.frame.clause,
+                )
+            ):
+                continue
+            if not _selected_proof_absent_from_result(local.planned_result, merged_so_far):
+                continue
+            if _nonempty_result_in(local.planned_result, merged_so_far):
+                continue
+            proof = local
+            break
+        if proof is None:
+            continue
+        extras_result.append(proof.planned_result)
+        extras_control.append(proof.assessment_method)
+        merged_so_far = _merge_independent_part_results(
+            [merged_so_far, proof.planned_result]
+        )
+    if not extras_result:
+        return candidate
+    merged_result = _merge_independent_part_results(
+        [candidate.planned_result, *extras_result]
+    )
+    assessment = _unified_process_performance_control(
+        merged_result,
+        _join_control_clauses([candidate.assessment_method, *extras_control]),
+    )
+    if _control_has_multisentence_quotes(assessment):
+        rebuilt = _quoted_actions_control(_fold_week_result(merged_result))
+        if rebuilt:
+            assessment = rebuilt
+    assessment = _prefer_quoted_control_if_incomplete(
+        _fold_week_result(merged_result), assessment
+    )
+    return replace(
+        candidate,
+        planned_result=merged_result,
+        assessment_method=assessment,
+    )
 
 
 def _retained_complement_covered(clause: str, original: ContentEngineV2Result) -> bool:
@@ -7226,6 +7350,12 @@ def derive_fields_v2(
         program_content=program_content, theory_hours=theory_hours,
         practice_hours=practice_hours, occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
+    )
+    original = _enrich_result_with_title_complements(
+        original,
+        topic_title=topic_title,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
     )
     predicates = "|".join(re.escape(v) for v in _proven_finite_predicates())
     sentences = re.split(rf"(?i)(?<=[.!?])\s+(?=(?:{predicates})\b)", original.planned_result)
