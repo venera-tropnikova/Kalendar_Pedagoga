@@ -120,14 +120,9 @@ from calendar_pedagoga.scheduling import (
 
 def _generator_revision() -> str:
     """Read the working-tree generator identity, not a cached Git revision."""
-    root = Path(__file__).resolve().parents[2]
-    paths = [root / "app.py", *sorted((root / "src" / "calendar_pedagoga").glob("*.py"))]
-    paths.append(root / "references" / "Календарный план Образец.docx")
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(str(path.relative_to(root)).encode("utf-8"))
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
+    from calendar_pedagoga.generator_revision import generator_revision
+
+    return generator_revision()
 
 
 _LOADED_GENERATOR_REVISION = _generator_revision()
