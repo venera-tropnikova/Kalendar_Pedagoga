@@ -29,16 +29,45 @@ class FillMetrics:
     overall_percent: float
 
 
+def _strip_leading_item_colon(text: str) -> str:
+    """Remove a stray leading ':' left after splitting off a label.
+
+    Only an extractor artifact at the start of the item is dropped; colons
+    inside the wording stay intact. A lower-case letter after that colon is
+    capitalized because the item is now a standalone source phrase.
+    """
+
+    raw = text or ""
+    match = re.match(r"^:\s*(.*)$", raw.lstrip(), flags=re.DOTALL)
+    if not match:
+        return raw
+    body = match.group(1)
+    if body and body[0].islower():
+        body = body[0].upper() + body[1:]
+    return body
+
+
+def _capitalize_extracted_item(text: str) -> str:
+    """A phrase extracted after a label starts its own sentence."""
+
+    body = text or ""
+    if body and body[0].islower():
+        return body[0].upper() + body[1:]
+    return body
+
+
 def _split_explicit_practice(text: str) -> tuple[str, str] | None:
     match = re.search(
-        r"(?:^|\n)\s*(?:Практика\.|Практические занятия\.?)\s*",
+        r"(?:^|\n)\s*(?:Практика\.|Практические занятия\.?)\s*(?P<sep>:)?\s*",
         text,
         re.IGNORECASE,
     )
     if not match:
         return None
     theory = text[: match.start()].strip()
-    practice = text[match.end() :].strip()
+    practice = _strip_leading_item_colon(text[match.end() :].strip())
+    if match.group("sep") == ":":
+        practice = _capitalize_extracted_item(practice)
     return theory, practice
 
 

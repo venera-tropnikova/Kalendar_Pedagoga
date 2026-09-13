@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import re
 
-# «Практические занятия» matches CE2 `_split_explicit_practice` (period optional).
-# «Практика.» stays a word-boundary split so in-paragraph theory/practice still splits.
+from calendar_pedagoga.lesson_content import _strip_leading_item_colon
+
+# «Практические занятия» matches CE2 `_split_explicit_practice` (period/colon
+# optional). «Практика.» stays a word-boundary split so in-paragraph theory/
+# practice still splits.
 _PRACTICE_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?:^|\n)\s*Практические занятия\.?\s*", re.IGNORECASE), "block"),
+    (re.compile(r"(?:^|\n)\s*Практические занятия\.?\s*:?\s*", re.IGNORECASE), "block"),
     (re.compile(r"\bПрактика\.\s*", re.IGNORECASE), "split"),
     # «Практика» отдельной строкой — тот же раздел, точка в источнике не обязательна.
     (re.compile(r"(?:^|\n)[ \t]*Практика[ \t]*(?:\n|$)", re.IGNORECASE), "split"),
@@ -83,7 +86,11 @@ def brief_practice_summary(content: str) -> tuple[str, str]:
     match_info = _practice_marker_match(content)
     if match_info is not None:
         match, kind = match_info
-        practice_block = _normalize_spaces(_without_marker_lines(content[match.end() :]))
+        practice_block = _normalize_spaces(
+            _without_marker_lines(_strip_leading_item_colon(content[match.end() :]))
+        )
+        if practice_block and practice_block[0].islower() and ":" in match.group(0):
+            practice_block = practice_block[0].upper() + practice_block[1:]
         sentences = _split_sentences(practice_block)
         if sentences:
             return _join_sentences(sentences), kind
