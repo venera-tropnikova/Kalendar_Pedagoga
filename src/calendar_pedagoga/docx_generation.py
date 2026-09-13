@@ -1585,6 +1585,57 @@ def _measure_preview_layouts(
     return detect_data_row_page_layout(_save_document(document), total_rows=len(rows))
 
 
+def _prior_content_page(layouts, index: int) -> int:
+    """Page where content before *index* ended (title page for the first row)."""
+
+    return 1 if index == 0 else layouts[index - 1].span.end_page
+
+
+def _fill_avoidable_page_gaps(
+    template: CalendarTemplateSelection,
+    utp: UtpParseResult,
+    rows: tuple[ResolvedLessonRow, ...],
+    layouts,
+    **header,
+):
+    """Re-measure weeks that cantSplit pushed past free space on the prior page.
+
+    A whole week that still fits stays whole. A week that does not fit may be
+    segmented by the existing renderer path so its first segment fills the gap.
+    Weeks that cannot use the prior page even when breakable are left moved.
+    """
+
+    if not layouts:
+        return layouts
+    splittable: set[int] = set()
+    rejected: set[int] = set()
+    for _ in range(len(layouts) + 1):
+        candidates = [
+            index
+            for index, layout in enumerate(layouts)
+            if index not in splittable
+            and index not in rejected
+            and layout.span.start_page > _prior_content_page(layouts, index)
+        ]
+        if not candidates:
+            return layouts
+        # Earlier gaps shift every later page; fill them first.
+        index = candidates[0]
+        trial = frozenset(splittable | {index})
+        filled = _measure_preview_layouts(
+            template, utp, rows, splittable=trial, **header
+        )
+        if filled is None:
+            rejected.add(index)
+            continue
+        if filled[index].span.start_page <= _prior_content_page(layouts, index):
+            layouts = filled
+            splittable = set(trial)
+            continue
+        rejected.add(index)
+    return layouts
+
+
 def generate_calendar_docx(
     utp: UtpParseResult,
     rows: tuple[ResolvedLessonRow, ...],
@@ -1610,18 +1661,14 @@ def generate_calendar_docx(
     }
 
     # Measure the production rule first: a logical week that fits on a page
-    # moves there as one row. A genuinely over-height row may still be
-    # segmented by the existing fail-closed renderer path.
+    # moves there as one row. A week pushed past remaining free space is
+    # re-measured as breakable so the existing fail-closed segmenter can fill
+    # the gap; a week that still cannot use that space stays on the next page.
     layouts = _measure_preview_layouts(template, utp, rows, **header)
-    if layouts and layouts[0].span.start_page > 1:
-        # The document header leaves room on the title page, but an over-height
-        # first week cannot move into it while its row may not break. Measured
-        # as a breakable row, its first segment takes the space that is left.
-        filled = _measure_preview_layouts(
-            template, utp, rows, splittable=frozenset({0}), **header
+    if layouts is not None:
+        layouts = _fill_avoidable_page_gaps(
+            template, utp, rows, layouts, **header
         )
-        if filled is not None and filled[0].span.start_page == 1:
-            layouts = filled
     if layouts is None:
         _raise_docx_qa(
             "measure_preview_layouts",
