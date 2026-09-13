@@ -1476,6 +1476,9 @@ def _build_segmented_document(
     months, continuation_rows = _apply_page_row_segments(table, layouts)
     unmerged = _save_document(document)
     spans = detect_data_row_page_spans(unmerged, total_rows=len(months))
+    # Each physical page-segment must fit on one page with confirmed identifiers.
+    # An empty lower portion of a page is allowed when the next logical week is
+    # kept whole because it fits on a clean page but not in the remaining room.
     if spans is None or any(
         span.start_page != span.end_page
         or (index in continuation_rows and not span.split_safe)
@@ -1568,20 +1571,25 @@ def _measure_preview_layouts(
     rows: tuple[ResolvedLessonRow, ...],
     *,
     splittable: frozenset[int] = frozenset(),
+    page_break_before: frozenset[int] = frozenset(),
     **header,
 ):
     """Measure the unmerged preview: only *splittable* rows may break on a page.
 
     The preview is the semantic source for exact page segmentation.
+    Oversize rows may also request pageBreakBefore so Word does not pull them
+    into the leftover gap of the previous page (which creates thin last tails).
     """
 
     from calendar_pedagoga.docx_qa import detect_data_row_page_layout
 
     document = _load_template(template)
-    table, _, _ = _populate_calendar_table(document, utp, rows, **header)
+    table, columns, _ = _populate_calendar_table(document, utp, rows, **header)
     for index, row in enumerate(table.rows[2:]):
         if index not in splittable:
             _prevent_row_split(row)
+        if index in page_break_before:
+            _set_page_break_before_row(row, columns)
     return detect_data_row_page_layout(_save_document(document), total_rows=len(rows))
 
 
@@ -1591,49 +1599,442 @@ def _prior_content_page(layouts, index: int) -> int:
     return 1 if index == 0 else layouts[index - 1].span.end_page
 
 
-def _fill_avoidable_page_gaps(
+# Forced-split last segments below these sizes are rebalanced so RESULT /
+# CONTROL cannot sit alone as a 1–2 line tail on the next page.
+_MIN_FORCED_TAIL_BODY_ALNUM = 200
+_MIN_FORCED_TAIL_SOURCE_ALNUM = 60
+_MIN_FORCED_TAIL_RC_ALNUM = 80
+
+
+def _segment_body_alnum(segment) -> int:
+    from calendar_pedagoga.docx_qa import _normalize_match_text
+
+    return sum(len(_normalize_match_text(cell)) for cell in segment.cells[2:])
+
+
+def _segment_source_alnum(segment) -> int:
+    """Theory + practice body (columns 2 and 4 in the 8-column calendar)."""
+
+    from calendar_pedagoga.docx_qa import _normalize_match_text
+
+    total = 0
+    for column in (2, 4):
+        if column < len(segment.cells):
+            total += len(_normalize_match_text(segment.cells[column]))
+    return total
+
+
+def _is_thin_forced_tail(segment) -> bool:
+    from calendar_pedagoga.docx_qa import _normalize_match_text
+
+    if _segment_body_alnum(segment) < _MIN_FORCED_TAIL_BODY_ALNUM:
+        return True
+    if _segment_source_alnum(segment) < _MIN_FORCED_TAIL_SOURCE_ALNUM:
+        return True
+    for column in (6, 7):
+        if column >= len(segment.cells):
+            continue
+        text = segment.cells[column] or ""
+        if text and len(_normalize_match_text(text)) < _MIN_FORCED_TAIL_RC_ALNUM:
+            return True
+    return False
+
+
+def _oversize_weeks_from_cantsplit_spans(
+    template: CalendarTemplateSelection,
+    utp: UtpParseResult,
+    rows: tuple[ResolvedLessonRow, ...],
+    **header,
+) -> frozenset[int]:
+    """Weeks whose unbroken row height exceeds one full page.
+
+    Detected by rendering the calendar with every data row marked cantSplit and
+    checking which logical rows still cross a page boundary (or clip).
+    """
+
+    from calendar_pedagoga import docx_qa as qa
+    from calendar_pedagoga.docx_qa import detect_data_row_page_spans
+
+    document = _load_template(template)
+    table, _, _ = _populate_calendar_table(document, utp, rows, **header)
+    for row in table.rows[2:]:
+        _prevent_row_split(row)
+    content = _save_document(document)
+    spans = detect_data_row_page_spans(content, total_rows=len(rows))
+    if spans is None:
+        clipped = qa._SEGMENTATION_DIAG.get("clipped_rows") or ()
+        return frozenset(int(index) for index in clipped)
+    return frozenset(
+        index
+        for index, span in enumerate(spans)
+        if span.start_page != span.end_page
+    )
+
+
+def _find_tail_cut(text: str, *, min_move: int) -> int | None:
+    """Cut near the end of *text* so the moved suffix has at least *min_move* chars."""
+
+    available = len(text) - 8
+    if min_move <= 0 or available < 12:
+        return None
+    min_move = min(min_move, available)
+    earliest = max(8, len(text) - max(min_move * 4, 280))
+    latest = len(text) - min_move
+
+    def _boundary(index: int) -> bool:
+        if index <= 0 or index >= len(text):
+            return False
+        if text[index - 1 : index + 1] == "\n\n":
+            return True
+        if text[index - 1] == "\n":
+            return True
+        if text[index - 1] in ".!?…" and text[index : index + 1] in (" ", "\n"):
+            return True
+        if text[index - 1] == " " and text[index : index + 1].isalpha():
+            return True
+        return False
+
+    for index in range(latest, earliest - 1, -1):
+        if _boundary(index):
+            if text[index - 1 : index + 1] == "\n\n":
+                return index + 1 if index + 1 <= len(text) else index
+            if text[index - 1] in ".!?…" and text[index : index + 1] in (" ", "\n"):
+                return index + 1
+            return index
+    for index in range(latest, earliest - 1, -1):
+        if text[index - 1] == " ":
+            return index
+    return latest
+
+
+def _rebalance_thin_last_segments(layouts):
+    """Move content into a forced-split tail that would otherwise be 1–2 lines."""
+
+    from calendar_pedagoga.docx_qa import (
+        DataRowPageLayout,
+        DataRowPageSegment,
+        DataRowPageSpan,
+    )
+
+    rebuilt = []
+    for layout in layouts:
+        segments = list(layout.segments)
+        if len(segments) < 2:
+            rebuilt.append(layout)
+            continue
+        guard = 0
+        while len(segments) >= 2 and _is_thin_forced_tail(segments[-1]) and guard < 16:
+            guard += 1
+            prev = segments[-2]
+            last = segments[-1]
+            need = max(
+                _MIN_FORCED_TAIL_BODY_ALNUM - _segment_body_alnum(last),
+                _MIN_FORCED_TAIL_SOURCE_ALNUM - _segment_source_alnum(last),
+                64,
+            )
+            new_prev = list(prev.cells)
+            new_last = list(last.cells)
+            moved = False
+            # Prefer theory/practice so the tail is not RESULT/CONTROL-only.
+            for column in (4, 2, 6, 7, 5, 3):
+                if column >= len(prev.cells):
+                    continue
+                text = new_prev[column]
+                if not text:
+                    continue
+                col_need = need
+                if column in (6, 7):
+                    from calendar_pedagoga.docx_qa import _normalize_match_text
+
+                    col_need = max(
+                        col_need,
+                        _MIN_FORCED_TAIL_RC_ALNUM
+                        - len(_normalize_match_text(new_last[column] or "")),
+                    )
+                chunk = max(16, min(max(col_need, 48), 120, max(16, len(text) - 8)))
+                cut = _find_tail_cut(text, min_move=chunk)
+                if cut is None:
+                    continue
+                candidate_prev = text[:cut]
+                candidate_last = text[cut:] + new_last[column]
+                if candidate_prev + candidate_last != text + new_last[column]:
+                    continue
+                new_prev[column] = candidate_prev
+                new_last[column] = candidate_last
+                moved = True
+                if not _is_thin_forced_tail(
+                    DataRowPageSegment(last.page_number, tuple(new_last))
+                ):
+                    break
+            if not moved:
+                break
+            segments[-2] = DataRowPageSegment(prev.page_number, tuple(new_prev))
+            segments[-1] = DataRowPageSegment(last.page_number, tuple(new_last))
+        rebuilt.append(
+            DataRowPageLayout(
+                DataRowPageSpan(
+                    layout.span.start_page,
+                    segments[-1].page_number,
+                    layout.span.split_safe,
+                ),
+                tuple(segments),
+            )
+        )
+    return tuple(rebuilt)
+
+
+def _split_text_balanced(text: str, parts: int) -> list[str]:
+    """Split *text* into *parts* chunks, biasing a bit toward later segments."""
+
+    if parts <= 1:
+        return [text]
+    if not text:
+        return [""] * parts
+    if len(text) < parts * 12:
+        return [text] + [""] * (parts - 1)
+
+    if parts == 2:
+        ratios = (0.42, 0.58)
+    elif parts == 3:
+        ratios = (0.28, 0.36, 0.36)
+    else:
+        ratios = tuple(1 / parts for _ in range(parts))
+
+    cuts: list[int] = []
+    cumulative = 0.0
+    for index in range(1, parts):
+        cumulative += ratios[index - 1]
+        ideal = int(len(text) * cumulative)
+        window = max(24, len(text) // (parts * 2))
+        lo = max(cuts[-1] + 8 if cuts else 8, ideal - window)
+        hi = min(len(text) - 8 * (parts - index), ideal + window)
+        chosen = None
+        for pos in range(max(lo, ideal), hi + 1):
+            if text[pos - 1 : pos + 1] == "\n\n":
+                chosen = pos + 1
+                break
+            if text[pos - 1] == "\n":
+                chosen = pos
+                break
+            if text[pos - 1] in ".!?…" and text[pos : pos + 1] in (" ", "\n"):
+                chosen = pos + 1
+                break
+        if chosen is None:
+            for pos in range(min(ideal, hi), lo - 1, -1):
+                if text[pos - 1] in ".!?…" and text[pos : pos + 1] in (" ", "\n"):
+                    chosen = pos + 1
+                    break
+                if text[pos - 1] == "\n":
+                    chosen = pos
+                    break
+                if text[pos - 1] == " ":
+                    chosen = pos
+                    break
+        cuts.append(chosen if chosen is not None else ideal)
+
+    pieces: list[str] = []
+    start = 0
+    for cut in cuts:
+        pieces.append(text[start:cut])
+        start = cut
+    pieces.append(text[start:])
+    while len(pieces) < parts:
+        pieces.append("")
+    return pieces[:parts]
+
+
+def _repartition_split_layouts(layouts):
+    """Rebalance multi-page week text so the last segment is not a thin stub."""
+
+    from calendar_pedagoga.docx_qa import (
+        DataRowPageLayout,
+        DataRowPageSegment,
+        DataRowPageSpan,
+    )
+
+    rebuilt = []
+    for layout in layouts:
+        segments = list(layout.segments)
+        if len(segments) < 2 or not _is_thin_forced_tail(segments[-1]):
+            rebuilt.append(layout)
+            continue
+        parts = len(segments)
+        columns = len(segments[0].cells)
+        full = [
+            "".join(segment.cells[column] or "" for segment in segments)
+            for column in range(columns)
+        ]
+        split_columns = [
+            _split_text_balanced(text, parts) if column >= 2 else [text] + [""] * (parts - 1)
+            for column, text in enumerate(full)
+        ]
+        # Month/week identifiers travel with every segment.
+        for column in (0, 1):
+            split_columns[column] = [full[column]] * parts
+        new_segments = []
+        for part in range(parts):
+            cells = tuple(split_columns[column][part] for column in range(columns))
+            new_segments.append(
+                DataRowPageSegment(segments[part].page_number, cells)
+            )
+        # Keep original Word cuts if repartition emptied a middle/body column oddly.
+        if any(
+            "".join(seg.cells[column] for seg in new_segments) != full[column]
+            for column in range(columns)
+        ):
+            rebuilt.append(layout)
+            continue
+        rebuilt.append(
+            DataRowPageLayout(
+                DataRowPageSpan(
+                    layout.span.start_page,
+                    new_segments[-1].page_number,
+                    layout.span.split_safe,
+                ),
+                tuple(new_segments),
+            )
+        )
+    return tuple(rebuilt)
+
+
+def _merge_segment_cells(left, right) -> tuple[str, ...]:
+    return tuple(
+        (left.cells[index] or "") + (right.cells[index] or "")
+        for index in range(len(left.cells))
+    )
+
+
+def _coalesce_thin_last_segments(layouts):
+    """If a forced-split last segment is thin, fold it into the previous segment.
+
+    Used only when the merged segment still fits one page (caller verifies).
+    """
+
+    from calendar_pedagoga.docx_qa import (
+        DataRowPageLayout,
+        DataRowPageSegment,
+        DataRowPageSpan,
+    )
+
+    rebuilt = []
+    for layout in layouts:
+        segments = list(layout.segments)
+        while len(segments) >= 2 and _is_thin_forced_tail(segments[-1]):
+            prev = segments[-2]
+            last = segments[-1]
+            merged = DataRowPageSegment(
+                prev.page_number,
+                _merge_segment_cells(prev, last),
+            )
+            segments = segments[:-2] + [merged]
+        rebuilt.append(
+            DataRowPageLayout(
+                DataRowPageSpan(
+                    layout.span.start_page,
+                    segments[-1].page_number,
+                    layout.span.split_safe,
+                ),
+                tuple(segments),
+            )
+        )
+    return tuple(rebuilt)
+
+
+def _layouts_segments_fit_pages(
     template: CalendarTemplateSelection,
     utp: UtpParseResult,
     rows: tuple[ResolvedLessonRow, ...],
     layouts,
     **header,
-):
-    """Re-measure weeks that cantSplit pushed past free space on the prior page.
+) -> bool:
+    """True when every physical page-segment fits on a single rendered page."""
 
-    A whole week that still fits stays whole. A week that does not fit may be
-    segmented by the existing renderer path so its first segment fills the gap.
-    Weeks that cannot use the prior page even when breakable are left moved.
+    from calendar_pedagoga.docx_qa import detect_data_row_page_spans
+
+    document = _load_template(template)
+    table, _, _ = _populate_calendar_table(document, utp, rows, **header)
+    months, continuation_rows = _apply_page_row_segments(table, layouts)
+    spans = detect_data_row_page_spans(
+        _save_document(document), total_rows=len(months)
+    )
+    if spans is None:
+        return False
+    return not any(
+        span.start_page != span.end_page
+        or (index in continuation_rows and not span.split_safe)
+        for index, span in enumerate(spans)
+    )
+
+
+def _measure_whole_week_layouts(
+    template: CalendarTemplateSelection,
+    utp: UtpParseResult,
+    rows: tuple[ResolvedLessonRow, ...],
+    **header,
+):
+    """Pack weeks whole: split only oversize weeks, never to fill a page gap.
+
+    Empty space at the bottom of a page is intentional when the next week fits
+    on a clean page but not in the remaining room. Oversize weeks start on a
+    clean page (pageBreakBefore) so Word does not pull them into a leftover gap.
     """
 
-    if not layouts:
-        return layouts
-    splittable: set[int] = set()
-    rejected: set[int] = set()
-    for _ in range(len(layouts) + 1):
-        candidates = [
-            index
-            for index, layout in enumerate(layouts)
-            if index not in splittable
-            and index not in rejected
-            and layout.span.start_page > _prior_content_page(layouts, index)
-        ]
-        if not candidates:
-            return layouts
-        # Earlier gaps shift every later page; fill them first.
-        index = candidates[0]
-        trial = frozenset(splittable | {index})
-        filled = _measure_preview_layouts(
-            template, utp, rows, splittable=trial, **header
+    from calendar_pedagoga import docx_qa as qa
+
+    whole = _measure_preview_layouts(template, utp, rows, **header)
+    oversize = set(
+        _oversize_weeks_from_cantsplit_spans(template, utp, rows, **header)
+    )
+    if whole is None:
+        clipped = qa._SEGMENTATION_DIAG.get("clipped_rows") or ()
+        oversize.update(int(index) for index in clipped)
+
+    if not oversize:
+        return whole, frozenset()
+
+    # Start oversize weeks on a clean page; allow split only after that.
+    page_break_before = frozenset(index for index in oversize if index > 0)
+    layouts = _measure_preview_layouts(
+        template,
+        utp,
+        rows,
+        splittable=frozenset(oversize),
+        page_break_before=page_break_before,
+        **header,
+    )
+    if layouts is None:
+        return whole, frozenset(oversize)
+
+    for candidate in (
+        _rebalance_thin_last_segments(layouts),
+        _repartition_split_layouts(layouts),
+        _repartition_split_layouts(_rebalance_thin_last_segments(layouts)),
+    ):
+        if candidate != layouts and _layouts_segments_fit_pages(
+            template, utp, rows, candidate, **header
+        ):
+            layouts = candidate
+            if not any(
+                len(layout.segments) > 1 and _is_thin_forced_tail(layout.segments[-1])
+                for layout in layouts
+            ):
+                break
+
+    # Fold a thin last into the previous segment only when the week stays split
+    # for oversize rows (a single segment cannot hold an oversize week).
+    coalesced = _coalesce_thin_last_segments(layouts)
+    if coalesced != layouts:
+        preserves_oversize_split = all(
+            index not in oversize
+            or len(before.segments) <= 1
+            or len(after.segments) >= 2
+            for index, (before, after) in enumerate(zip(layouts, coalesced))
         )
-        if filled is None:
-            rejected.add(index)
-            continue
-        if filled[index].span.start_page <= _prior_content_page(layouts, index):
-            layouts = filled
-            splittable = set(trial)
-            continue
-        rejected.add(index)
-    return layouts
+        if preserves_oversize_split and _layouts_segments_fit_pages(
+            template, utp, rows, coalesced, **header
+        ):
+            layouts = coalesced
+    return layouts, frozenset(oversize)
 
 
 def generate_calendar_docx(
@@ -1660,15 +2061,10 @@ def generate_calendar_docx(
         "uses_organization_template": template.uses_organization_template,
     }
 
-    # Measure the production rule first: a logical week that fits on a page
-    # moves there as one row. A week pushed past remaining free space is
-    # re-measured as breakable so the existing fail-closed segmenter can fill
-    # the gap; a week that still cannot use that space stays on the next page.
-    layouts = _measure_preview_layouts(template, utp, rows, **header)
-    if layouts is not None:
-        layouts = _fill_avoidable_page_gaps(
-            template, utp, rows, layouts, **header
-        )
+    # Whole weeks by default. A week that does not fit in the remaining space
+    # moves to the next page intact. Only weeks taller than one full page are
+    # marked splittable; gap-fill splits are not used.
+    layouts, _oversize = _measure_whole_week_layouts(template, utp, rows, **header)
     if layouts is None:
         _raise_docx_qa(
             "measure_preview_layouts",

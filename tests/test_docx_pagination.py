@@ -777,8 +777,8 @@ def test_single_page_segment_is_kept_together(monkeypatch):
     assert not doc._element.xpath('.//w:pageBreakBefore')
 
 
-def test_pushed_week_is_remeasured_to_fill_prior_page(monkeypatch):
-    """A week moved past free space is segmented; a week that fits stays whole."""
+def test_week_that_fits_on_full_page_is_kept_whole_when_pushed(monkeypatch):
+    """A week that does not fit the remainder moves whole; no gap-fill split."""
 
     from calendar_pedagoga import docx_generation as gen
 
@@ -805,46 +805,144 @@ def test_pushed_week_is_remeasured_to_fill_prior_page(monkeypatch):
             (qa.DataRowPageSegment(2, ('Month', '2\nDate 2', 'abcdefgh', '', '', '', '', '')),),
         ),
     )
-    filled = (
-        qa.DataRowPageLayout(
-            qa.DataRowPageSpan(1, 1, True),
-            (qa.DataRowPageSegment(1, ('Month', '1\nDate 1', 'short', '', '', '', '', '')),),
-        ),
-        qa.DataRowPageLayout(
-            qa.DataRowPageSpan(1, 2, True),
-            (
-                qa.DataRowPageSegment(1, ('Month', '2\nDate 2', 'abcd', '', '', '', '', '')),
-                qa.DataRowPageSegment(2, ('Month', '2\nDate 2', 'efgh', '', '', '', '', '')),
-            ),
-        ),
-    )
     calls = {'splittable': []}
 
-    def measure(template, utp, rows, *, splittable=frozenset(), **header):
+    def measure(template, utp, rows, *, splittable=frozenset(), page_break_before=frozenset(), **header):
         calls['splittable'].append(frozenset(splittable))
-        return filled if splittable == frozenset({1}) else pushed
+        return pushed
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
     monkeypatch.setattr(gen, '_measure_preview_layouts', measure)
+    monkeypatch.setattr(gen, '_oversize_weeks_from_cantsplit_spans', lambda *a, **k: frozenset())
     monkeypatch.setattr(
         qa,
         'detect_data_row_page_spans',
         lambda *args, **kwargs: tuple(
-            qa.DataRowPageSpan(page, page, True) for page in (1, 1, 2)
+            qa.DataRowPageSpan(page, page, True) for page in (1, 2)
         ),
     )
     doc = Document(BytesIO(gen.generate_calendar_docx(
         None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
     )))
     rows = doc.tables[0].rows[2:]
-    assert calls['splittable'] == [frozenset(), frozenset({1})]
-    assert len(rows) == 3
-    assert [row.cells[1].text for row in rows] == [
-        '1\nDate 1', '2\nDate 2', '2\nDate 2',
-    ]
-    assert rows[1].cells[2].text + rows[2].cells[2].text == 'abcdefgh'
-    assert all(row._tr.xpath('./w:trPr/w:cantSplit') for row in rows)
+    assert calls['splittable'] == [frozenset()]
+    assert len(rows) == 2
+    assert [row.cells[1].text for row in rows] == ['1\nDate 1', '2\nDate 2']
+    assert rows[1].cells[2].text == 'abcdefgh'
+
+
+def test_oversize_week_is_split_across_pages(monkeypatch):
+    from calendar_pedagoga import docx_generation as gen
+
+    def populate(document, *args, **kwargs):
+        table = document.add_table(rows=3, cols=8)
+        _repeat_table_header_rows(table)
+        table.rows[2].cells[0].text = 'Month'
+        table.rows[2].cells[1].text = '1\nDate'
+        table.rows[2].cells[2].text = 'ABCDEFGH' * 20
+        return table, _columns_for_table(table), ('Month',)
+
+    body = 'ABCDEFGH' * 20
+    head, tail = body[:80], body[80:]
+    whole = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 1, True),
+            (qa.DataRowPageSegment(1, ('Month', '1\nDate', body, '', '', '', '', '')),),
+        ),
+    )
+    packed = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 2, True),
+            (
+                qa.DataRowPageSegment(1, ('Month', '1\nDate', head, '', '', '', '', '')),
+                qa.DataRowPageSegment(2, ('Month', '1\nDate', tail, '', '', '', '', '')),
+            ),
+        ),
+    )
+
+    def measure(template, utp, rows, *, splittable=frozenset(), page_break_before=frozenset(), **header):
+        if not splittable:
+            return whole
+        return packed
+
+    monkeypatch.setattr(gen, '_load_template', lambda template: Document())
+    monkeypatch.setattr(gen, '_populate_calendar_table', populate)
+    monkeypatch.setattr(gen, '_measure_preview_layouts', measure)
+    monkeypatch.setattr(gen, '_oversize_weeks_from_cantsplit_spans', lambda *a, **k: frozenset({0}))
+    monkeypatch.setattr(gen, '_layouts_segments_fit_pages', lambda *a, **k: True)
+    monkeypatch.setattr(
+        qa,
+        'detect_data_row_page_spans',
+        lambda *args, **kwargs: tuple(
+            qa.DataRowPageSpan(page, page, True) for page in (1, 2)
+        ),
+    )
+    doc = Document(BytesIO(gen.generate_calendar_docx(
+        None, (None,), SimpleNamespace(uses_organization_template=False), '2026–2027',
+    )))
+    rows = doc.tables[0].rows[2:]
+    assert len(rows) == 2
+    assert rows[0].cells[2].text + rows[1].cells[2].text == body
+
+
+def test_thin_forced_tail_is_rebalanced():
+    from calendar_pedagoga.docx_generation import _rebalance_thin_last_segments
+    from calendar_pedagoga.docx_qa import _normalize_match_text
+
+    practice = (
+        'Практика.\n'
+        'Первый блок упражнений на скалодроме с постановкой ног и страховкой. '
+        'Второй блок кругового ОФП: планка, выпрыгивание, вис на турнике. '
+        'Третий блок лазания лёгких трасс на время и точность постановки. '
+        'Четвёртый блок коллективных приседаний и игр на реакцию внимания. '
+        'Пятый блок закрепления техники страховки, команд и самостраховки. '
+        'Шестой блок повторного прохождения учебных трасс средней сложности.'
+    )
+    result = (
+        'Результат длинный текст про уверенное выполнение комплекса ОФП. '
+        'Результат два: проходит лёгкие трассы без срывов. '
+        'Результат три: выполняет коллективные приседания по заданию педагога.'
+    )
+    control = (
+        'Контроль один: педагогическое наблюдение за техникой. '
+        'Контроль два: устный опрос по комплексу ОФП. '
+        'Контроль три: фиксация прохождения учебной трассы.'
+    )
+    layouts = (
+        qa.DataRowPageLayout(
+            qa.DataRowPageSpan(1, 2, True),
+            (
+                qa.DataRowPageSegment(
+                    1,
+                    (
+                        'Month',
+                        '1',
+                        practice,
+                        '',
+                        '',
+                        '',
+                        result,
+                        control,
+                    ),
+                ),
+                qa.DataRowPageSegment(
+                    2,
+                    ('Month', '1', '', '', '', '', 'хвост.', 'ок.'),
+                ),
+            ),
+        ),
+    )
+    out = _rebalance_thin_last_segments(layouts)
+    assert len(out[0].segments) == 2
+    last = out[0].segments[-1]
+    assert len(_normalize_match_text(''.join(last.cells[2:]))) >= 200
+    assert len(_normalize_match_text(last.cells[2] + last.cells[4])) >= 60
+    assert len(_normalize_match_text(last.cells[6] or '')) >= 80
+    assert (
+        out[0].segments[0].cells[2] + out[0].segments[1].cells[2]
+        == layouts[0].segments[0].cells[2] + layouts[0].segments[1].cells[2]
+    )
 
 
 def test_week_that_cannot_use_prior_page_stays_moved(monkeypatch):
@@ -871,13 +969,14 @@ def test_week_that_cannot_use_prior_page_stays_moved(monkeypatch):
     )
     calls = {'n': 0}
 
-    def measure(template, utp, rows, *, splittable=frozenset(), **header):
+    def measure(template, utp, rows, *, splittable=frozenset(), page_break_before=frozenset(), **header):
         calls['n'] += 1
         return layouts
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
     monkeypatch.setattr(gen, '_measure_preview_layouts', measure)
+    monkeypatch.setattr(gen, '_oversize_weeks_from_cantsplit_spans', lambda *a, **k: frozenset())
     monkeypatch.setattr(
         qa,
         'detect_data_row_page_spans',
@@ -888,7 +987,7 @@ def test_week_that_cannot_use_prior_page_stays_moved(monkeypatch):
     doc = Document(BytesIO(gen.generate_calendar_docx(
         None, (None, None), SimpleNamespace(uses_organization_template=False), '2026–2027',
     )))
-    assert calls['n'] == 2  # initial + one rejected trial for row 1
+    assert calls['n'] == 1  # whole packing only; no oversize splits
     assert len(doc.tables[0].rows[2:]) == 2
 
 
@@ -1011,6 +1110,7 @@ def test_generation_fails_closed_when_final_merge_reflows_segment(monkeypatch):
 
     monkeypatch.setattr(gen, '_load_template', lambda template: Document())
     monkeypatch.setattr(gen, '_populate_calendar_table', populate)
+    monkeypatch.setattr(gen, '_oversize_weeks_from_cantsplit_spans', lambda *a, **k: frozenset())
     layout = (
         qa.DataRowPageLayout(
             qa.DataRowPageSpan(1, 1, True),
