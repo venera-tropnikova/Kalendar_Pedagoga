@@ -706,15 +706,67 @@ def _token_core(token: str) -> str:
 
 
 def _is_action_head(word: str) -> bool:
+    low = word.casefold()
     return bool(
         word
         and (
             _looks_like_verbal_noun(word)
             or _is_exercise_word(word)
             or _is_walk_word(word)
-            or word.casefold().startswith("викторин")
+            or low.startswith("викторин")
+            # Bare setting / directed-action NPs start their own segment so they
+            # are not glued as objects of a previous finite verb.
+            or low.startswith("имитац")
+            or low.startswith("действ")
         )
     )
+
+
+def _bare_directed_actions_np(text: str) -> str | None:
+    """«действия по X» names pupil actions, not a finished RESULT phrase."""
+
+    match = re.match(
+        r"(?i)^(?:действия|действие)\s+по\s+(.+)$",
+        _normalize_spaces(text).rstrip(" ."),
+    )
+    return match.group(1).strip() if match else None
+
+
+def _bare_simulation_setting(text: str) -> str | None:
+    """«имитация X» is a practice setting, never a standalone RESULT."""
+
+    match = re.match(
+        r"(?i)^имитаци[яию]\s+(.+)$",
+        _normalize_spaces(text).rstrip(" ."),
+    )
+    return match.group(1).strip() if match else None
+
+
+def _attach_simulation_circumstance(phrase: str, setting: str) -> str:
+    """Keep the setting as «при имитации …» on a directed-action RESULT."""
+
+    body = phrase.rstrip(" .")
+    if "при имитац" in body.casefold():
+        return body
+    return _normalize_spaces(f"{body} при имитации {setting}")
+
+
+def _fuse_simulation_action_neighbors(units: list[str]) -> list[str]:
+    """Join bare simulation + directed-action neighbors into one transform unit."""
+
+    settings: list[str] = []
+    actions: list[str] = []
+    other: list[str] = []
+    for unit in units:
+        if _bare_simulation_setting(unit) is not None:
+            settings.append(unit)
+        elif _bare_directed_actions_np(unit) is not None:
+            actions.append(unit)
+        else:
+            other.append(unit)
+    if not actions or not settings:
+        return units
+    return [*other, f"{actions[0]}, {settings[0]}"]
 
 
 def _starts_new_action(tokens: list[str], index: int) -> bool:
@@ -772,10 +824,16 @@ def _split_action_segments(text: str) -> list[str]:
                 and _verbal_noun_lemma(core).casefold()
                 == re.sub(r"[^\wёЁ]", "", core).casefold()
             )
+            low_core = core.casefold()
+            # Bare simulation / directed-action NPs are new activities even after
+            # a PP («…на карте, имитация…, действия по…»).
+            setting_or_directed = low_core.startswith(("имитац", "действ"))
             if token.startswith("("):
                 pass
             elif in_prepositional and not (
-                prev.endswith(",") and nominative_action and _starts_new_action(tokens, index)
+                prev.endswith(",")
+                and _starts_new_action(tokens, index)
+                and (nominative_action or setting_or_directed)
             ):
                 pass
             elif prev.endswith(",") and _starts_new_action(tokens, index):
@@ -1141,6 +1199,8 @@ def _embedded_aid_result(text: str) -> tuple[str, str, str, str] | None:
 def _is_foreign_activity_np(part: str) -> bool:
     """Comma-part names a different form-activity, not a complement of this verb."""
 
+    if _bare_simulation_setting(part) is not None or _bare_directed_actions_np(part) is not None:
+        return True
     tokens = _normalize_spaces(part).split()
     mods, rest = _leading_modifiers(tokens)
     if not rest:
@@ -1657,6 +1717,15 @@ def _transform_segment(
         unconjugated = _unconjugated_practice_activity_result(text)
         if unconjugated:
             return unconjugated
+
+    if not theory_only:
+        directed = _bare_directed_actions_np(text)
+        if directed is not None:
+            phrase = _normalize_spaces(f"выполняет действия по {directed}")
+            return phrase, "действия", directed, ""
+        if _bare_simulation_setting(text) is not None:
+            # A simulation is the setting of another action, not an outcome.
+            return "", "", "", ""
 
     if theory_only or head.casefold() in _KNOWLEDGE_NOUNS:
         if _knowledge_label_over_catalogue(text):
@@ -2521,6 +2590,9 @@ def _drop_raw_list_tails(text: str) -> str:
         if _FINITE_VERB_RE.match(part):
             kept.append(part)
             continue
+        if _bare_simulation_setting(part) is not None or _bare_directed_actions_np(part) is not None:
+            # Settings and directed-action NPs are other activities, not tails.
+            continue
         if _looks_like_verbal_noun(first) or re.search(
             r"(?i)(?:нию|тию|анию|ению)$", first
         ):
@@ -2529,6 +2601,21 @@ def _drop_raw_list_tails(text: str) -> str:
             continue
         if first[:1].isupper() and not _RESULT_FINITE_RE.match(part):
             if not re.match(r"(?i)^(?:совершает|посещает)\s+", parts[0]):
+                prev = kept[-1]
+                # Capitalized mid-list members of an open «по …» series
+                # («по Солнцу, Луне, Полярной звезде») are still complements.
+                in_po_series = bool(re.match(r"(?i)^по\s+\S", prev)) or (
+                    prev[:1].isupper()
+                    and any(re.match(r"(?i)^по\s+\S", item) for item in kept)
+                )
+                if (
+                    in_po_series
+                    and not _is_action_head(first)
+                    and not _looks_like_verbal_noun(first)
+                    and len(part.split()) <= 3
+                ):
+                    kept.append(part)
+                    continue
                 continue
         if re.match(r"(?i)^(игры|игра|соревнования|диктанты|занятия|мини)\b", part):
             continue
@@ -2588,6 +2675,53 @@ def _drop_knowledge_wrappers(text: str) -> str:
     return _normalize_spaces(" ".join(words))
 
 
+def _join_finite_result_phrases(phrases: list[str]) -> str:
+    """Same finite verb stays comma-joined; a new verb starts a new sentence
+    only when an object-listing verb would otherwise absorb another action.
+    """
+
+    if not phrases:
+        return ""
+    # Verbs whose objects are long enumerations: a following different finite
+    # must not be comma-glued into that list («определяет …, выполняет …»).
+    object_list_verbs = frozenset(
+        {
+            "определяет",
+            "измеряет",
+            "характеризует",
+            "называет",
+            "раскрывает",
+        }
+    )
+    sentences: list[str] = []
+    current_verb = ""
+    bucket: list[str] = []
+
+    def flush() -> None:
+        nonlocal bucket, current_verb
+        if not bucket:
+            return
+        body = ", ".join(item.rstrip(" .") for item in bucket)
+        sentences.append(_cap_sentence(body))
+        bucket, current_verb = [], ""
+
+    for phrase in phrases:
+        cleaned = _normalize_spaces(phrase).rstrip(" .")
+        if not cleaned:
+            continue
+        verb = _leading_finite_verb(cleaned).casefold()
+        if bucket and verb and current_verb and verb != current_verb:
+            if current_verb in object_list_verbs or verb in object_list_verbs:
+                flush()
+        if not bucket:
+            current_verb = verb
+        bucket.append(cleaned)
+        if verb:
+            current_verb = verb
+    flush()
+    return " ".join(sentences)
+
+
 def _transform_clause_candidate(
     clause: str,
     *,
@@ -2618,11 +2752,15 @@ def _transform_clause_candidate(
     actions: list[str] = []
     objects: list[str] = []
     conditions: list[str] = []
+    simulation_settings: list[str] = []
     for unit in _clause_units(source_clause) or [source_clause]:
         if theory_only and _is_interrogative_clause(unit):
             continue
         main = re.sub(r"\(([^()]*)\)", _paren, unit)
         for segment in _split_action_segments(_normalize_spaces(main)):
+            setting = _bare_simulation_setting(segment)
+            if setting is not None:
+                simulation_settings.append(setting)
             phrase, action, obj, cond = _transform_segment(
                 segment, theory_only=theory_only, full_source=full_source
             )
@@ -2638,8 +2776,15 @@ def _transform_clause_candidate(
                 objects.append(obj)
             if cond:
                 conditions.append(cond)
+    if simulation_settings:
+        for index, phrase in enumerate(phrases):
+            if phrase.casefold().startswith("выполняет действия по"):
+                phrases[index] = _attach_simulation_circumstance(
+                    phrase, simulation_settings[0]
+                )
+                break
     phrases = _keep_strongest_phrase(phrases)
-    result = ", ".join(phrases)
+    result = _join_finite_result_phrases(phrases)
     if action_parens and len(phrases) < 2:
         result = _normalize_spaces(
             result + " " + " ".join(f"({part})" for part in action_parens)
@@ -2892,10 +3037,11 @@ def _enrich_with_neighbors(
     complementary: list[str] = []
     used = {selected}
 
-    def add(nidx: int, neighbor: str, *, practice: bool = False) -> None:
+    def add(nidx: int, neighbor: str, *, practice: bool = False, join: bool = True) -> None:
         if neighbor in used or _is_non_student_process(neighbor):
             return
-        extras.append((nidx, neighbor))
+        if join:
+            extras.append((nidx, neighbor))
         used.add(neighbor)
         if practice:
             complementary.append(neighbor)
@@ -2947,7 +3093,14 @@ def _enrich_with_neighbors(
                     if any(stem in part.casefold() for stem in wanted)
                 ]
                 for part in focused or [neighbor]:
-                    add(nidx, part, practice=True)
+                    # Bare simulation / directed-action NPs follow as their own
+                    # RESULT units; joining them into the selected clause would
+                    # glue a second finite verb into the first verb's objects.
+                    bare = (
+                        _bare_simulation_setting(part) is not None
+                        or _bare_directed_actions_np(part) is not None
+                    )
+                    add(nidx, part, practice=True, join=not bare)
                 break
     for nidx, neighbor in enumerate(units):
         if neighbor in used:
@@ -2957,8 +3110,10 @@ def _enrich_with_neighbors(
         for part in _focus_complement_parts(neighbor):
             add(nidx, part, practice=True)
     extra_texts = complementary
-    if not extras:
+    if not extras and not complementary:
         return selected, []
+    if not extras:
+        return selected, extra_texts
     parts = [(index, selected), *extras]
     parts.sort()
     return ". ".join(item for _, item in parts), extra_texts
@@ -4615,6 +4770,28 @@ def _control_covers_operation(control: str, verb: str, obj: str) -> bool:
     return False
 
 
+def _quoted_actions_control(result: str) -> str:
+    """One quoted finite action per RESULT sentence; no multi-sentence quotes."""
+
+    segments = _result_control_segments(result)
+    if not segments:
+        return ""
+    quotes: list[str] = []
+    for verb, obj in segments:
+        phrase = _cap_sentence(_normalize_spaces(f"{verb} {obj}")).rstrip(".")
+        if phrase:
+            quotes.append(f"«{phrase}»")
+    if not quotes:
+        return ""
+    if len(quotes) == 1:
+        return f"Педагогическое наблюдение: проверяется действие {quotes[0]}"
+    return "Педагогическое наблюдение: проверяются действия " + ", ".join(quotes)
+
+
+def _control_has_multisentence_quotes(control: str) -> bool:
+    return bool(re.search(r"«[^»]*\.[^»]*»", control or ""))
+
+
 def control_from_frame(
     frame: ActionFrame, *, lesson_type: str, theory_hours: int,
     practice_hours: int, planned_result: str = "",
@@ -5623,7 +5800,8 @@ def _derive_fields_candidate(
         if knowledge and not _result_restates_named_form(knowledge):
             planned_result = knowledge
     follow_results: list[str] = []
-    for unit in neighbor_extras:
+    neighbor_units = _fuse_simulation_action_neighbors(list(neighbor_extras))
+    for unit in neighbor_units:
         extra, _extra_frame = transform_clause_to_result(
             unit,
             theory_only=theory_only,
@@ -5634,7 +5812,7 @@ def _derive_fields_candidate(
         )
         extra = _observable_result(extra)
         extra_core = _drop_leading_verb(extra).rstrip(" .")
-        if not extra:
+        if not extra or not _is_finite_result_phrase(extra):
             continue
         if extra.casefold().rstrip(".") in planned_result.casefold():
             continue
@@ -6469,12 +6647,17 @@ def _derive_week_fields_v2(
     warnings = tuple(w for w in original.warnings if not w.startswith("Безопасный шаблон CE2:"))
     warnings += tuple("NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + c for c in uncovered)
     merged_result = _merge_independent_part_results(results)
+    assessment = _unified_process_performance_control(
+        merged_result, _join_control_clauses(controls)
+    )
+    if _control_has_multisentence_quotes(assessment):
+        rebuilt = _quoted_actions_control(_fold_week_result(merged_result))
+        if rebuilt:
+            assessment = rebuilt
     return replace(
         original,
         planned_result=merged_result,
-        assessment_method=_unified_process_performance_control(
-            merged_result, _join_control_clauses(controls)
-        ),
+        assessment_method=assessment,
         warnings=tuple(dict.fromkeys(warnings)),
         type_result=original.planned_result,
         clause_coverage=tuple(
@@ -7039,37 +7222,80 @@ def _vary_repeated_independent_characterize(sentences: list[str]) -> list[str]:
 
 
 def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
-    """One predicate per run of actions that share it; every object is kept."""
+    """One predicate per run of actions that share it; every object is kept.
 
+    Practice verbs that list parallel objects may resume after another finite
+    action («определяет … . выполняет … . определяет точку …»): those later
+    objects join the first occurrence. Knowledge verbs such as «характеризует»
+    stay consecutive-only so independent theory sentences are not reordered.
+    """
+
+    resumable = frozenset(
+        {
+            "определяет",
+            "измеряет",
+            "составляет",
+            "подготавливает",
+            "выполняет",
+            "отрабатывает",
+            "изучает",
+        }
+    )
     folded: list[str] = []
     verb: str = ""
     objects: list[str] = []
+    slots: dict[str, list[str]] = {}
 
     def flush() -> None:
         nonlocal verb, objects
         if objects:
-            # A final «и» would be ambiguous once an object carries its own
-            # coordination, so such an enumeration stays comma-separated.
             listed = (
                 ", ".join(objects)
                 if any(" и " in item or "," in item for item in objects)
                 else _join_and(objects)
             )
             folded.append(_cap_sentence(f"{verb} {listed}"))
+            if verb:
+                slots[verb.casefold()] = objects
         verb, objects = "", []
 
     for sentence in sentences:
         current = _leading_finite_verb(sentence)
         obj = _drop_leading_verb(sentence).rstrip(" .") if current else ""
-        # A generic «по теме» wording is not an object worth enumerating.
         if not current or not obj or "по теме" in sentence.casefold():
             flush()
             folded.append(sentence)
             continue
-        if verb and verb.casefold() != current.casefold():
+        if re.search(
+            r"(?i)(?<![А-Яа-яЁё])(?:выполняет|определяет|составляет|подготавливает|"
+            r"характеризует|раскрывает|совершает|участвует|называет|измеряет|"
+            r"строит|ремонтирует|оценивает|изготавливает)\b",
+            obj,
+        ):
+            flush()
+            folded.append(sentence if sentence.endswith((".", "!", "?")) else f"{sentence}.")
+            continue
+        key = current.casefold()
+        if key in resumable and key in slots:
+            prior = slots[key]
+            if obj.casefold() not in {item.casefold() for item in prior}:
+                prior.append(obj)
+            # Rewrite the already folded sentence that owns this verb.
+            for index, item in enumerate(folded):
+                if _leading_finite_verb(item).casefold() == key:
+                    listed = (
+                        ", ".join(prior)
+                        if any(" и " in part or "," in part for part in prior)
+                        else _join_and(prior)
+                    )
+                    folded[index] = _cap_sentence(f"{current} {listed}")
+                    break
+            continue
+        if verb and verb.casefold() != key:
             flush()
         verb = verb or current
-        objects.append(obj)
+        if obj.casefold() not in {item.casefold() for item in objects}:
+            objects.append(obj)
     flush()
     return folded
 
@@ -7587,13 +7813,18 @@ def build_lesson_content_v2(
             assessment = derived.assessment_method
             extra_warnings = derived.warnings
             clause_coverage = derived.clause_coverage
+        planned_result = _fold_week_result(planned_result)
+        if _control_has_multisentence_quotes(assessment):
+            rebuilt = _quoted_actions_control(planned_result)
+            if rebuilt:
+                assessment = rebuilt
         result.append(
             LessonContentV2Row(
                 source=row,
                 theory_text=theory_text,
                 practice_text=practice_text,
                 lesson_type=lesson_type,
-                planned_result=_fold_week_result(planned_result),
+                planned_result=planned_result,
                 assessment_method=assessment,
                 action=derived.frame.action,
                 object=derived.frame.object,
