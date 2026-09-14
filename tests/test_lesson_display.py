@@ -1,10 +1,124 @@
+import pytest
+
 from calendar_pedagoga.lesson_display import (
+    _compact_repeated_practice_postfix,
     brief_practice_summary,
     brief_theory_fragment,
     format_practice_cell,
     format_theory_cell,
     selected_practice_clause,
 )
+
+
+def _display_blocks(*blocks: tuple[str, str]) -> str:
+    return " ".join(f"{main}. {postfix}." for main, postfix in blocks)
+
+
+def test_display_compacts_exact_repeated_postfix_three_times() -> None:
+    source = _display_blocks(
+        ("Отработка узла A", "Круговое ОФП"),
+        ("Отработка узла B", "Круговое ОФП"),
+        ("Отработка узла C", "Круговое ОФП"),
+    )
+
+    display = _compact_repeated_practice_postfix(source)
+
+    assert display.count("После каждого блока:") == 1
+    assert display.count("Круговое ОФП") == 1
+    assert all(f"узла {name}" in display for name in "ABC")
+    assert all(f"{index})" in display for index in range(1, 4))
+
+
+def test_display_compacts_same_postfix_and_same_dosage() -> None:
+    source = _display_blocks(
+        ("Блок равновесия", "Круговое ОФП (2 круга)"),
+        ("Блок гибкости", "Круговое ОФП (2 круга)"),
+    )
+
+    display = _compact_repeated_practice_postfix(source)
+
+    assert display.count("Круговое ОФП (2 круга)") == 1
+    assert "После каждого блока:" in display
+
+
+def test_display_compacts_ordered_dosage_vector_with_block_binding() -> None:
+    source = _display_blocks(
+        ("Блок осанки", "Коллективные приседания (40 раз)"),
+        ("Блок корсета", "Коллективные приседания (50 раз)"),
+        ("Блок внимания", "Коллективные приседания (50 раз)"),
+    )
+
+    display = _compact_repeated_practice_postfix(source)
+
+    assert "блоки 1/2/3: 40/50/50 раз" in display
+    assert display.count("Коллективные приседания") == 1
+
+
+@pytest.mark.parametrize(
+    "postfixes",
+    (
+        ("Круговое ОФП: планка", "Круговое ОФП: прыжки"),
+        ("Лазание трасс на время", "Лазание трасс на точность"),
+        ("Лазание легких трасс", "Лазание сложных трасс"),
+    ),
+)
+def test_display_does_not_compact_different_postfix_frame(
+    postfixes: tuple[str, str],
+) -> None:
+    source = _display_blocks(("Главное действие A", postfixes[0]), ("Главное действие B", postfixes[1]))
+
+    assert _compact_repeated_practice_postfix(source) == source.rstrip(" .")
+
+
+def test_display_does_not_compact_ambiguous_punctuation() -> None:
+    postfix = "Круговое ОФП: планка, вис на турнике «складочки» (2 круга)"
+    source = _display_blocks(("Главное действие A", postfix), ("Главное действие B", postfix))
+
+    assert _compact_repeated_practice_postfix(source) == source.rstrip(" .")
+
+
+def test_display_does_not_compact_safety_or_final_action() -> None:
+    source = _display_blocks(
+        ("Главное действие A", "Соблюдать требования безопасности"),
+        ("Главное действие B", "Соблюдать требования безопасности"),
+    )
+
+    assert _compact_repeated_practice_postfix(source) == source.rstrip(" .")
+
+
+def test_display_compaction_does_not_mutate_source_semantic_model() -> None:
+    from calendar_pedagoga.content_engine_v2 import derive_fields_v2
+
+    source = _display_blocks(
+        ("Отработка осанки", "Круговое ОФП (2 круга)"),
+        ("Отработка гибкости", "Круговое ОФП (2 круга)"),
+    )
+    semantic = derive_fields_v2(
+        topic_title="ОФП",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+    snapshot = (
+        semantic.planned_result,
+        semantic.assessment_method,
+        semantic.clause_coverage,
+    )
+
+    display = format_practice_cell("3", "ОФП", "Практика. " + source, 2)
+
+    assert "После каждого блока:" in display
+    assert source == (
+        "Отработка осанки. Круговое ОФП (2 круга). "
+        "Отработка гибкости. Круговое ОФП (2 круга)."
+    )
+    assert (
+        semantic.planned_result,
+        semantic.assessment_method,
+        semantic.clause_coverage,
+    ) == snapshot
 
 
 def test_theory_without_practice_marker_uses_title_only() -> None:
