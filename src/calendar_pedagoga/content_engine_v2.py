@@ -2027,12 +2027,24 @@ def _reconstruct_action_object_list(text: str) -> tuple[str, str, str, str] | No
     ofp = bool(re.fullmatch(r"(?i)офп", head)) or "офп" in main.casefold() and ":" in cleaned
 
     if ofp or (re.match(r"(?i)^(?:круговое\s+)?офп\b", cleaned) and ":" in cleaned):
-        # Circuit / ОФП catalogue: keep members, do not invent separate drills.
+        # Circuit / ОФП catalogue: keep the labelled activity and dosage,
+        # never expand colon members into RESULT.
         label, _, tail = cleaned.partition(":")
         np_words = [_decap_lexical(tok) for tok in label.split()]
-        phrase = _append_remainder("выполняет " + " ".join(np_words), ": " + tail.strip())
-        obj, cond = _split_object_and_conditions(tail.strip())
-        return phrase, "офп", obj, cond
+        dosages = _dosage_markers(tail)
+        unique_dosages = list(
+            dict.fromkeys(_normalize_dosage_marker(item) for item in dosages)
+        )
+        if len(unique_dosages) > 1:
+            phrase = _append_remainder(
+                "выполняет " + " ".join(np_words), ": " + tail.strip()
+            )
+            obj, cond = _split_object_and_conditions(tail.strip())
+            return phrase, "офп", obj, cond
+        phrase = "выполняет " + " ".join(np_words)
+        if unique_dosages:
+            phrase = _normalize_spaces(phrase + " " + unique_dosages[0])
+        return phrase, "офп", "", unique_dosages[0] if unique_dosages else ""
 
     if not (
         lemma in _EXPLICIT_ACTION_HEADS
@@ -5557,6 +5569,172 @@ def _control_covers_operation(control: str, verb: str, obj: str) -> bool:
     return False
 
 
+def _dosage_markers(text: str) -> list[str]:
+    return [
+        item
+        for item in re.findall(r"\([^)]+\)", text or "")
+        if re.search(r"(?i)(?<![а-яё])(?:круг|раз|подход|мин|сек)\w*\b", item)
+    ]
+
+
+def _normalize_dosage_marker(text: str) -> str:
+    return re.sub(
+        r"(?<=\d)(?=[а-яё])",
+        " ",
+        _normalize_spaces(text).casefold(),
+        flags=re.IGNORECASE,
+    )
+
+
+def _homogeneous_exercise_catalogue(
+    text: str,
+) -> tuple[str, str, tuple[str, ...]] | None:
+    """Return LABEL, full SOURCE and unique dosages for a proven catalogue."""
+
+    cleaned = _normalize_spaces(text).rstrip(".")
+    matches = list(
+        re.finditer(
+            r"(?i)((?:круговое\s+)?офп|(?:комплекс\s+)?упражнен\w*)\s*:\s*(.+)$",
+            cleaned,
+        )
+    )
+    if not matches:
+        return None
+    match = matches[-1]
+    prefix = cleaned[: match.start()].rstrip()
+    if prefix and not prefix.endswith(")"):
+        return None
+    catalogue_text = _normalize_spaces(f"{match.group(1)}: {match.group(2)}")
+    if not _has_explicit_action_catalogue(catalogue_text):
+        return None
+    members = [item.strip() for item in match.group(2).split(",") if item.strip()]
+    if len(members) < 2:
+        return None
+    dosages = tuple(
+        dict.fromkeys(
+            _normalize_dosage_marker(item)
+            for item in _dosage_markers(match.group(2))
+        )
+    )
+    return _normalize_spaces(match.group(1)), cleaned, dosages
+
+
+def _catalogue_label_dosage_preserved(clause: str, result: str) -> bool:
+    """A homogeneous catalogue may compress only to one preserved dosage."""
+
+    catalogue = _homogeneous_exercise_catalogue(clause)
+    if catalogue is None:
+        return False
+    label, _full_source, dosages = catalogue
+    folded = _normalize_spaces(result).casefold()
+    label_index = folded.find(label.casefold())
+    result_dosages = (
+        [_normalize_dosage_marker(item) for item in _dosage_markers(folded[label_index:])]
+        if label_index >= 0
+        else []
+    )
+    return bool(
+        len(dosages) == 1
+        and result_dosages
+        and result_dosages[0] == dosages[0]
+    )
+
+
+def _compress_exercise_catalogues_in_text(text: str) -> str:
+    """Drop colon member lists for ОФП / exercise catalogues; keep label + dosage."""
+
+    if not text:
+        return text
+
+    def _ofp_repl(match: re.Match[str]) -> str:
+        label = match.group(1)
+        catalogue = _homogeneous_exercise_catalogue(match.group(0))
+        if catalogue is None:
+            return match.group(0)
+        _, _, dosages = catalogue
+        if len(dosages) > 1:
+            return match.group(0)
+        if not dosages:
+            return label
+        return _normalize_spaces(f"{label} {dosages[0]}")
+
+    compressed = re.sub(
+        r"(?i)((?:круговое\s+)?офп)\s*:\s*([^.;]+)",
+        _ofp_repl,
+        text,
+    )
+
+    def _exercise_repl(match: re.Match[str]) -> str:
+        label = match.group(1)
+        catalogue = _homogeneous_exercise_catalogue(match.group(0))
+        if catalogue is None:
+            return match.group(0)
+        _, _, dosages = catalogue
+        if len(dosages) > 1:
+            return match.group(0)
+        if not dosages:
+            return label
+        return _normalize_spaces(f"{label} {dosages[0]}")
+
+    compressed = re.sub(
+        r"(?i)\b((?:комплекс\s+)?упражнен\w*)\s*:\s*([^.;]+)",
+        _exercise_repl,
+        compressed,
+    )
+    return _normalize_spaces(compressed)
+
+
+def _token_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[а-яёa-z0-9]{4,}", (left or "").casefold()))
+    right_tokens = set(re.findall(r"[а-яёa-z0-9]{4,}", (right or "").casefold()))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(
+        1, min(len(left_tokens), len(right_tokens))
+    )
+
+
+def _has_expanded_ofp_catalogue(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)(?:круговое\s+)?офп\s*:\s*[^.]{0,60},\s*[^.]{0,60},",
+            text or "",
+        )
+    )
+
+
+def _control_has_long_result_quotes(control: str) -> bool:
+    text = control or ""
+    if re.search(r"(?i)проверя(?:ется|ются)\s+действи", text):
+        return True
+    return bool(re.search(r"«[^»]{72,}»", text))
+
+
+def _control_nearly_duplicates_result(result: str, control: str) -> bool:
+    control_text = _normalize_spaces(control)
+    result_text = _normalize_spaces(result)
+    low = control_text.casefold()
+    if re.search(r"(?i)проверя(?:ется|ются)\s+действи", low):
+        return True
+    body = result_text.rstrip(".").casefold()
+    if body and len(body) >= 80 and body in low:
+        return True
+    return False
+
+
+def _rc_verbosity_block_reasons(result: str, control: str) -> tuple[str, ...]:
+    """FINAL-gate blockers for RESULT/CONTROL catalogue and quote inflation."""
+
+    reasons: list[str] = []
+    if _control_nearly_duplicates_result(result, control):
+        reasons.append("CONTROL почти дублирует RESULT")
+    if _has_expanded_ofp_catalogue(result) or _has_expanded_ofp_catalogue(control):
+        reasons.append("RESULT/CONTROL содержат повторяющийся каталог ОФП")
+    if _control_has_long_result_quotes(control):
+        reasons.append("CONTROL содержит длинные цитаты RESULT")
+    return tuple(reasons)
+
+
 def _format_control_action_quote(phrase: str) -> str:
     """Quote a RESULT sentence for CONTROL without nesting identical guillemets."""
 
@@ -5567,20 +5745,115 @@ def _format_control_action_quote(phrase: str) -> str:
     return f"«{capped}»"
 
 
-def _quoted_actions_control(result: str) -> str:
-    """One quoted finite action per RESULT sentence; no multi-sentence quotes."""
+def _shorten_control_action_phrase(phrase: str, *, limit: int = 70) -> str:
+    """Shorten a RESULT action for CONTROL without dropping essential PPs/objects."""
 
-    quotes: list[str] = []
-    for sentence in _result_sentences(result):
-        phrase = _normalize_spaces(sentence).rstrip(".")
-        if not phrase or not _leading_finite_verb(phrase):
-            continue
-        quotes.append(_format_control_action_quote(phrase))
-    if not quotes:
-        return ""
-    if len(quotes) == 1:
-        return f"Педагогическое наблюдение: проверяется действие {quotes[0]}"
-    return "Педагогическое наблюдение: проверяются действия " + ", ".join(quotes)
+    phrase = _normalize_spaces(phrase).rstrip(".")
+    phrase = _compress_exercise_catalogues_in_text(phrase)
+    if len(phrase) <= limit:
+        return phrase
+    verb = _leading_finite_verb(phrase)
+    obj = _drop_leading_verb(phrase)
+    if _has_expanded_ofp_catalogue(phrase) or re.search(r"(?i)\bофп\b", phrase):
+        short_obj = _short_object(obj, keep_first_prep=False) or obj
+        phrase = _normalize_spaces(f"{verb} {short_obj}".strip())
+        if len(phrase) <= limit:
+            return phrase
+    # Prefer keeping a trailing exemplar parenthesis (треугольники, «бабочки»…).
+    # Ignore simple role labels like «(прямая засечка)».
+    paren_match = re.search(
+        r"(\(([^)]*(?:и\s*т\.?\s*п\.?|«)[^)]*)\))\s*$",
+        phrase,
+    )
+    paren = paren_match.group(1).strip() if paren_match else ""
+    core = phrase[: paren_match.start()].rstrip(" ,;") if paren_match else phrase
+    if paren:
+        core_tokens = core.split()
+        if verb and core_tokens and core_tokens[0].casefold() == verb.casefold():
+            tail_tokens = core_tokens[1:]
+        else:
+            tail_tokens = core_tokens
+        if len(tail_tokens) <= 5:
+            keep_tail = tail_tokens
+        else:
+            # Keep the opening object chain and the NP attached to exemplars.
+            head = tail_tokens[:3]
+            attach = tail_tokens[-2:]
+            keep_tail = list(dict.fromkeys([*head, *attach]))
+        compact = _normalize_spaces(
+            " ".join([tok for tok in [verb, *keep_tail] if tok]).rstrip(" ,;")
+            + f" {paren}"
+        )
+        # Exemplar paren is semantic cargo — keep it even if slightly over soft limit.
+        if len(compact) <= max(limit + 24, len(paren) + 36):
+            return compact
+    tokens = phrase.split()
+    kept: list[str] = []
+    for token in tokens:
+        candidate = _normalize_spaces(" ".join([*kept, token]))
+        if kept and len(candidate) > limit:
+            break
+        kept.append(token)
+        balanced = (
+            candidate.count("(") == candidate.count(")")
+            and candidate.count("«") == candidate.count("»")
+            and candidate.count("„") == candidate.count("“")
+        )
+        if len(candidate) >= limit and balanced:
+            break
+    shortened = _normalize_spaces(" ".join(kept)).rstrip(" ,;:")
+    while shortened and (
+        shortened.count("(") != shortened.count(")")
+        or shortened.count("«") != shortened.count("»")
+        or shortened.count("„") != shortened.count("“")
+    ):
+        shortened = shortened.rsplit(" ", 1)[0].rstrip(" ,;:")
+    return shortened or (verb or phrase[:limit])
+
+
+def _quoted_actions_control(result: str) -> str:
+    """Compact pedagogical CONTROL — never use RESULT wholesale quotes."""
+
+    compact_result = _compress_exercise_catalogues_in_text(result)
+    finite_sentences = [
+        _normalize_spaces(sentence).rstrip(".")
+        for sentence in _result_sentences(compact_result)
+        if _leading_finite_verb(sentence)
+    ]
+    knowledge_only = bool(finite_sentences) and all(
+        _leading_finite_verb(sentence).casefold() in _KNOWLEDGE_RESULT_VERBS
+        for sentence in finite_sentences
+    )
+    if knowledge_only:
+        oral = _oral_quiz_control(ActionFrame("", "", "", ""), compact_result)
+        if oral:
+            return oral
+        rebuilt = _control_from_proven_result(compact_result)
+        return rebuilt or "устный опрос"
+
+    if re.search(r"(?i)\bили\b|\bпо выбору\b", compact_result):
+        return "практическая проверка изделия по выбору"
+
+    parts: list[str] = []
+    for phrase in finite_sentences:
+        phrase = _shorten_control_action_phrase(phrase)
+        item = _format_control_action_quote(phrase)
+        if item.casefold() not in {part.casefold() for part in parts}:
+            parts.append(item)
+        if len(parts) >= 4:
+            break
+    if parts:
+        return "практическая проверка " + "; ".join(parts)
+
+    rebuilt = _control_from_proven_result(compact_result)
+    if rebuilt and not _control_has_long_result_quotes(rebuilt):
+        return _join_control_clauses([rebuilt])
+    observed = _observation_from_action_segments(
+        _result_control_segments(compact_result)
+    )
+    if observed and not _control_has_long_result_quotes(observed):
+        return observed
+    return "педагогическое наблюдение"
 
 
 def _control_has_multisentence_quotes(control: str) -> bool:
@@ -5600,12 +5873,18 @@ def control_from_frame(
     if re.search(r"(?i)\bили\b|\bпо выбору\b", planned_result) and not re.search(
         r"(?i)\bили\b|\bпо выбору\b|\bвыбранн", control,
     ):
-        control = "проверка выбранного варианта действия: «" + planned_result.rstrip(".") + "»"
+        # Keep the alternative visible without pasting a long RESULT quote.
+        control = "практическая проверка изделия по выбору"
     operations = _control_result_obligations(planned_result)
     if len(operations) > 1:
         for verb, obj in operations:
             if not _control_covers_operation(control, verb, obj):
-                control += "; проверка действия «" + verb + " " + obj + "»"
+                payload = _shorten_control_action_phrase(
+                    _normalize_spaces(f"{verb} {obj}")
+                )
+                control += "; практическая проверка " + _format_control_action_quote(
+                    payload
+                )
     return control
 
 
@@ -7542,10 +7821,18 @@ def _derive_week_fields_v2(
             )
             phrase = proof.planned_result
             exact = _nonempty_result_in(phrase, original.planned_result)
+            catalogue = _homogeneous_exercise_catalogue(clause)
+            compact_catalogue_covered = _catalogue_label_dosage_preserved(
+                clause, phrase
+            )
             incomplete = (
                 _coordinated_action_uncovered(clause, original.planned_result)
                 or _ways_catalogue_uncovered(clause, original.planned_result)
-                or _list_member_uncovered(clause, original.planned_result)
+                or (
+                    not compact_catalogue_covered
+                    if catalogue is not None
+                    else _list_member_uncovered(clause, original.planned_result)
+                )
             )
             absent = _selected_proof_absent_from_result(phrase, original.planned_result)
             # TYPE may keep this frame while RESULT still came from another
@@ -7646,7 +7933,11 @@ def _derive_week_fields_v2(
         if (
             _coordinated_action_uncovered(clause, local.planned_result)
             or _ways_catalogue_uncovered(clause, local.planned_result)
-            or _list_member_uncovered(clause, local.planned_result)
+            or (
+                not _catalogue_label_dosage_preserved(clause, local.planned_result)
+                if _homogeneous_exercise_catalogue(clause) is not None
+                else _list_member_uncovered(clause, local.planned_result)
+            )
         ):
             uncovered.append(clause)
     if retained and not retained_added:
@@ -8092,6 +8383,14 @@ def _clause_meaning_preserved_in_result(
     folded = _normalize_spaces(result).casefold()
     if not folded:
         return False
+    catalogue = _homogeneous_exercise_catalogue(clause)
+    if catalogue is not None:
+        _label, full_source, _dosages = catalogue
+        if _catalogue_label_dosage_preserved(clause, result):
+            return True
+        # No LABEL+DOSAGE shortcut for missing or conflicting dosages. A fully
+        # retained catalogue still preserves meaning through the ordinary path.
+        return full_source.casefold() in folded
     for sentence in _result_sentences(result):
         if _knowledge_result_cites_clause(sentence, clause):
             return True
@@ -8203,7 +8502,10 @@ def _rebuild_control_from_accepted_result(
             continue
         if _control_covers_operation(text, verb, obj):
             continue
-        piece = f"проверка действия «{verb} {obj}»".rstrip()
+        payload = _shorten_control_action_phrase(
+            _normalize_spaces(f"{verb} {obj}")
+        )
+        piece = "практическая проверка " + _format_control_action_quote(payload)
         text = f"{text}; {piece}" if text else piece
     return text
 
@@ -8874,7 +9176,12 @@ def _finalize_content_fields(
             status == "NEEDS_REVIEW" and prior.get(clause) == "COVERED"
             for clause, status in fold_probe.clause_coverage
         ):
-            result_for_gate = candidate.planned_result
+            # Keep meaning, but still strip expanded ОФП catalogues.
+            result_for_gate = _compress_exercise_catalogues_in_text(
+                candidate.planned_result
+            )
+    else:
+        result_for_gate = _compress_exercise_catalogues_in_text(result_for_gate)
     control = _rebuild_control_before_final_gate(
         result_for_gate,
         candidate.assessment_method,
@@ -8882,6 +9189,10 @@ def _finalize_content_fields(
         theory_hours=theory_hours,
         practice_hours=practice_hours,
     )
+    if _rc_verbosity_block_reasons(result_for_gate, control):
+        # One safe repair pass before FINAL verbosity BLOCK.
+        control = _quoted_actions_control(result_for_gate)
+        control = _join_control_clauses([control]) if control else control
     prepared = replace(
         candidate,
         planned_result=result_for_gate,
@@ -8954,6 +9265,8 @@ def week_has_unresolved_mandatory_review(row: LessonContentV2Row) -> bool:
         row.planned_result, row.assessment_method
     ):
         return True
+    if _rc_verbosity_block_reasons(row.planned_result or "", row.assessment_method or ""):
+        return True
     return False
 
 
@@ -8977,6 +9290,11 @@ def unresolved_mandatory_review_blocks(
             row.planned_result, row.assessment_method
         ):
             clauses = ("CONTROL не покрывает финальный RESULT",)
+        verbosity = _rc_verbosity_block_reasons(
+            row.planned_result or "", row.assessment_method or ""
+        )
+        if verbosity:
+            clauses = tuple(dict.fromkeys((*clauses, *verbosity)))
         if clauses or not (row.planned_result or "").strip():
             blocks.append((row.source.week_number, clauses))
     return tuple(blocks)
@@ -9342,22 +9660,21 @@ def _fold_week_result(result: str) -> str:
     proven, so listing their objects adds nothing and removes nothing.
     """
 
-    return _normalize_spaces(
+    folded = _normalize_spaces(
         " ".join(_fold_repeated_predicates(_result_sentences(result)))
     )
+    return _compress_exercise_catalogues_in_text(folded)
 
 
 def _prefer_quoted_control_if_incomplete(result: str, control: str) -> str:
-    """Rebuild quoted CONTROL when a shortened process fragment misses an action."""
+    """Rebuild compact CONTROL when a shortened process fragment misses an action."""
 
     # Never rewrite an oral theory CONTROL into observation quotes.
     if re.search(r"(?i)устный опрос", control or ""):
         return control
-    # Quoted actions plus a separate «наблюдение за …» process fragment leave a
-    # truncated check for the same week; rebuild from the finished RESULT.
     if (
         re.search(r"(?i)проверя(?:ется|ются)\s+действи", control or "")
-        and re.search(r"(?i);\s*педагогическое наблюдение за\b", control or "")
+        or _control_has_long_result_quotes(control or "")
     ):
         rebuilt = _quoted_actions_control(result)
         if rebuilt:

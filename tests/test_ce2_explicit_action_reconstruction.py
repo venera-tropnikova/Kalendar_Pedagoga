@@ -168,9 +168,17 @@ def test_ofp_catalogue_stays_one_finite_action() -> None:
     low = derived.planned_result.casefold()
     assert low.startswith("выполняет")
     assert "офп" in low
-    assert "планка" in low
-    assert "выпрыгиван" in low
-
+    assert "2 круга" in low or "(2 круга)" in low
+    # Colon members stay in SOURCE; RESULT keeps the labelled activity only.
+    assert ":" not in derived.planned_result
+    assert "планка" not in low
+    assert "выпрыгиван" not in low
+    assert "проверяются действия" not in derived.assessment_method.casefold()
+    assert "«" not in derived.assessment_method or len(
+        re.findall(r"«[^»]+»", derived.assessment_method)
+    ) == 0 or all(
+        len(m) < 72 for m in re.findall(r"«([^»]+)»", derived.assessment_method)
+    )
 
 def test_topic_noun_without_explicit_action_not_invented() -> None:
     source = "Вводный инструктаж."
