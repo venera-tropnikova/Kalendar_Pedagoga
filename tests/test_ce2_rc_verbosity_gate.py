@@ -12,6 +12,7 @@ from calendar_pedagoga.content_engine_v2 import (
     _clause_meaning_preserved_in_result,
     _compress_exercise_catalogues_in_text,
     _derive_week_fields_v2,
+    _fold_week_result,
     _quoted_actions_control,
     _rc_verbosity_block_reasons,
     derive_fields_v2,
@@ -257,3 +258,101 @@ def test_early_catalogue_does_not_mix_neighbor_action_dosage() -> None:
     )
 
     assert _early_catalogue_coverage(source) == "COVERED"
+
+
+def test_week_compaction_merges_same_action_object_and_keeps_three_dosages() -> None:
+    source = (
+        "Лазание лёгких трасс (по 3 раза). "
+        "Лазание лёгких трасс (по 4 раза). "
+        "Лазание лёгких трасс (по 5 раз)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Практика",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    low = derived.planned_result.casefold()
+    assert low.count("лазан") == 1
+    assert re.search(r"\(по 3, 4 и 5 раз\)", low)
+    assert all(status == "COVERED" for _, status in derived.clause_coverage)
+    assert derived.assessment_method.casefold().count("лазан") == 1
+    assert ";" not in derived.assessment_method
+
+
+def test_week_compaction_deduplicates_exact_dosage() -> None:
+    result = _fold_week_result(
+        "Выполняет лазанье лёгких трасс (по 3 раза), "
+        "лазанье лёгких трасс (по 3 раза)."
+    )
+
+    assert result.casefold().count("лазанье лёгких трасс") == 1
+    assert result.casefold().count("по 3 раза") == 1
+
+
+def test_week_compaction_merges_equivalent_semantic_labels() -> None:
+    result = _fold_week_result(
+        "Выполняет лазание лёгких трасс (по 3 раза) и "
+        "лазанье легких трасс (по 4 раза)."
+    )
+
+    assert result.casefold().count("трасс") == 1
+    assert "(по 3 и 4 раза)" in result.casefold()
+
+
+def test_week_compaction_does_not_merge_different_objects() -> None:
+    result = _fold_week_result(
+        "Выполняет лазанье лёгких трасс (по 3 раза) и "
+        "прохождение лёгких трасс (по 4 раза)."
+    )
+
+    assert "лазанье лёгких трасс (по 3 раза)" in result.casefold()
+    assert "прохождение лёгких трасс (по 4 раза)" in result.casefold()
+
+
+def test_week_compaction_does_not_merge_different_conditions() -> None:
+    result = _fold_week_result(
+        "Выполняет лазанье лёгких трасс на время (по 3 раза) и "
+        "лазанье лёгких трасс на скорость (по 4 раза)."
+    )
+
+    assert "на время (по 3 раза)" in result.casefold()
+    assert "на скорость (по 4 раза)" in result.casefold()
+    assert result.casefold().count("лазанье лёгких трасс") == 2
+
+
+def test_week_compaction_does_not_merge_different_difficulty() -> None:
+    result = _fold_week_result(
+        "Выполняет лазанье лёгких трасс (по 3 раза) и "
+        "лазанье сложных трасс (по 4 раза)."
+    )
+
+    assert "лёгких трасс (по 3 раза)" in result.casefold()
+    assert "сложных трасс (по 4 раза)" in result.casefold()
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "Выполнение упражнения без страховки запрещено.",
+        "Не выполнять упражнение без страховки.",
+        "Нельзя трогать провода.",
+        "Не допускается проводить опыт без защиты.",
+    ),
+)
+def test_week_compaction_keeps_r13_fail_closed(source: str) -> None:
+    derived = derive_fields_v2(
+        topic_title="Техника безопасности",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=1,
+    )
+
+    assert derived.planned_result == ""
+    assert derived.assessment_method == ""
+    assert any("NEEDS_REVIEW" in warning for warning in derived.warnings)

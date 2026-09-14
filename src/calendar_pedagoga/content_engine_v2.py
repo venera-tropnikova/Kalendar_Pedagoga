@@ -9653,6 +9653,193 @@ def _result_sentences(result: str) -> list[str]:
     return sentences
 
 
+def _split_week_action_items(text: str) -> list[str]:
+    """Split a finite action object list without entering quotes or dosage parens."""
+
+    parts: list[str] = []
+    buf: list[str] = []
+    paren_depth = 0
+    quote_depth = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in {"«", "„", '"'} and quote_depth == 0:
+            quote_depth = 1
+        elif char in {"»", "“", '"'} and quote_depth:
+            quote_depth = 0
+        if not quote_depth:
+            if char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth = max(0, paren_depth - 1)
+        if char == "," and not quote_depth and not paren_depth:
+            item = _normalize_spaces("".join(buf)).strip(" ,")
+            if item:
+                parts.append(item)
+            buf = []
+            index += 1
+            continue
+        buf.append(char)
+        index += 1
+    tail = _normalize_spaces("".join(buf)).strip(" ,")
+    if tail:
+        parts.append(tail)
+
+    expanded: list[str] = []
+    for part in parts:
+        split_at: int | None = None
+        paren_depth = 0
+        quote_depth = 0
+        scanned_to = 0
+        for match in re.finditer(r"(?i)\s+и\s+", part):
+            for char in part[scanned_to : match.start()]:
+                if char in {"«", "„", '"'} and quote_depth == 0:
+                    quote_depth = 1
+                elif char in {"»", "“", '"'} and quote_depth:
+                    quote_depth = 0
+                elif not quote_depth and char == "(":
+                    paren_depth += 1
+                elif not quote_depth and char == ")":
+                    paren_depth = max(0, paren_depth - 1)
+            left = part[: match.start()].strip()
+            right = part[match.end() :].strip()
+            if (
+                not quote_depth
+                and not paren_depth
+                and _action_item_dosage(left) is not None
+                and _action_item_dosage(right) is not None
+            ):
+                split_at = match.start()
+            scanned_to = match.end()
+        if split_at is None:
+            expanded.append(part)
+            continue
+        conjunction = re.search(r"(?i)\s+и\s+", part[split_at:])
+        assert conjunction is not None
+        boundary = split_at + conjunction.end()
+        expanded.extend((part[:split_at].strip(), part[boundary:].strip()))
+    return [item for item in expanded if item]
+
+
+def _action_item_dosage(item: str) -> tuple[str, str] | None:
+    """Return the semantic label and one trailing dosage marker, or fail closed."""
+
+    label, marker = _detach_trailing_parens(_normalize_spaces(item).strip(" ,.;"))
+    marker = marker.strip()
+    if not label or not marker:
+        return None
+    dosages = _dosage_markers(marker)
+    if len(dosages) != 1 or _normalize_spaces(dosages[0]) != marker:
+        return None
+    return label, marker
+
+
+def _homogeneous_action_label(text: str) -> str:
+    """Canonical semantic label; conditions and difficulty remain part of it."""
+
+    normalized = _normalize_spaces(text).strip(" ,.;").casefold().replace("ё", "е")
+    return re.sub(
+        r"[а-яе]+",
+        lambda match: _nominal_activity_lemma(match.group(0)).replace("ё", "е"),
+        normalized,
+    )
+
+
+def _dosage_unit_family(unit: str) -> str:
+    folded = re.sub(r"[^а-яёa-z]", "", unit.casefold())
+    for family in ("круг", "раз", "подход", "мин", "сек"):
+        if folded.startswith(family):
+            return family
+    return ""
+
+
+def _ordered_dosage_formula(markers: list[str]) -> str:
+    """Keep every ordered unique dosage; share prefix/unit only when identical."""
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for marker in markers:
+        key = _normalize_dosage_marker(marker)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(_normalize_spaces(marker))
+    if len(unique) <= 1:
+        return unique[0] if unique else ""
+
+    parsed: list[tuple[str, str, str, str]] = []
+    for marker in unique:
+        match = re.fullmatch(
+            r"(?i)\(\s*(?:(по)\s+)?(\d+)\s+([^()]+?)\s*\)", marker
+        )
+        if match is None:
+            parsed = []
+            break
+        prefix = "по" if match.group(1) else ""
+        unit = match.group(3).strip()
+        family = _dosage_unit_family(unit)
+        if not family:
+            parsed = []
+            break
+        parsed.append((prefix, match.group(2), unit, family))
+    if parsed and len({(prefix, family) for prefix, _, _, family in parsed}) == 1:
+        values = [value for _, value, _, _ in parsed]
+        listed = ", ".join(values[:-1]) + " и " + values[-1]
+        prefix = f"{parsed[0][0]} " if parsed[0][0] else ""
+        return f"({prefix}{listed} {parsed[-1][2]})"
+
+    inner = [marker[1:-1].strip() for marker in unique]
+    return "(" + "; ".join(inner) + ")"
+
+
+def _compact_repeated_homogeneous_action_frames(result: str) -> str:
+    """Merge exact action+label duplicates and retain all ordered dosages."""
+
+    compacted: list[str] = []
+    for sentence in _result_sentences(result):
+        verb = _leading_finite_verb(sentence)
+        if not verb or verb.casefold() in _KNOWLEDGE_RESULT_VERBS:
+            compacted.append(sentence)
+            continue
+        body = _drop_leading_verb(sentence).rstrip(" .")
+        items = _split_week_action_items(body)
+        parsed = [_action_item_dosage(item) for item in items]
+        groups: dict[str, list[int]] = {}
+        for index, dosage in enumerate(parsed):
+            if dosage is None:
+                continue
+            label, _marker = dosage
+            groups.setdefault(_homogeneous_action_label(label), []).append(index)
+        merge_groups = {key: indexes for key, indexes in groups.items() if len(indexes) > 1}
+        if not merge_groups:
+            compacted.append(sentence)
+            continue
+
+        replacements: dict[int, str] = {}
+        removed: set[int] = set()
+        for indexes in merge_groups.values():
+            first = indexes[0]
+            assert parsed[first] is not None
+            label = parsed[first][0]
+            markers = [parsed[index][1] for index in indexes if parsed[index] is not None]
+            replacements[first] = _normalize_spaces(
+                f"{label} {_ordered_dosage_formula(markers)}"
+            )
+            removed.update(indexes[1:])
+        rebuilt_items = [
+            replacements.get(index, item)
+            for index, item in enumerate(items)
+            if index not in removed
+        ]
+        rebuilt_body = (
+            rebuilt_items[0]
+            if len(rebuilt_items) == 1
+            else ", ".join(rebuilt_items[:-1]) + " и " + rebuilt_items[-1]
+        )
+        compacted.append(_cap_sentence(f"{verb} {rebuilt_body}"))
+    return _normalize_spaces(" ".join(compacted))
+
+
 def _fold_week_result(result: str) -> str:
     """Write a predicate once for all objects already proven for it.
 
@@ -9663,6 +9850,7 @@ def _fold_week_result(result: str) -> str:
     folded = _normalize_spaces(
         " ".join(_fold_repeated_predicates(_result_sentences(result)))
     )
+    folded = _compact_repeated_homogeneous_action_frames(folded)
     return _compress_exercise_catalogues_in_text(folded)
 
 
