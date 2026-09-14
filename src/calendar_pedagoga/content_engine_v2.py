@@ -9238,7 +9238,7 @@ def derive_fields_v2(
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
     )
-    return _finalize_content_fields(
+    final = _finalize_content_fields(
         prepared,
         topic_title=topic_title,
         theory_text=theory_text,
@@ -9248,6 +9248,17 @@ def derive_fields_v2(
         practice_hours=practice_hours,
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
+    )
+    return replace(
+        final,
+        lesson_type=_complete_week_lesson_type(
+            final.lesson_type,
+            theory_hours=theory_hours,
+            practice_hours=practice_hours,
+            theory_text=theory_text,
+            practice_text=practice_text,
+            part_types=(prepared.lesson_type,),
+        ),
     )
 
 
@@ -10108,6 +10119,95 @@ _GENERIC_LESSON_TYPES = {
     "комбинированное занятие",
 }
 
+_WEEK_SCOPE_OVERLAY_TYPES = {
+    "теоретическое занятие",
+    "практическое занятие",
+    "комбинированное занятие",
+    "теоретико-практическое занятие",
+    "учебно-тренировочное занятие",
+    "контрольно-тренировочное занятие",
+    "итоговое комбинированное занятие",
+    "практикум",
+    "беседа",
+    "лекция",
+    "игра",
+    "игровое занятие",
+    "спортивно-игровое занятие",
+    "викторина",
+    "тестирование",
+    "диагностика",
+}
+_WEEK_CONTROL_EVIDENCE_RE = re.compile(
+    r"(?i)(?:\bаттестац\w*|\bзач[её]т\w*|\bтестирован\w*|"
+    r"\bдиагностик\w*|\bсдач\w*.{0,40}\bнорматив\w*|"
+    r"\bконтрольн\w*\s+(?:работ\w*|занят\w*|испытан\w*))"
+)
+_WEEK_FINAL_EVIDENCE_RE = re.compile(
+    r"(?i)(?:\bитогов\w*\s+занят\w*|\bподведен\w*\s+итог\w*)"
+)
+_WEEK_TRAINING_EVIDENCE_RE = re.compile(
+    r"(?i)(?:\bтрениров\w*|\bотработ\w*|\bразучив\w*|"
+    r"\bлазан(?:ь|и)\w*|\bОФП\b|\bприседан\w*)"
+)
+_WEEK_LOCAL_ACTIVITY_TYPES = {
+    "игра",
+    "игровое занятие",
+    "спортивно-игровое занятие",
+    "викторина",
+    "тестирование",
+    "диагностика",
+}
+
+
+def _complete_week_lesson_type(
+    candidate: str,
+    *,
+    theory_hours: int,
+    practice_hours: int,
+    theory_text: str,
+    practice_text: str,
+    part_types: tuple[str, ...] = (),
+) -> str:
+    """Resolve TYPE once, from the complete week, after RESULT/CONTROL."""
+
+    normalized = _normalize_spaces(candidate)
+    theory = _normalize_spaces(theory_text)
+    practice = _normalize_spaces(practice_text)
+    full_week = _normalize_spaces(f"{theory} {practice}")
+    unique_part_types = tuple(
+        dict.fromkeys(_normalize_spaces(value) for value in part_types if value)
+    )
+    scope_candidate = normalized
+    if (
+        normalized in _GENERIC_LESSON_TYPES
+        and len(unique_part_types) == 1
+        and unique_part_types[0] not in _GENERIC_LESSON_TYPES
+    ):
+        scope_candidate = unique_part_types[0]
+    grounded_whole_week_special = (
+        scope_candidate
+        and scope_candidate not in _WEEK_SCOPE_OVERLAY_TYPES
+        and (not unique_part_types or unique_part_types == (scope_candidate,))
+    )
+
+    if theory_hours and not practice_hours:
+        return "теоретическое занятие"
+    if practice_hours and _WEEK_FINAL_EVIDENCE_RE.search(full_week):
+        return "итоговое комбинированное занятие"
+    if theory_hours and practice_hours and theory and practice:
+        if grounded_whole_week_special:
+            return normalized
+        return "комбинированное занятие"
+    if practice_hours:
+        if _WEEK_CONTROL_EVIDENCE_RE.search(practice):
+            return "контрольно-тренировочное занятие"
+        if (
+            scope_candidate in _WEEK_LOCAL_ACTIVITY_TYPES
+            and _WEEK_TRAINING_EVIDENCE_RE.search(practice)
+        ):
+            return "учебно-тренировочное занятие"
+    return scope_candidate
+
 
 def _mixed_week_lesson_type(
     parts: tuple[WeekTopicPart, ...],
@@ -10360,6 +10460,7 @@ def build_lesson_content_v2(
                 theory_hours=row.theory_hours,
                 practice_hours=row.practice_hours,
             )
+            week_part_types = tuple(item.lesson_type for item in derived_parts)
         else:
             key = _content_occurrence_key(row)
             occurrence_index = 0
@@ -10395,6 +10496,18 @@ def build_lesson_content_v2(
                 occurrence_index=occurrence_index,
                 practice_appearance_count=count if row.practice_hours else 0,
             )
+            week_part_types = (prepared.lesson_type,)
+        final = replace(
+            final,
+            lesson_type=_complete_week_lesson_type(
+                final.lesson_type,
+                theory_hours=row.theory_hours,
+                practice_hours=row.practice_hours,
+                theory_text=theory_text,
+                practice_text=practice_text,
+                part_types=week_part_types,
+            ),
+        )
         result.append(
             LessonContentV2Row(
                 source=row,

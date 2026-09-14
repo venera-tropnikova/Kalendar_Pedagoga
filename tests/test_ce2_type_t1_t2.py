@@ -105,17 +105,33 @@ def test_competition_heading_list_is_theory_when_theory_only():
     assert _derived_type(source, theory=2, practice=0) == "теоретическое занятие"
 
 
-def test_explicit_action_clause_may_specialize_theory_only():
+def test_theory_only_final_type_is_theoretical():
     assert _type("Экскурсия по улицам города.", theory=2, practice=0) == "экскурсия"
-    assert _derived_type("Посещение музея края.", theory=1, practice=0) == "экскурсия"
-    assert _derived_type("Участие в соревновании.", theory=1, practice=0) == "соревнования"
+    assert (
+        _derived_type("Посещение музея края.", theory=1, practice=0)
+        == "теоретическое занятие"
+    )
+    assert (
+        _derived_type("Участие в соревновании.", theory=1, practice=0)
+        == "теоретическое занятие"
+    )
 
 
 def test_tourists_approved_types_do_not_regress():
     for number, (_control, lesson_type) in APPROVED_TP_CONTROL_TYPE.items():
         derived = _fill_tp_topic(number)
-        assert derived.lesson_type == lesson_type, (
-            f"{number}: {derived.lesson_type!r} != {lesson_type!r}"
+        expected = (
+            "комбинированное занятие"
+            if (
+                derived.theory_text
+                and derived.practice_text
+                and lesson_type
+                in {"игра", "игровое занятие", "викторина", "тестирование"}
+            )
+            else lesson_type
+        )
+        assert derived.lesson_type == expected, (
+            f"{number}: {derived.lesson_type!r} != {expected!r}"
         )
 
 

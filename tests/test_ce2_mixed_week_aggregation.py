@@ -2,6 +2,7 @@
 
 from calendar_pedagoga.content_engine_v2 import (
     _aggregate_week_lesson_type,
+    _complete_week_lesson_type,
     _merge_independent_part_results,
     _merge_part_results,
     _proven_finite_predicates,
@@ -12,6 +13,80 @@ from calendar_pedagoga.matching import MatchStatus
 from test_ce2_grounded_triad import _synthetic_week, _type_part, _type_result
 from test_content_engine_v2 import _fill_tp_topic
 from tp1_fixed_content import tp1_number_bound_content_rows
+
+
+def test_complete_week_type_theory_only() -> None:
+    assert _complete_week_lesson_type(
+        "викторина",
+        theory_hours=2,
+        practice_hours=0,
+        theory_text="Основные понятия и правила.",
+        practice_text="",
+    ) == "теоретическое занятие"
+
+
+def test_complete_week_type_training_with_one_game() -> None:
+    assert _complete_week_lesson_type(
+        "игра",
+        theory_hours=0,
+        practice_hours=2,
+        theory_text="",
+        practice_text="Тренировка технического приёма. Игра на закрепление навыка.",
+    ) == "учебно-тренировочное занятие"
+
+
+def test_complete_week_type_several_games_with_training() -> None:
+    assert _complete_week_lesson_type(
+        "игровое занятие",
+        theory_hours=0,
+        practice_hours=2,
+        theory_text="",
+        practice_text="Игра на внимание. Игра на реакцию. Отработка техники движения.",
+    ) == "учебно-тренировочное занятие"
+
+
+def test_complete_week_type_practice_with_assessment() -> None:
+    assert _complete_week_lesson_type(
+        "тестирование",
+        theory_hours=0,
+        practice_hours=2,
+        theory_text="",
+        practice_text="Выполнение упражнений. Промежуточная аттестация и сдача нормативов.",
+    ) == "контрольно-тренировочное занятие"
+
+
+def test_complete_week_type_theory_with_practice() -> None:
+    assert _complete_week_lesson_type(
+        "тестирование",
+        theory_hours=1,
+        practice_hours=1,
+        theory_text="Правила безопасного выполнения упражнения.",
+        practice_text="Практическое выполнение упражнения.",
+    ) == "комбинированное занятие"
+
+
+def test_complete_week_type_final_testing_with_practice() -> None:
+    assert _complete_week_lesson_type(
+        "викторина",
+        theory_hours=0,
+        practice_hours=2,
+        theory_text="",
+        practice_text=(
+            "Практическое выполнение упражнений. Итоговое занятие. "
+            "Тестирование и подведение итогов обучения."
+        ),
+    ) == "итоговое комбинированное занятие"
+
+
+def test_complete_week_type_preserves_grounded_narrow_practicum() -> None:
+    assert _complete_week_lesson_type(
+        "практикум по страховке",
+        theory_hours=0,
+        practice_hours=2,
+        theory_text="",
+        practice_text="Отработка страховки напарника.",
+        part_types=("практикум по страховке",),
+    ) == "практикум по страховке"
 
 
 def test_two_theory_topics_keep_two_result_sentences_and_two_orals() -> None:
