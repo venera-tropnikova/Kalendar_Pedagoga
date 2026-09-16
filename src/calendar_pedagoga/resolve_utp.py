@@ -13,6 +13,7 @@ from calendar_pedagoga.confirmed_study_plan import (
     confirmed_plan_from_external_utp,
 )
 from calendar_pedagoga.parsing import (
+    HourValue,
     Hours,
     Section,
     Topic,
@@ -449,12 +450,14 @@ def resolve_utp(
     *,
     program_study_year: int | None = None,
     program_study_weeks: int | None = None,
+    study_weeks: int | None = None,
+    hours_per_week: HourValue | None = None,
 ) -> ConfirmedStudyPlan:
     """Resolve the production plan only from a confirmed external UTP.
 
     PROGRAM remains a semantic/matching source and never supplies production
-    topics or workload. ``program_study_weeks`` is retained temporarily for
-    call-site compatibility until the workload UI is migrated.
+    topics or workload. Missing external workload values may only be supplied
+    explicitly by the user; they are never derived here.
     """
 
     del program_document, program_study_weeks
@@ -475,11 +478,12 @@ def resolve_utp(
                 f"({separate_year}) противоречат друг другу."
             )
         try:
-            resolved = apply_workload_from_separate(parsed)
             return confirmed_plan_from_external_utp(
-                resolved,
+                parsed,
                 study_year=program_study_year or separate_year,
                 source_name=optional_utp_upload.filename,
+                study_weeks=study_weeks,
+                hours_per_week=hours_per_week,
             )
         except ConfirmedStudyPlanError as error:
             raise UtpResolutionError(str(error)) from error

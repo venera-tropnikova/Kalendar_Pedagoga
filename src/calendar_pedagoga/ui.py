@@ -10,9 +10,10 @@ import logging
 import re
 import sys
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from io import BytesIO
 from zipfile import BadZipFile
 from datetime import date, timedelta
@@ -87,7 +88,12 @@ from calendar_pedagoga.resolve_utp import (
     embedded_study_years,
     resolve_utp,
 )
-from calendar_pedagoga.confirmed_study_plan import ConfirmedStudyPlan
+from calendar_pedagoga.confirmed_study_plan import (
+    ConfirmedStudyPlan,
+    ConfirmedStudyPlanError,
+    confirmed_plan_from_manual_rows,
+    hour_value_from_input,
+)
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
     UploadPurpose,
@@ -163,17 +169,20 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
 
 
 def _refresh_generation_inputs(
-    utp_file, program_file, template_file, academic_year, group_number, class_name,
-    teacher_name, program_study_year, program_study_weeks, program_study_weeks_required,
+    study_plan_input, program_file, template_file, academic_year, group_number,
+    class_name, teacher_name,
 ) -> None:
     revision = _generator_revision()
     analysis = _inputs_fingerprint(
-        utp_file,
+        study_plan_input.mode,
+        study_plan_input.utp_file,
+        study_plan_input.manual_rows,
         program_file,
         template_file,
         academic_year,
-        program_study_year,
-        program_study_weeks,
+        study_plan_input.study_year,
+        study_plan_input.study_weeks,
+        study_plan_input.hours_per_week,
     )
     inputs = _inputs_fingerprint(analysis, group_number, class_name, teacher_name)
     _sync_generation_fingerprint((inputs, revision))
@@ -2796,88 +2805,185 @@ def _render_academic_year_input(utp_file, program_file) -> str:
     return academic_year
 
 
-def _render_program_study_year_input(program_file) -> int | None:
-    """Render a distinct embedded-program year selector when selection is needed."""
+_PLAN_MODE_FILE = "Загрузить УТП"
+_PLAN_MODE_MANUAL = "Ввести темы и часы вручную"
+_NOT_UTP_MESSAGE = (
+    "Файл не является УТП. Загрузите другой УТП или введите темы и часы вручную."
+)
 
+
+@dataclass(frozen=True)
+class _StudyPlanInputState:
+    mode: str
+    utp_file: object | None
+    manual_rows: tuple[dict[str, str], ...]
+    study_year: int | None
+    study_weeks: int | None
+    hours_per_week: str | None
+
+
+def _program_year_hints(program_file) -> tuple[int, ...]:
     if program_file is None:
-        st.session_state.pop("program_study_year", None)
-        return None
+        return ()
     try:
         program = ValidatedUpload(
             UploadPurpose.PROGRAM,
             program_file.name,
             program_file.getvalue(),
         )
-        years = embedded_study_years(program)
+        return embedded_study_years(program)
     except Exception:
-        years = ()
-    if len(years) == 1:
-        st.session_state["program_study_year"] = years[0]
-        return years[0]
-    if len(years) < 2:
+        return ()
+
+
+def _render_program_study_year_input(program_file) -> int | None:
+    """Always require a user choice; PROGRAM years are hints, never defaults."""
+
+    scope = _inputs_fingerprint(program_file)
+    if st.session_state.get("program_study_year_scope") != scope:
         st.session_state.pop("program_study_year", None)
-        return None
-
-    current = st.session_state.get("program_study_year")
-    if current not in years:
-        st.session_state["program_study_year"] = None
-    return st.selectbox(
-        "Год обучения по программе",
-        options=years,
-        index=None,
-        format_func=lambda year: f"{year} год",
-        placeholder="Выберите год обучения",
-        key="program_study_year",
-        help="Выберите год обучения внутри программы; это не календарный учебный год.",
-    )
-
-
-def _render_program_study_weeks_input(
-    utp_file,
-    program_file,
-    program_study_year: int | None,
-) -> tuple[int | None, bool]:
-    """Ask for weeks only when the selected embedded UTP does not state them."""
-
-    if utp_file is not None or program_file is None or program_study_year is None:
-        st.session_state.pop("program_study_weeks", None)
-        st.session_state.pop("program_study_weeks_scope", None)
-        return None, False
-    try:
-        embedded = parse_utp(
-            program_file.getvalue(),
-            study_year=program_study_year,
-        )
-    except Exception:
-        return None, False
-    if embedded.metadata.study_weeks is not None:
-        st.session_state.pop("program_study_weeks", None)
-        st.session_state.pop("program_study_weeks_scope", None)
-        return embedded.metadata.study_weeks, False
-
-    yearly = embedded.metadata.hours_per_year
-    if yearly is None and embedded.table_totals is not None:
-        yearly = embedded.table_totals.total
-    weekly = embedded.metadata.hours_per_week
-    if yearly is not None and weekly is not None:
+        st.session_state["program_study_year_scope"] = scope
+    years = _program_year_hints(program_file)
+    if years:
         st.caption(
-            f"По программе: {yearly} часов в год, {weekly} часа в неделю."
+            "В программе найдены годы обучения: "
+            + ", ".join(f"{year} год" for year in years)
+            + ". Это подсказка; подтвердите нужный год."
         )
-
-    scope = _inputs_fingerprint(program_file, program_study_year)
-    if st.session_state.get("program_study_weeks_scope") != scope:
-        st.session_state.pop("program_study_weeks", None)
-        st.session_state["program_study_weeks_scope"] = scope
     value = st.number_input(
-        "Количество учебных недель",
+        "Год обучения по программе",
         min_value=1,
         step=1,
         value=None,
-        placeholder="Укажите количество недель",
-        key="program_study_weeks",
-        help="Введите число недель из утверждённого учебного плана; система не вычисляет его автоматически.",
+        placeholder="Укажите положительный номер года",
+        key="program_study_year",
+        help="Это год обучения по программе (1, 2, 3…), а не календарный учебный год.",
     )
-    return (int(value) if value is not None else None), True
+    return int(value) if value is not None else None
+
+
+def _validated_utp_preview(utp_file) -> UtpParseResult | None:
+    if utp_file is None:
+        return None
+    try:
+        upload = validate_upload(
+            UploadPurpose.UTP,
+            utp_file.name,
+            utp_file.getvalue(),
+        )
+    except UploadValidationError:
+        st.error(_NOT_UTP_MESSAGE)
+        return None
+    assert isinstance(upload.parsed, UtpParseResult)
+    return upload.parsed
+
+
+def _manual_rows_from_editor(value: object) -> tuple[dict[str, str], ...]:
+    if hasattr(value, "to_dict"):
+        records = value.to_dict(orient="records")
+    else:
+        records = value
+    def text_cell(row: Mapping[str, object], key: str) -> str:
+        cell = row.get(key)
+        if cell is None or cell != cell:  # NaN from an empty dataframe cell.
+            return ""
+        return str(cell).strip()
+
+    return tuple(
+        {
+            "section": text_cell(row, "section"),
+            "topic": text_cell(row, "topic"),
+            "total": text_cell(row, "total"),
+            "theory": text_cell(row, "theory"),
+            "practice": text_cell(row, "practice"),
+        }
+        for row in records
+    )
+
+
+def _render_manual_plan_table() -> tuple[dict[str, str], ...]:
+    st.caption("Добавляйте и удаляйте строки средствами таблицы; порядок строк сохраняется.")
+    edited = st.data_editor(
+        [{"section": "", "topic": "", "total": "", "theory": "", "practice": ""}],
+        key="manual_study_plan_rows",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "section": st.column_config.TextColumn("Раздел (необязательно)"),
+            "topic": st.column_config.TextColumn("Тема", required=True),
+            "total": st.column_config.TextColumn("Всего"),
+            "theory": st.column_config.TextColumn("Теория"),
+            "practice": st.column_config.TextColumn("Практика"),
+        },
+    )
+    return _manual_rows_from_editor(edited)
+
+
+def _render_workload_inputs(
+    *,
+    mode: str,
+    parsed_utp: UtpParseResult | None,
+    source_scope: str,
+) -> tuple[int | None, str | None]:
+    source_weeks = parsed_utp.metadata.study_weeks if parsed_utp else None
+    source_weekly = parsed_utp.metadata.hours_per_week if parsed_utp else None
+    totals = parsed_utp.table_totals if parsed_utp else None
+    if mode == _PLAN_MODE_FILE and parsed_utp is not None:
+        found: list[str] = []
+        if totals is not None:
+            found.append(f"{totals.total} часов всего")
+        if source_weekly is not None:
+            found.append(f"{source_weekly} часа в неделю")
+        if source_weeks is not None:
+            found.append(f"{source_weeks} учебных недель")
+        if found:
+            st.caption("В УТП найдено: " + ", ".join(found) + ".")
+
+    key_prefix = "manual" if mode == _PLAN_MODE_MANUAL else "external"
+    scope_key = f"{key_prefix}_workload_scope"
+    if st.session_state.get(scope_key) != source_scope:
+        st.session_state.pop(f"{key_prefix}_study_weeks", None)
+        st.session_state.pop(f"{key_prefix}_hours_per_week", None)
+        st.session_state[scope_key] = source_scope
+
+    if source_weeks is None:
+        weeks_value = st.number_input(
+            "Количество учебных недель",
+            min_value=1,
+            step=1,
+            value=None,
+            placeholder="Укажите количество недель",
+            key=f"{key_prefix}_study_weeks",
+            help="Введите значение из подтверждённого плана; система не вычисляет его автоматически.",
+        )
+        weeks = int(weeks_value) if weeks_value is not None else None
+    else:
+        st.text_input(
+            "Количество учебных недель",
+            value=str(source_weeks),
+            disabled=True,
+            key=f"study_plan_weeks_found_{source_scope}",
+        )
+        weeks = source_weeks
+
+    if source_weekly is None:
+        weekly = st.text_input(
+            "Количество часов в неделю",
+            value="",
+            placeholder="Например: 3 или 1,5",
+            key=f"{key_prefix}_hours_per_week",
+            help="Введите точное значение; система не выводит его из годового итога.",
+        ).strip() or None
+    else:
+        st.text_input(
+            "Количество часов в неделю",
+            value=str(source_weekly),
+            disabled=True,
+            key=f"study_plan_hours_per_week_found_{source_scope}",
+        )
+        weekly = str(source_weekly)
+    return weeks, weekly
 
 
 def _form_is_open() -> bool:
@@ -2895,16 +3001,13 @@ def _open_input_form() -> None:
 
 
 def _render_upload_fields() -> tuple[
+    _StudyPlanInputState,
     object | None,
     object | None,
-    object | None,
     str,
     str,
     str,
     str,
-    int | None,
-    int | None,
-    bool,
 ]:
     left_col, right_col = st.columns((1.06, 0.94), gap="medium")
     with left_col:
@@ -2921,17 +3024,30 @@ def _render_upload_fields() -> tuple[
             help="Программа — образовательная программа, DOC/DOCX, до 10 МБ.",
         )
         st.markdown(
-            '<div class="kp-field-title">Учебно-тематический план'
-            '<span class="kp-badge kp-badge-optional">необязательно</span></div>'
-            '<div class="kp-field-note">Загрузите отдельно, только если УТП находится в другом файле.</div>',
+            '<div class="kp-field-title">План тем и часов'
+            '<span class="kp-badge kp-badge-required">обязательно</span></div>',
             unsafe_allow_html=True,
         )
-        utp_file = _file_uploader_with_clear(
-            "utp",
-            label="Загрузите УТП",
-            type=("docx",),
-            help="УТП — учебно-тематический план, DOCX, до 10 МБ.",
+        plan_mode = st.radio(
+            "Источник плана тем и часов",
+            (_PLAN_MODE_FILE, _PLAN_MODE_MANUAL),
+            horizontal=True,
+            key="study_plan_input_mode",
+            label_visibility="collapsed",
         )
+        utp_file = None
+        parsed_utp = None
+        manual_rows: tuple[dict[str, str], ...] = ()
+        if plan_mode == _PLAN_MODE_FILE:
+            utp_file = _file_uploader_with_clear(
+                "utp",
+                label="Загрузите УТП",
+                type=("docx",),
+                help="УТП — учебно-тематический план, DOCX, до 10 МБ.",
+            )
+            parsed_utp = _validated_utp_preview(utp_file)
+        else:
+            manual_rows = _render_manual_plan_table()
         st.markdown(
             '<div class="kp-field-title">Шаблон календарного плана'
             '<span class="kp-badge kp-badge-optional">необязательно</span></div>'
@@ -2954,40 +3070,40 @@ def _render_upload_fields() -> tuple[
         )
         academic_year = _render_academic_year_input(utp_file, program_file)
         program_study_year = _render_program_study_year_input(program_file)
-        program_study_weeks, program_study_weeks_required = (
-            _render_program_study_weeks_input(
-                utp_file,
-                program_file,
-                program_study_year,
-            )
+        study_weeks, hours_per_week = _render_workload_inputs(
+            mode=plan_mode,
+            parsed_utp=parsed_utp,
+            source_scope=_inputs_fingerprint(plan_mode, utp_file),
         )
         group_number, class_name, teacher_name = _render_group_class_fields()
 
+    study_plan_input = _StudyPlanInputState(
+        mode=plan_mode,
+        utp_file=utp_file,
+        manual_rows=manual_rows,
+        study_year=program_study_year,
+        study_weeks=study_weeks,
+        hours_per_week=hours_per_week,
+    )
     return (
-        utp_file,
+        study_plan_input,
         program_file,
         organization_template_file,
         academic_year,
         group_number,
         class_name,
         teacher_name,
-        program_study_year,
-        program_study_weeks,
-        program_study_weeks_required,
     )
 
 
 def _render_upload_screen() -> tuple[
+    _StudyPlanInputState,
     object | None,
     object | None,
-    object | None,
     str,
     str,
     str,
     str,
-    int | None,
-    int | None,
-    bool,
     bool,
 ]:
     _inject_landing_styles()
@@ -3019,7 +3135,7 @@ def _render_upload_screen() -> tuple[
             _render_year_calendar_card(
                 str(fields[3]),
                 owner="inputs",
-                study_weeks=fields[8] or APPROVED_WEEK_COUNT,
+                study_weeks=fields[0].study_weeks or APPROVED_WEEK_COUNT,
             )
         _render_normative_panel()
     return (*fields, check_clicked)
@@ -4071,18 +4187,16 @@ def run_app() -> None:
         )
 
     (
-        utp_file,
+        study_plan_input,
         program_file,
         organization_template_file,
         academic_year,
         group_number,
         class_name,
         teacher_name,
-        program_study_year,
-        program_study_weeks,
-        program_study_weeks_required,
         check_clicked,
     ) = _render_upload_screen()
+    utp_file = study_plan_input.utp_file
 
     check_error = st.session_state.get("calendar_check_error")
     if check_error and not st.session_state.get("calendar_busy"):
@@ -4097,8 +4211,14 @@ def run_app() -> None:
         if program_file is None:
             st.error("Загрузите программу обучения.")
             return
-        if program_study_weeks_required and program_study_weeks is None:
+        if study_plan_input.study_year is None:
+            st.error("Укажите год обучения по программе.")
+            return
+        if study_plan_input.study_weeks is None:
             st.error(MISSING_STUDY_WEEKS_MESSAGE)
+            return
+        if study_plan_input.hours_per_week is None:
+            st.error("Укажите количество часов в неделю.")
             return
         st.session_state.pop("calendar_check_error", None)
         st.session_state["calendar_busy"] = True
@@ -4133,15 +4253,17 @@ def run_app() -> None:
                         transient_program.content,
                     )
                     transient_utp = uploads.get(UploadPurpose.UTP)
-                    validated_utp_upload = (
-                        validate_upload(
-                            UploadPurpose.UTP,
-                            transient_utp.filename,
-                            transient_utp.content,
-                        )
-                        if transient_utp is not None
-                        else None
-                    )
+                    validated_utp_upload = None
+                    if transient_utp is not None:
+                        try:
+                            validated_utp_upload = validate_upload(
+                                UploadPurpose.UTP,
+                                transient_utp.filename,
+                                transient_utp.content,
+                            )
+                        except UploadValidationError:
+                            _abort_document_check(_NOT_UTP_MESSAGE)
+                            return
                     transient_template = uploads.get(UploadPurpose.CALENDAR_TEMPLATE)
                     validated_template = (
                         validate_upload(
@@ -4152,16 +4274,33 @@ def run_app() -> None:
                         if transient_template is not None
                         else None
                     )
-                    resolved_utp = resolve_utp(
-                        validated_utp_upload,
-                        validated_program,
-                        program_study_year=program_study_year,
-                        program_study_weeks=program_study_weeks,
-                    )
+                    if study_plan_input.mode == _PLAN_MODE_FILE:
+                        if validated_utp_upload is None:
+                            raise UtpResolutionError(
+                                "Загрузите УТП или выберите ручной ввод тем и часов."
+                            )
+                        weekly = hour_value_from_input(
+                            study_plan_input.hours_per_week,
+                            field_name="Количество часов в неделю",
+                        )
+                        resolved_utp = resolve_utp(
+                            validated_utp_upload,
+                            validated_program,
+                            program_study_year=study_plan_input.study_year,
+                            study_weeks=study_plan_input.study_weeks,
+                            hours_per_week=weekly,
+                        )
+                    else:
+                        resolved_utp = confirmed_plan_from_manual_rows(
+                            study_year=study_plan_input.study_year,
+                            rows=study_plan_input.manual_rows,
+                            study_weeks=study_plan_input.study_weeks,
+                            hours_per_week=study_plan_input.hours_per_week,
+                        )
                 except UploadValidationError as error:
                     _abort_document_check(str(error))
                     return
-                except UtpResolutionError as error:
+                except (ConfirmedStudyPlanError, UtpResolutionError) as error:
                     _abort_document_check(str(error))
                     return
 
@@ -4176,18 +4315,25 @@ def run_app() -> None:
                     _abort_document_check(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
                     return
 
+            if validated_utp_upload is not None:
+                plan_filename = validated_utp_upload.filename
+                plan_content = validated_utp_upload.content
+            else:
+                plan_filename = "Ручной план тем и часов"
+                plan_content = json.dumps(
+                    {
+                        "study_year": resolved_utp.study_year,
+                        "study_weeks": resolved_utp.study_weeks,
+                        "hours_per_week": str(resolved_utp.hours_per_week),
+                        "rows": list(study_plan_input.manual_rows),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
             validated_utp = ValidatedUpload(
                 UploadPurpose.UTP,
-                (
-                    validated_utp_upload.filename
-                    if validated_utp_upload is not None
-                    else f"УТП из файла «{validated_program.filename}»"
-                ),
-                (
-                    validated_utp_upload.content
-                    if validated_utp_upload is not None
-                    else validated_program.content
-                ),
+                plan_filename,
+                plan_content,
                 resolved_utp,
             )
             program = parse_program(

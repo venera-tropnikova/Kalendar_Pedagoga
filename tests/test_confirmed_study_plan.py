@@ -8,6 +8,7 @@ from calendar_pedagoga.confirmed_study_plan import (
     ConfirmedStudyPlanError,
     confirmed_plan_from_external_utp,
     confirmed_plan_from_manual,
+    confirmed_plan_from_manual_rows,
 )
 from calendar_pedagoga.parsing import Hours, Section, Topic, UtpMetadata, UtpParseResult
 from calendar_pedagoga.resolve_utp import resolve_utp
@@ -125,3 +126,119 @@ def test_confirmed_plan_rejects_inconsistent_workload() -> None:
 
     with pytest.raises(ConfirmedStudyPlanError, match="недельная нагрузка"):
         confirmed_plan_from_external_utp(source)
+
+
+def test_manual_rows_preserve_order_and_fractional_hours() -> None:
+    plan = confirmed_plan_from_manual_rows(
+        study_year=3,
+        rows=(
+            {
+                "section": "Первый раздел",
+                "topic": "Первая тема",
+                "total": "1,5",
+                "theory": "1.5",
+                "practice": "0",
+            },
+            {
+                "section": "Второй раздел",
+                "topic": "Вторая тема",
+                "total": "94,5",
+                "theory": "19,5",
+                "practice": "75",
+            },
+        ),
+        study_weeks=32,
+        hours_per_week="3",
+    )
+
+    assert plan.source == "manual"
+    assert [topic.title for topic in plan.topics] == ["Первая тема", "Вторая тема"]
+    assert plan.topics[0].hours.total == Decimal("1.5")
+    assert plan.table_totals == Hours(Decimal("96"), Decimal("21"), Decimal("75"))
+
+
+def test_manual_rows_require_topic_and_consistent_non_negative_hours() -> None:
+    base = {
+        "section": "Раздел",
+        "topic": "Тема",
+        "total": "2",
+        "theory": "1",
+        "practice": "1",
+    }
+    with pytest.raises(ConfirmedStudyPlanError, match="Укажите тему"):
+        confirmed_plan_from_manual_rows(
+            study_year=1,
+            rows=({**base, "topic": ""},),
+            study_weeks=1,
+            hours_per_week="2",
+        )
+    with pytest.raises(ConfirmedStudyPlanError, match="не совпадают"):
+        confirmed_plan_from_manual_rows(
+            study_year=1,
+            rows=({**base, "practice": "0"},),
+            study_weeks=1,
+            hours_per_week="2",
+        )
+    with pytest.raises(ConfirmedStudyPlanError, match="неотрицательным"):
+        confirmed_plan_from_manual_rows(
+            study_year=1,
+            rows=({**base, "total": "-2", "theory": "-1"},),
+            study_weeks=1,
+            hours_per_week="2",
+        )
+
+
+def test_external_and_manual_sources_normalize_to_same_plan_content() -> None:
+    external = confirmed_plan_from_external_utp(_fractional_utp(), study_year=1)
+    manual = confirmed_plan_from_manual_rows(
+        study_year=1,
+        rows=(
+            {
+                "section": "Раздел",
+                "topic": "Первая тема",
+                "total": "1,5",
+                "theory": "1,5",
+                "practice": "0",
+            },
+            {
+                "section": "Раздел",
+                "topic": "Вторая тема",
+                "total": "94,5",
+                "theory": "19,5",
+                "practice": "75",
+            },
+        ),
+        study_weeks=32,
+        hours_per_week="3",
+    )
+
+    assert external.study_year == manual.study_year
+    assert external.table_totals == manual.table_totals
+    assert external.study_weeks == manual.study_weeks
+    assert external.hours_per_week == manual.hours_per_week
+    assert [
+        (topic.parent_section, topic.title, topic.hours) for topic in external.topics
+    ] == [
+        (topic.parent_section, topic.title, topic.hours) for topic in manual.topics
+    ]
+
+
+def test_external_adapter_accepts_only_explicit_missing_workload_values() -> None:
+    source = replace(
+        _fractional_utp(),
+        metadata=replace(
+            _fractional_utp().metadata,
+            study_weeks=None,
+            hours_per_week=None,
+        ),
+    )
+
+    plan = confirmed_plan_from_external_utp(
+        source,
+        study_year=1,
+        study_weeks=32,
+        hours_per_week=Decimal("3"),
+    )
+
+    assert plan.study_weeks == 32
+    assert plan.hours_per_week == Decimal("3")

@@ -242,12 +242,25 @@ def _check_and_resolve(
     prefer_confirm: bool = True,
 ):
     result = generated if generated is not None else _fake_generated()
+    _prepare_required_plan_inputs(app)
     with patch(
         "calendar_pedagoga.ui.run_calendar_pipeline", return_value=result
     ) as pipeline:
         _check_button(app).click().run()
         _resolve_disputed_matches(app, prefer_confirm=prefer_confirm)
     return pipeline
+
+
+def _prepare_required_plan_inputs(app: AppTest) -> None:
+    uploaders = app.get("file_uploader")
+    if len(uploaders) >= 2 and uploaders[1].value is None:
+        _upload_bytes(app, 1, "utp-synthetic.docx", _disputed_utp_docx())
+        app.run()
+    year_input = next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
+    )
+    if year_input.value is None:
+        year_input.set_value(1).run()
 
 
 def _generate_buttons(app: AppTest):
@@ -300,8 +313,18 @@ def test_initial_screen_contains_required_controls() -> None:
     assert app.number_input[0].label == "Начало учебного года"
     assert int(app.number_input[0].value) == default_academic_year_start()
     assert "2026–2027 / 2027–2028 / 2028–2029" not in _page_text(app)
-    assert [item.label for item in app.text_input] == ["Группа №", "Класс", "ФИО педагога"]
+    assert [item.label for item in app.text_input] == [
+        "Количество часов в неделю",
+        "Группа №",
+        "Класс",
+        "ФИО педагога",
+    ]
     assert all(item.value in {"", None} for item in app.text_input)
+    study_year = next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
+    )
+    assert study_year.value is None
+    assert app.radio[0].options == ["Загрузить УТП", "Ввести темы и часы вручную"]
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
     assert "Дополнить содержание с помощью ИИ" not in _page_text(app)
     assert "Группа Нет" not in _page_text(app)
@@ -312,7 +335,7 @@ def test_initial_screen_contains_required_controls() -> None:
     assert f"Календарь {_default_year()} учебного года" in _page_text(app)
     assert "Недели №1–36 соответствуют строкам календарного плана" in _page_text(app)
     notes = " ".join(item.value or "" for item in app.markdown)
-    assert "Загрузите отдельно, только если УТП находится в другом файле" in notes
+    assert "План тем и часов" in notes
     assert "Если есть образец вашей организации — загрузите его; иначе используем стандартный" in notes
 
 
@@ -430,7 +453,7 @@ def test_utp_year_is_suggested_after_upload() -> None:
     assert "2026–2027 / 2027–2028" not in notices
 
 
-def test_multiple_embedded_utps_show_distinct_program_year_selector() -> None:
+def test_multiple_embedded_utps_are_hints_for_required_manual_year() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
     _upload_bytes(
         app,
@@ -440,21 +463,18 @@ def test_multiple_embedded_utps_show_distinct_program_year_selector() -> None:
     )
     app.run()
 
-    selectors = [
-        item
-        for item in app.selectbox
-        if item.label == "Год обучения по программе"
-    ]
-    assert len(selectors) == 1
-    assert selectors[0].options == ["1 год", "2 год", "3 год"]
-    assert selectors[0].value is None
+    year_input = next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
+    )
+    assert year_input.value is None
+    assert "1 год, 2 год, 3 год" in " ".join(item.value or "" for item in app.caption)
     assert int(app.number_input[0].value) == default_academic_year_start()
 
-    selectors[0].set_value(2).run()
+    year_input.set_value(2).run()
     assert app.session_state["program_study_year"] == 2
 
 
-def test_single_embedded_utp_year_is_auto_selected_without_selector() -> None:
+def test_single_embedded_utp_year_is_only_a_hint_without_auto_select() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
     _upload_bytes(
         app,
@@ -464,13 +484,17 @@ def test_single_embedded_utp_year_is_auto_selected_without_selector() -> None:
     )
     app.run()
 
-    assert not any(
-        item.label == "Год обучения по программе" for item in app.selectbox
+    year_input = next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
     )
-    assert app.session_state["program_study_year"] == 2
+    assert year_input.value is None
+    assert "2 год" in " ".join(item.value or "" for item in app.caption)
+    assert "program_study_year" not in app.session_state or app.session_state[
+        "program_study_year"
+    ] is None
 
 
-def test_source_study_weeks_do_not_show_additional_input() -> None:
+def test_external_utp_study_weeks_do_not_show_additional_input() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
     _upload_bytes(
         app,
@@ -478,19 +502,20 @@ def test_source_study_weeks_do_not_show_additional_input() -> None:
         "program-with-weeks.docx",
         _program_with_embedded_workload(study_weeks=32),
     )
+    _upload_bytes(app, 1, "utp-synthetic.docx", _disputed_utp_docx())
     app.run()
 
     assert not any(
-        item.label == "Количество учебных недель" for item in app.number_input
+        item.label == "Количество учебных недель" for item in app.number_input[1:]
     )
-    assert "Недели №1–32 соответствуют строкам календарного плана" in _page_text(app)
+    assert "Недели №1–36 соответствуют строкам календарного плана" in _page_text(app)
 
     next(
         button for button in app.button if button.label == "Открыть календарь"
     ).click().run()
     week_buttons = [button for button in app.button if button.label.startswith("№")]
     assert [button.label for button in week_buttons] == [
-        f"№{number}" for number in range(1, 33)
+        f"№{number}" for number in range(1, 37)
     ]
 
 
@@ -502,13 +527,6 @@ def test_default_calendar_card_keeps_36_week_legacy_profile() -> None:
 
 def test_missing_source_study_weeks_require_explicit_input() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
-    _upload_bytes(
-        app,
-        0,
-        "program-without-weeks.docx",
-        _program_with_embedded_workload(study_weeks=None),
-    )
-    app.run()
 
     weeks = next(
         item
@@ -519,10 +537,23 @@ def test_missing_source_study_weeks_require_explicit_input() -> None:
     assert any(
         "По программе: 96 часов в год, 3 часа в неделю" in (item.value or "")
         for item in app.caption
-    )
+    ) is False
 
     _check_button(app).click().run()
-    assert any("Укажите количество учебных недель" in item.value for item in app.error)
+    assert any("Загрузите программу обучения" in item.value for item in app.error)
+
+
+def test_invalid_utp_keeps_manual_mode_available() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload_bytes(app, 1, "wrong-utp.docx", _non_utp_docx())
+    app.run()
+
+    assert any("Файл не является УТП" in item.value for item in app.error)
+    assert app.radio[0].options == ["Загрузить УТП", "Ввести темы и часы вручную"]
+    app.radio[0].set_value("Ввести темы и часы вручную").run()
+    assert not app.exception
+    assert len(app.dataframe) == 2  # editable plan table + normative reference table
+    assert any("порядок строк сохраняется" in item.value for item in app.caption)
 
 
 def test_analysis_screen_shows_study_year_from_program_filename() -> None:
@@ -843,7 +874,11 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
         ),
         ai_usage=None,
     )
-    assert [item.label for item in app.text_input] == ["Группа №", "Класс", "ФИО педагога"]
+    assert [item.label for item in app.text_input][-3:] == [
+        "Группа №",
+        "Класс",
+        "ФИО педагога",
+    ]
     assert not any("ИИ" in (item.label or "") for item in getattr(app, "checkbox", []))
     pipeline = _check_and_resolve(app, generated)
 
@@ -1156,6 +1191,7 @@ def test_unresolved_disputed_matches_block_generation() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload_disputed(app, template=True)
     app.run()
+    _prepare_required_plan_inputs(app)
     with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
@@ -1291,6 +1327,9 @@ def test_year_conflict_block_does_not_generate() -> None:
     _upload(app, 0, _program_file())
     _upload(app, 1, REFERENCES / "УТП ТП 3г. 2ч.docx")
     app.run()
+    next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
+    ).set_value(1).run()
     with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
@@ -1311,6 +1350,7 @@ def test_generation_failure_hides_download() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
     app.run()
+    _prepare_required_plan_inputs(app)
     with patch(
         "calendar_pedagoga.ui.run_calendar_pipeline",
         side_effect=PipelineError("DOCX не прошёл QA: overflow"),

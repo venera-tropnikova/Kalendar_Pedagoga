@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from calendar_pedagoga.parsing import (
@@ -21,6 +23,71 @@ StudyPlanSource = Literal["external_utp", "manual"]
 
 class ConfirmedStudyPlanError(ValueError):
     """A candidate study plan cannot be confirmed without guessing."""
+
+
+@dataclass(frozen=True)
+class ManualStudyPlanRow:
+    """One teacher-entered row before it becomes a normalized Topic."""
+
+    section: str | None
+    topic: str
+    total: HourValue
+    theory: HourValue
+    practice: HourValue
+
+
+def hour_value_from_input(value: object, *, field_name: str) -> HourValue:
+    """Parse an exact non-negative hour value from a UI cell."""
+
+    if isinstance(value, bool) or value is None:
+        raise ConfirmedStudyPlanError(f"Поле «{field_name}» обязательно.")
+    token = str(value).strip().replace(",", ".")
+    if not token:
+        raise ConfirmedStudyPlanError(f"Поле «{field_name}» обязательно.")
+    try:
+        parsed = Decimal(token)
+    except InvalidOperation as error:
+        raise ConfirmedStudyPlanError(
+            f"Поле «{field_name}» должно содержать число часов."
+        ) from error
+    if not parsed.is_finite() or parsed < 0:
+        raise ConfirmedStudyPlanError(
+            f"Поле «{field_name}» должно быть неотрицательным числом."
+        )
+    if parsed == parsed.to_integral_value():
+        return int(parsed)
+    return parsed.normalize()
+
+
+def _manual_row(value: ManualStudyPlanRow | Mapping[str, object]) -> ManualStudyPlanRow:
+    if isinstance(value, ManualStudyPlanRow):
+        return value
+
+    def first(*keys: str) -> object | None:
+        for key in keys:
+            if key in value:
+                return value[key]
+        return None
+
+    topic_value = first("topic", "Тема")
+    section_value = first("section", "Раздел")
+    topic = "" if topic_value is None else str(topic_value).strip()
+    section = (
+        "" if section_value is None else str(section_value).strip()
+    ) or None
+    return ManualStudyPlanRow(
+        section=section,
+        topic=topic,
+        total=hour_value_from_input(
+            first("total", "Всего"), field_name="Всего"
+        ),
+        theory=hour_value_from_input(
+            first("theory", "Теория"), field_name="Теория"
+        ),
+        practice=hour_value_from_input(
+            first("practice", "Практика"), field_name="Практика"
+        ),
+    )
 
 
 def _sum_hours(values: tuple[Topic, ...]) -> Hours:
@@ -165,6 +232,10 @@ def _confirmed_plan(
             "Итоги теории и практики не совпадают с общим количеством часов."
         )
     for topic in topics:
+        if min(topic.hours.total, topic.hours.theory, topic.hours.practice) < 0:
+            raise ConfirmedStudyPlanError(
+                f"Часы темы «{topic.title}» должны быть неотрицательными."
+            )
         if topic.hours.theory + topic.hours.practice != topic.hours.total:
             raise ConfirmedStudyPlanError(
                 f"Часы темы «{topic.title}» не согласованы."
@@ -198,6 +269,8 @@ def confirmed_plan_from_external_utp(
     *,
     study_year: int | None = None,
     source_name: str | None = None,
+    study_weeks: int | None = None,
+    hours_per_week: HourValue | None = None,
 ) -> ConfirmedStudyPlan:
     """Confirm a fully resolved external UTP without consulting PROGRAM data."""
 
@@ -211,9 +284,28 @@ def confirmed_plan_from_external_utp(
     totals = utp.table_totals
     if totals is None:
         raise ConfirmedStudyPlanError("В УТП не найдена итоговая строка часов.")
-    if utp.metadata.study_weeks is None:
+    if (
+        utp.metadata.hours_per_year is not None
+        and utp.metadata.hours_per_year != totals.total
+    ):
+        raise ConfirmedStudyPlanError(
+            "Годовой итог внешнего УТП не совпадает с итогом таблицы тем и часов."
+        )
+    source_weeks = utp.metadata.study_weeks
+    source_weekly = utp.metadata.hours_per_week
+    if source_weeks is not None and study_weeks not in {None, source_weeks}:
+        raise ConfirmedStudyPlanError(
+            "Введённое количество недель противоречит значению внешнего УТП."
+        )
+    if source_weekly is not None and hours_per_week not in {None, source_weekly}:
+        raise ConfirmedStudyPlanError(
+            "Введённое количество часов в неделю противоречит внешнему УТП."
+        )
+    resolved_weeks = source_weeks if source_weeks is not None else study_weeks
+    resolved_weekly = source_weekly if source_weekly is not None else hours_per_week
+    if resolved_weeks is None:
         raise ConfirmedStudyPlanError("Укажите количество учебных недель.")
-    if utp.metadata.hours_per_week is None:
+    if resolved_weekly is None:
         raise ConfirmedStudyPlanError("Укажите количество часов в неделю.")
     return _confirmed_plan(
         study_year=resolved_year,
@@ -221,8 +313,8 @@ def confirmed_plan_from_external_utp(
         total_hours=totals.total,
         theory_hours=totals.theory,
         practice_hours=totals.practice,
-        study_weeks=utp.metadata.study_weeks,
-        hours_per_week=utp.metadata.hours_per_week,
+        study_weeks=resolved_weeks,
+        hours_per_week=resolved_weekly,
         source="external_utp",
         reference_metadata=utp.metadata,
         reference_warnings=utp.warnings,
@@ -250,4 +342,51 @@ def confirmed_plan_from_manual(
         study_weeks=study_weeks,
         hours_per_week=hours_per_week,
         source="manual",
+    )
+
+
+def confirmed_plan_from_manual_rows(
+    *,
+    study_year: int,
+    rows: Sequence[ManualStudyPlanRow | Mapping[str, object]],
+    study_weeks: int,
+    hours_per_week: object,
+) -> ConfirmedStudyPlan:
+    """Normalize the dynamic UI table without losing decimals or row order."""
+
+    normalized_rows = tuple(_manual_row(row) for row in rows)
+    if not normalized_rows:
+        raise ConfirmedStudyPlanError("Добавьте хотя бы одну тему учебного плана.")
+    topics: list[Topic] = []
+    for index, row in enumerate(normalized_rows, start=1):
+        if not row.topic:
+            raise ConfirmedStudyPlanError(
+                f"Укажите тему в строке {index} учебного плана."
+            )
+        if row.theory + row.practice != row.total:
+            raise ConfirmedStudyPlanError(
+                f"В строке {index} теория и практика не совпадают с итогом часов."
+            )
+        topics.append(
+            Topic(
+                number=str(index),
+                title=row.topic,
+                hours=Hours(row.total, row.theory, row.practice),
+                parent_section=row.section or row.topic,
+                is_standalone_section=not bool(row.section),
+            )
+        )
+    totals = _sum_hours(tuple(topics))
+    weekly = hour_value_from_input(
+        hours_per_week,
+        field_name="Количество часов в неделю",
+    )
+    return confirmed_plan_from_manual(
+        study_year=study_year,
+        topics=tuple(topics),
+        total_hours=totals.total,
+        theory_hours=totals.theory,
+        practice_hours=totals.practice,
+        study_weeks=study_weeks,
+        hours_per_week=weekly,
     )
