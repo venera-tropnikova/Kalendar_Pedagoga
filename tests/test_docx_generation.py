@@ -4,11 +4,18 @@ from functools import lru_cache
 import inspect
 
 import pytest
+from docx.shared import Pt
 from calendar_pedagoga.docx_generation import (
+    CALENDAR_BODY_FONT_SIZE_PT,
     PRINT_TOP_MARGIN_CM,
     STANDARD_GROUP_SPACE_AFTER_PT,
     STANDARD_TABLE_FONT_FAMILY,
     STANDARD_TEMPLATE_PATH,
+    STANDARD_COMPACT_COLUMN_WEIGHTS,
+    STANDARD_CHARACTER_SCALE_PERCENT,
+    STANDARD_HORIZONTAL_CELL_MARGIN_DXA,
+    _apply_standard_compact_table_layout,
+    _apply_calendar_body_font_size,
     _fill_organization_header_paragraph,
     _group_class_line,
     _program_header_line,
@@ -136,7 +143,131 @@ def test_standard_table_uses_one_explicit_font_family() -> None:
     assert all(run.bold is True for run in header_runs)
     assert all(run.bold is False for run in body_runs)
     assert {run.font.size.pt for run in header_runs if run.font.size} == {12.0}
-    assert {run.font.size.pt for run in body_runs if run.font.size} == {12.0}
+    assert {run.font.size.pt for run in body_runs if run.font.size} == {
+        float(CALENDAR_BODY_FONT_SIZE_PT)
+    }
+
+
+def test_calendar_body_font_size_keeps_header_and_row_layout() -> None:
+    document = Document()
+    table = document.add_table(rows=4, cols=3)
+    for row in table.rows[:2]:
+        for cell in row.cells:
+            run = cell.paragraphs[0].add_run("Header")
+            run.font.size = Pt(12)
+    for row in table.rows[2:]:
+        for cell in row.cells:
+            run = cell.paragraphs[0].add_run("Body")
+            run.font.size = Pt(12)
+    row_heights_before = [len(row._tr.xpath("./w:trPr/w:trHeight")) for row in table.rows]
+
+    _apply_calendar_body_font_size(table)
+
+    assert {
+        run.font.size.pt
+        for row in table.rows[:2]
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text
+    } == {12.0}
+    assert {
+        run.font.size.pt
+        for row in table.rows[2:]
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text
+    } == {float(CALENDAR_BODY_FONT_SIZE_PT)}
+    assert [len(row._tr.xpath("./w:trPr/w:trHeight")) for row in table.rows] == row_heights_before
+
+
+def test_standard_compact_layout_scales_widths_and_does_not_set_row_height() -> None:
+    document = Document(STANDARD_TEMPLATE_PATH)
+    table = document.tables[0]
+    original_total = sum(
+        int(column.get(qn("w:w")))
+        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+    )
+
+    _apply_standard_compact_table_layout(table)
+
+    widths = [
+        int(column.get(qn("w:w")))
+        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+    assert sum(widths) == original_total
+    assert [round(width / original_total, 3) for width in widths] == [
+        round(weight / sum(STANDARD_COMPACT_COLUMN_WEIGHTS), 3)
+        for weight in STANDARD_COMPACT_COLUMN_WEIGHTS
+    ]
+    margins = table._tbl.tblPr.find(qn("w:tblCellMar"))
+    assert margins is not None
+    assert margins.find(qn("w:left")).get(qn("w:w")) == str(
+        STANDARD_HORIZONTAL_CELL_MARGIN_DXA
+    )
+    assert margins.find(qn("w:right")).get(qn("w:w")) == str(
+        STANDARD_HORIZONTAL_CELL_MARGIN_DXA
+    )
+    assert not table.rows[2]._tr.xpath("./w:trPr/w:trHeight")
+
+
+def test_standard_compact_layout_keeps_narrow_column_words_intact() -> None:
+    document = Document(STANDARD_TEMPLATE_PATH)
+    table = document.tables[0]
+    table.rows[2].cells[5].text = "комбинированное занятие"
+
+    _apply_standard_compact_table_layout(table)
+
+    theory_header = table.rows[1].cells[2].paragraphs[0]
+    assert theory_header.text == "Теоретические\nзанятия"
+    table_runs = [
+        run
+        for row in table.rows
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text
+    ]
+    assert table_runs
+    assert all(
+        run._r.rPr.find(qn("w:w")).get(qn("w:val"))
+        == str(STANDARD_CHARACTER_SCALE_PERCENT)
+        for run in table_runs
+    )
+    assert all(run._r.rPr.find(qn("w:spacing")) is None for run in table_runs)
+
+
+def test_generated_body_runs_never_use_horizontal_character_scaling() -> None:
+    table = Document(STANDARD_TEMPLATE_PATH).tables[0]
+    for cell in table.rows[2].cells:
+        cell.text = "Body"
+        run_properties = cell.paragraphs[0].runs[0]._r.get_or_add_rPr()
+        width = OxmlElement("w:w")
+        width.set(qn("w:val"), "75")
+        run_properties.append(width)
+        spacing = OxmlElement("w:spacing")
+        spacing.set(qn("w:val"), "-10")
+        run_properties.append(spacing)
+
+    _apply_standard_compact_table_layout(table)
+
+    body_runs = [
+        run
+        for row in table.rows[2:]
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+        for run in paragraph.runs
+        if run.text
+    ]
+
+    assert body_runs
+    assert all(
+        run._r.rPr.find(qn("w:w")).get(qn("w:val"))
+        == str(STANDARD_CHARACTER_SCALE_PERCENT)
+        for run in body_runs
+    )
+    assert all(run._r.rPr.find(qn("w:spacing")) is None for run in body_runs)
 
 
 def _key_docx_for_year(academic_year: str) -> bytes:
@@ -779,7 +910,7 @@ def test_organization_template_keeps_visual_header_and_times_new_roman() -> None
 
     data_run = document.tables[0].rows[2].cells[2].paragraphs[0].runs[0]
     data_size = data_run.font.size.pt if data_run.font.size else None
-    assert data_size == 12.0
+    assert data_size == float(CALENDAR_BODY_FONT_SIZE_PT)
 
     header_height = source.tables[0].rows[1]._tr.find(qn("w:trPr")).find(qn("w:trHeight"))
     generated_header_height = document.tables[0].rows[1]._tr.find(qn("w:trPr")).find(

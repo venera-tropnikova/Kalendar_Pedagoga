@@ -34,6 +34,10 @@ from calendar_pedagoga.generator_revision import generator_provenance
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STANDARD_TEMPLATE_PATH = _PROJECT_ROOT / "references" / "Календарный план Образец.docx"
 STANDARD_TABLE_FONT_FAMILY = "Times New Roman"
+CALENDAR_BODY_FONT_SIZE_PT = 11
+STANDARD_COMPACT_COLUMN_WEIGHTS = (600, 650, 2100, 1800, 3950, 1800, 2500, 2477)
+STANDARD_HORIZONTAL_CELL_MARGIN_DXA = 45
+STANDARD_CHARACTER_SCALE_PERCENT = 100
 STANDARD_GROUP_SPACE_AFTER_PT = 8
 ORGANIZATION_YEAR_SPACE_AFTER_PT = 8
 ORGANIZATION_HEADER_TABLE_GAP_PT = 8
@@ -138,6 +142,103 @@ def _columns_for_table(table) -> _TableColumns:
     if count >= 10:
         return _TableColumns(0, 1, 2, 3, 4, 5, 7, 9, 6, 8)
     return _TableColumns(0, 1, 2, 3, 4, 5, 6, 7)
+
+
+def _normalize_run_character_spacing(run) -> None:
+    properties = run._r.get_or_add_rPr()
+    width = properties.find(qn("w:w"))
+    if width is None:
+        width = OxmlElement("w:w")
+        properties.append(width)
+    width.set(qn("w:val"), str(STANDARD_CHARACTER_SCALE_PERCENT))
+    for spacing in list(properties.findall(qn("w:spacing"))):
+        properties.remove(spacing)
+
+
+def _apply_standard_table_character_spacing(table) -> None:
+    """Use normal character width and spacing throughout the calendar table."""
+
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    _normalize_run_character_spacing(run)
+
+
+def _apply_standard_narrow_column_typography(table) -> None:
+    """Keep the theory heading on word boundaries without glyph distortion."""
+
+    if len(table.rows) < 2:
+        return
+    columns = _columns_for_table(table)
+    header = table.rows[1].cells[columns.theory].paragraphs[0]
+    words = header.text.split()
+    if len(words) == 2 and header.runs:
+        primary = header.runs[0]
+        for run in header.runs:
+            run.text = ""
+        primary.text = words[0]
+        primary.add_break()
+        primary.add_text(words[1])
+
+    _apply_standard_table_character_spacing(table)
+
+
+def _apply_standard_compact_table_layout(table) -> None:
+    """Use content-oriented widths and small horizontal padding.
+
+    The proportions come from the compact standard calendar structure and are
+    scaled to the template's actual printable table width.  No row height is
+    imposed: renderers size data rows from their 11 pt contents.
+    """
+
+    grid = table._tbl.tblGrid.findall(qn("w:gridCol"))
+    if len(grid) != len(STANDARD_COMPACT_COLUMN_WEIGHTS):
+        return
+    current = [int(column.get(qn("w:w"), "0")) for column in grid]
+    total = sum(current)
+    weight_total = sum(STANDARD_COMPACT_COLUMN_WEIGHTS)
+    if total <= 0 or weight_total <= 0:
+        return
+    widths = [round(total * weight / weight_total) for weight in STANDARD_COMPACT_COLUMN_WEIGHTS]
+    widths[-1] += total - sum(widths)
+    for column, width in zip(grid, widths):
+        column.set(qn("w:w"), str(width))
+
+    for row in table.rows:
+        cursor = 0
+        for tc in row._tr.tc_lst:
+            tc_pr = tc.get_or_add_tcPr()
+            span = tc_pr.find(qn("w:gridSpan"))
+            count = int(span.get(qn("w:val"), "1")) if span is not None else 1
+            tc_width = tc_pr.find(qn("w:tcW"))
+            if tc_width is None:
+                tc_width = OxmlElement("w:tcW")
+                tc_pr.insert(0, tc_width)
+            tc_width.set(qn("w:w"), str(sum(widths[cursor : cursor + count])))
+            tc_width.set(qn("w:type"), "dxa")
+            cursor += count
+
+    for row in table.rows[2:]:
+        properties = row._tr.find(qn("w:trPr"))
+        height = properties.find(qn("w:trHeight")) if properties is not None else None
+        if height is not None:
+            properties.remove(height)
+
+    tbl_pr = table._tbl.tblPr
+    margins = tbl_pr.find(qn("w:tblCellMar"))
+    if margins is None:
+        margins = OxmlElement("w:tblCellMar")
+        tbl_pr.append(margins)
+    for side_name in ("left", "right"):
+        side = margins.find(qn(f"w:{side_name}"))
+        if side is None:
+            side = OxmlElement(f"w:{side_name}")
+            margins.append(side)
+        side.set(qn("w:w"), str(STANDARD_HORIZONTAL_CELL_MARGIN_DXA))
+        side.set(qn("w:type"), "dxa")
+
+    _apply_standard_narrow_column_typography(table)
 
 
 def _prevent_row_split(row) -> None:
@@ -526,6 +627,16 @@ def _apply_standard_table_font(table) -> None:
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     _set_run_font_family(run, STANDARD_TABLE_FONT_FAMILY)
+
+
+def _apply_calendar_body_font_size(table) -> None:
+    """Установить 11 pt только для строк календарного плана, сохранив шапку."""
+
+    for row in table.rows[2:]:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(CALENDAR_BODY_FONT_SIZE_PT)
 
 
 def _apply_standard_header_font(document) -> None:
@@ -1300,9 +1411,12 @@ def _populate_calendar_table(
         _allow_row_split(table.rows[index + 2])
 
     if not uses_organization_template:
+        _apply_standard_compact_table_layout(table)
         _apply_standard_table_font(table)
+    _apply_calendar_body_font_size(table)
 
-    _protect_vertical_cell_height(table)
+    if uses_organization_template:
+        _protect_vertical_cell_height(table)
 
     months = tuple(lesson.source.source.month for lesson in rows)
     return table, columns, months
@@ -1377,7 +1491,12 @@ def _save_document(document) -> bytes:
     return _inject_generator_provenance(buffer.getvalue())
 
 
-def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset[int]]:
+def _apply_page_row_segments(
+    table,
+    layouts,
+    *,
+    protect_vertical_height: bool = True,
+) -> tuple[tuple[str, ...], frozenset[int]]:
     """Project logical rows into exact, non-splitting physical page segments."""
 
     from docx.table import _Cell
@@ -1455,7 +1574,8 @@ def _apply_page_row_segments(table, layouts) -> tuple[tuple[str, ...], frozenset
             if split:
                 continuation_rows.add(physical_index)
             physical_index += 1
-    _protect_vertical_cell_height(table)
+    if protect_vertical_height:
+        _protect_vertical_cell_height(table)
     return tuple(months), frozenset(continuation_rows)
 
 
@@ -1473,7 +1593,11 @@ def _build_segmented_document(
     table, columns, _months = _populate_calendar_table(
         document, utp, rows, **header
     )
-    months, continuation_rows = _apply_page_row_segments(table, layouts)
+    months, continuation_rows = _apply_page_row_segments(
+        table,
+        layouts,
+        protect_vertical_height=bool(header.get("uses_organization_template")),
+    )
     unmerged = _save_document(document)
     spans = detect_data_row_page_spans(unmerged, total_rows=len(months))
     # Each physical page-segment must fit on one page with confirmed identifiers.
@@ -1953,7 +2077,11 @@ def _layouts_segments_fit_pages(
 
     document = _load_template(template)
     table, _, _ = _populate_calendar_table(document, utp, rows, **header)
-    months, continuation_rows = _apply_page_row_segments(table, layouts)
+    months, continuation_rows = _apply_page_row_segments(
+        table,
+        layouts,
+        protect_vertical_height=bool(header.get("uses_organization_template")),
+    )
     spans = detect_data_row_page_spans(
         _save_document(document), total_rows=len(months)
     )
