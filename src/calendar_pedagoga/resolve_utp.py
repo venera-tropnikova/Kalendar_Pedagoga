@@ -52,6 +52,7 @@ UTP_PROGRAM_MISMATCH_MESSAGE = (
 UTP_PROGRAM_UNCERTAIN_NOTICE = (
     "Не удалось уверенно подтвердить соответствие УТП программе. Проверьте файл."
 )
+MISSING_STUDY_WEEKS_MESSAGE = "Укажите количество учебных недель."
 _IDENTITY_STOPWORDS = frozenset(
     {
         "дополнительная",
@@ -414,11 +415,43 @@ def _reconcile_separate(
     )
 
 
+def apply_user_study_weeks(
+    result: UtpParseResult,
+    study_weeks: int | None,
+) -> UtpParseResult:
+    """Fill only missing embedded-UTP weeks with an explicit user value."""
+
+    metadata = result.metadata
+    if metadata.study_weeks is not None or study_weeks is None:
+        return result
+    if study_weeks <= 0:
+        raise UtpResolutionError(MISSING_STUDY_WEEKS_MESSAGE)
+    yearly = metadata.hours_per_year
+    if yearly is None and result.table_totals is not None:
+        yearly = result.table_totals.total
+    weekly = metadata.hours_per_week
+    if yearly is not None and weekly is not None and study_weeks * weekly != yearly:
+        raise UtpResolutionError(
+            "Количество учебных недель не согласуется с нагрузкой программы: "
+            f"{study_weeks} × {weekly} = {study_weeks * weekly} ч., "
+            f"в программе указано {yearly} ч."
+        )
+    return _with_metadata(
+        result,
+        replace(
+            metadata,
+            study_weeks=study_weeks,
+            workload_provenance="user_study_weeks",
+        ),
+    )
+
+
 def resolve_utp(
     optional_utp_upload: ValidatedUpload | None,
     program_document: ValidatedUpload,
     *,
     program_study_year: int | None = None,
+    program_study_weeks: int | None = None,
 ) -> UtpParseResult:
     """Вернуть УТП: отдельный файл — источник плана; embedded — сверка того же года.
 
@@ -491,4 +524,5 @@ def resolve_utp(
             "В программе не найден учебно-тематический план. "
             "Загрузите УТП отдельным файлом."
         )
+    embedded = apply_user_study_weeks(embedded, program_study_weeks)
     return apply_workload_from_document(embedded)

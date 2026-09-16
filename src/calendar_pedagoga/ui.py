@@ -79,6 +79,7 @@ from calendar_pedagoga.docx_generation import (
 from calendar_pedagoga.docx_qa import detect_data_row_page_spans
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.resolve_utp import (
+    MISSING_STUDY_WEEKS_MESSAGE,
     RECONCILE_LEAD,
     UTP_PROGRAM_UNCERTAIN_NOTICE,
     UtpResolutionError,
@@ -161,7 +162,7 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
 
 def _refresh_generation_inputs(
     utp_file, program_file, template_file, academic_year, group_number, class_name,
-    teacher_name, program_study_year,
+    teacher_name, program_study_year, program_study_weeks, program_study_weeks_required,
 ) -> None:
     revision = _generator_revision()
     analysis = _inputs_fingerprint(
@@ -170,6 +171,7 @@ def _refresh_generation_inputs(
         template_file,
         academic_year,
         program_study_year,
+        program_study_weeks,
     )
     inputs = _inputs_fingerprint(analysis, group_number, class_name, teacher_name)
     _sync_generation_fingerprint((inputs, revision))
@@ -2783,6 +2785,54 @@ def _render_program_study_year_input(program_file) -> int | None:
     )
 
 
+def _render_program_study_weeks_input(
+    utp_file,
+    program_file,
+    program_study_year: int | None,
+) -> tuple[int | None, bool]:
+    """Ask for weeks only when the selected embedded UTP does not state them."""
+
+    if utp_file is not None or program_file is None or program_study_year is None:
+        st.session_state.pop("program_study_weeks", None)
+        st.session_state.pop("program_study_weeks_scope", None)
+        return None, False
+    try:
+        embedded = parse_utp(
+            program_file.getvalue(),
+            study_year=program_study_year,
+        )
+    except Exception:
+        return None, False
+    if embedded.metadata.study_weeks is not None:
+        st.session_state.pop("program_study_weeks", None)
+        st.session_state.pop("program_study_weeks_scope", None)
+        return None, False
+
+    yearly = embedded.metadata.hours_per_year
+    if yearly is None and embedded.table_totals is not None:
+        yearly = embedded.table_totals.total
+    weekly = embedded.metadata.hours_per_week
+    if yearly is not None and weekly is not None:
+        st.caption(
+            f"По программе: {yearly} часов в год, {weekly} часа в неделю."
+        )
+
+    scope = _inputs_fingerprint(program_file, program_study_year)
+    if st.session_state.get("program_study_weeks_scope") != scope:
+        st.session_state.pop("program_study_weeks", None)
+        st.session_state["program_study_weeks_scope"] = scope
+    value = st.number_input(
+        "Количество учебных недель",
+        min_value=1,
+        step=1,
+        value=None,
+        placeholder="Укажите количество недель",
+        key="program_study_weeks",
+        help="Введите число недель из утверждённого учебного плана; система не вычисляет его автоматически.",
+    )
+    return (int(value) if value is not None else None), True
+
+
 def _form_is_open() -> bool:
     if st.session_state.get("ui_edit_inputs"):
         return True
@@ -2806,6 +2856,8 @@ def _render_upload_fields() -> tuple[
     str,
     str,
     int | None,
+    int | None,
+    bool,
 ]:
     left_col, right_col = st.columns((1.06, 0.94), gap="medium")
     with left_col:
@@ -2855,6 +2907,13 @@ def _render_upload_fields() -> tuple[
         )
         academic_year = _render_academic_year_input(utp_file, program_file)
         program_study_year = _render_program_study_year_input(program_file)
+        program_study_weeks, program_study_weeks_required = (
+            _render_program_study_weeks_input(
+                utp_file,
+                program_file,
+                program_study_year,
+            )
+        )
         group_number, class_name, teacher_name = _render_group_class_fields()
 
     return (
@@ -2866,6 +2925,8 @@ def _render_upload_fields() -> tuple[
         class_name,
         teacher_name,
         program_study_year,
+        program_study_weeks,
+        program_study_weeks_required,
     )
 
 
@@ -2878,6 +2939,8 @@ def _render_upload_screen() -> tuple[
     str,
     str,
     int | None,
+    int | None,
+    bool,
     bool,
 ]:
     _inject_landing_styles()
@@ -3961,6 +4024,8 @@ def run_app() -> None:
         class_name,
         teacher_name,
         program_study_year,
+        program_study_weeks,
+        program_study_weeks_required,
         check_clicked,
     ) = _render_upload_screen()
 
@@ -3976,6 +4041,9 @@ def run_app() -> None:
     if check_clicked:
         if program_file is None:
             st.error("Загрузите программу обучения.")
+            return
+        if program_study_weeks_required and program_study_weeks is None:
+            st.error(MISSING_STUDY_WEEKS_MESSAGE)
             return
         st.session_state.pop("calendar_check_error", None)
         st.session_state["calendar_busy"] = True
@@ -4033,6 +4101,7 @@ def run_app() -> None:
                         validated_utp_upload,
                         validated_program,
                         program_study_year=program_study_year,
+                        program_study_weeks=program_study_weeks,
                     )
                 except UploadValidationError as error:
                     _abort_document_check(str(error))

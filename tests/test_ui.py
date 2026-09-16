@@ -153,6 +153,37 @@ def _program_with_embedded_utp_years(*years: int) -> bytes:
     return stream.getvalue()
 
 
+def _program_with_embedded_workload(*, study_weeks: int | None) -> bytes:
+    document = Document()
+    document.add_paragraph("Дополнительная общеобразовательная программа «ТЕСТ»")
+    if study_weeks is not None:
+        document.add_paragraph(f"{study_weeks} учебных недель")
+    document.add_paragraph(
+        "Учебно-тематический план I год обучения "
+        "96 часов в год (3 часа в неделю)"
+    )
+    table = document.add_table(rows=6, cols=5)
+    for cell, value in zip(
+        table.rows[0].cells,
+        ("№", "Тема", "всего", "теория", "практика"),
+        strict=True,
+    ):
+        cell.text = value
+    rows = (
+        ("1", "Раздел", "96", "21", "75"),
+        ("1.1", "Тема 1", "32", "7", "25"),
+        ("1.2", "Тема 2", "32", "7", "25"),
+        ("1.3", "Тема 3", "32", "7", "25"),
+        ("Итого", "", "96", "21", "75"),
+    )
+    for row_index, values in enumerate(rows, start=1):
+        for cell, value in zip(table.rows[row_index].cells, values, strict=True):
+            cell.text = value
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
 def _upload(app: AppTest, index: int, path: Path) -> None:
     app.get("file_uploader")[index].set_value((path.name, path.read_bytes(), DOCX_MIME))
 
@@ -437,6 +468,46 @@ def test_single_embedded_utp_year_is_auto_selected_without_selector() -> None:
         item.label == "Год обучения по программе" for item in app.selectbox
     )
     assert app.session_state["program_study_year"] == 2
+
+
+def test_source_study_weeks_do_not_show_additional_input() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload_bytes(
+        app,
+        0,
+        "program-with-weeks.docx",
+        _program_with_embedded_workload(study_weeks=32),
+    )
+    app.run()
+
+    assert not any(
+        item.label == "Количество учебных недель" for item in app.number_input
+    )
+
+
+def test_missing_source_study_weeks_require_explicit_input() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload_bytes(
+        app,
+        0,
+        "program-without-weeks.docx",
+        _program_with_embedded_workload(study_weeks=None),
+    )
+    app.run()
+
+    weeks = next(
+        item
+        for item in app.number_input
+        if item.label == "Количество учебных недель"
+    )
+    assert weeks.value is None
+    assert any(
+        "По программе: 96 часов в год, 3 часа в неделю" in (item.value or "")
+        for item in app.caption
+    )
+
+    _check_button(app).click().run()
+    assert any("Укажите количество учебных недель" in item.value for item in app.error)
 
 
 def test_analysis_screen_shows_study_year_from_program_filename() -> None:

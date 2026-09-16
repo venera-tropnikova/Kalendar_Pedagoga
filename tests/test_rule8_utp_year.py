@@ -269,6 +269,61 @@ def test_embedded_heading_workload_does_not_derive_missing_weeks() -> None:
         resolve_utp(None, program, program_study_year=1)
 
 
+def test_user_study_weeks_complete_consistent_embedded_workload() -> None:
+    program = _program_upload(
+        _multi_year_program_with_heading_workload(
+            (1, Hours(96, 21, 75), 3),
+        )
+    )
+
+    result = resolve_utp(
+        None,
+        program,
+        program_study_year=1,
+        program_study_weeks=32,
+    )
+
+    assert result.metadata.hours_per_year == 96
+    assert result.metadata.hours_per_week == 3
+    assert result.metadata.study_weeks == 32
+    assert result.metadata.workload_provenance == "user_study_weeks"
+
+
+def test_user_study_weeks_mismatch_blocks_without_correction() -> None:
+    program = _program_upload(
+        _multi_year_program_with_heading_workload(
+            (1, Hours(96, 21, 75), 3),
+        )
+    )
+
+    with pytest.raises(UtpResolutionError, match=r"36 × 3 = 108.*96"):
+        resolve_utp(
+            None,
+            program,
+            program_study_year=1,
+            program_study_weeks=36,
+        )
+
+
+def test_external_utp_workload_is_not_overridden_by_program_weeks_input() -> None:
+    totals = Hours(72, 24, 48)
+    program = _program_upload(
+        _multi_year_program_with_heading_workload((1, totals, 2))
+    )
+    separate = _separate_utp(1, totals)
+
+    result = resolve_utp(
+        separate,
+        program,
+        program_study_year=1,
+        program_study_weeks=32,
+    )
+
+    assert result.topics == separate.parsed.topics
+    assert result.metadata.study_weeks == 36
+    assert result.metadata.hours_per_week == 2
+
+
 def test_resolve_same_year_identical_structure_is_pass() -> None:
     totals = Hours(72, 24, 48)
     program = _program_upload(
