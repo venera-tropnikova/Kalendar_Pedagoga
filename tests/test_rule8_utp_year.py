@@ -12,7 +12,6 @@ from calendar_pedagoga.resolve_utp import (
     RECONCILE_LEAD,
     RECONCILE_NOTICE,
     RECONCILE_PASS,
-    UTP_PROGRAM_MISMATCH_MESSAGE,
     UtpResolutionError,
     compare_embedded_to_separate,
     embedded_study_years,
@@ -158,19 +157,17 @@ def test_parse_utp_blocks_when_requested_year_missing() -> None:
         parse_utp(data, study_year=3)
 
 
-def test_single_embedded_utp_year_is_selected_automatically() -> None:
+def test_single_embedded_utp_year_is_reference_only() -> None:
     program = _program_upload(
         _multi_year_program((1, Hours(72, 24, 48), "Тема первого года"))
     )
 
     assert embedded_study_years(program) == (1,)
-    result = resolve_utp(None, program)
-
-    assert infer_study_year_number(result.metadata.study_year) == 1
-    assert any(topic.title == "Тема первого года" for topic in result.topics)
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
+        resolve_utp(None, program)
 
 
-def test_multiple_embedded_utps_require_program_year_selection() -> None:
+def test_multiple_embedded_utps_are_reference_only() -> None:
     program = _program_upload(
         _multi_year_program(
             (1, Hours(36, 12, 24), "Тема первого года"),
@@ -179,11 +176,11 @@ def test_multiple_embedded_utps_require_program_year_selection() -> None:
     )
 
     assert embedded_study_years(program) == (1, 2)
-    with pytest.raises(UtpResolutionError, match="год не выбран"):
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
         resolve_utp(None, program)
 
 
-def test_selected_second_program_year_uses_its_embedded_utp() -> None:
+def test_selected_program_year_does_not_promote_embedded_utp() -> None:
     program = _program_upload(
         _multi_year_program(
             (1, Hours(36, 12, 24), "Тема первого года"),
@@ -191,12 +188,8 @@ def test_selected_second_program_year_uses_its_embedded_utp() -> None:
         )
     )
 
-    result = resolve_utp(None, program, program_study_year=2)
-
-    assert result.table_totals == Hours(72, 24, 48)
-    assert infer_study_year_number(result.metadata.study_year) == 2
-    assert any(topic.title == "Тема второго года" for topic in result.topics)
-    assert all(topic.title != "Тема первого года" for topic in result.topics)
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
+        resolve_utp(None, program, program_study_year=2)
 
 
 def test_separate_utp_remains_source_after_program_year_selection() -> None:
@@ -265,28 +258,24 @@ def test_embedded_heading_workload_does_not_derive_missing_weeks() -> None:
         )
     )
 
-    with pytest.raises(UtpResolutionError, match="число учебных недель"):
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
         resolve_utp(None, program, program_study_year=1)
 
 
-def test_user_study_weeks_complete_consistent_embedded_workload() -> None:
+def test_user_study_weeks_do_not_promote_embedded_workload() -> None:
     program = _program_upload(
         _multi_year_program_with_heading_workload(
             (1, Hours(96, 21, 75), 3),
         )
     )
 
-    result = resolve_utp(
-        None,
-        program,
-        program_study_year=1,
-        program_study_weeks=32,
-    )
-
-    assert result.metadata.hours_per_year == 96
-    assert result.metadata.hours_per_week == 3
-    assert result.metadata.study_weeks == 32
-    assert result.metadata.workload_provenance == "user_study_weeks"
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
+        resolve_utp(
+            None,
+            program,
+            program_study_year=1,
+            program_study_weeks=32,
+        )
 
 
 def test_user_study_weeks_mismatch_blocks_without_correction() -> None:
@@ -296,7 +285,7 @@ def test_user_study_weeks_mismatch_blocks_without_correction() -> None:
         )
     )
 
-    with pytest.raises(UtpResolutionError, match=r"36 × 3 = 108.*96"):
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
         resolve_utp(
             None,
             program,
@@ -342,7 +331,7 @@ def test_resolve_same_year_identical_structure_is_pass() -> None:
     assert RECONCILE_LEAD not in result.warnings
 
 
-def test_resolve_same_year_different_hours_is_notice() -> None:
+def test_program_hours_do_not_change_or_warn_on_confirmed_plan() -> None:
     program = _program_upload(
         _multi_year_program((2, Hours(144, 48, 96), "Введение в тему"))
     )
@@ -350,11 +339,11 @@ def test_resolve_same_year_different_hours_is_notice() -> None:
     result = resolve_utp(separate, program)
     assert result.table_totals == Hours(72, 24, 48)
     assert result.topics == separate.parsed.topics
-    assert RECONCILE_LEAD in result.warnings
-    assert any("144/48/96" in warning and "72/24/48" in warning for warning in result.warnings)
+    assert RECONCILE_LEAD not in result.warnings
+    assert not any("144/48/96" in warning for warning in result.warnings)
 
 
-def test_resolve_same_year_different_topics_is_notice_with_diff() -> None:
+def test_program_embedded_topics_do_not_replace_confirmed_plan() -> None:
     program = _program_upload(
         _multi_year_program((2, Hours(72, 24, 48), "Тема программы"))
     )
@@ -362,12 +351,10 @@ def test_resolve_same_year_different_topics_is_notice_with_diff() -> None:
     result = resolve_utp(separate, program)
     assert result.table_totals == Hours(72, 24, 48)
     assert any(topic.title == "Тема отдельного плана" for topic in result.topics)
-    assert RECONCILE_LEAD in result.warnings
-    assert any("Тема программы" in warning for warning in result.warnings)
-    assert any("Тема отдельного плана" in warning for warning in result.warnings)
+    assert RECONCILE_LEAD not in result.warnings
 
 
-def test_key_program_with_climbing_utp_is_blocked_as_another_program() -> None:
+def test_program_identity_does_not_replace_confirmed_external_plan() -> None:
     totals = Hours(72, 11, 61)
     program = _program_upload(
         _multi_year_program((1, totals, "Дидактические игры")),
@@ -384,8 +371,13 @@ def test_key_program_with_climbing_utp_is_blocked_as_another_program() -> None:
         ),
     )
 
-    with pytest.raises(UtpResolutionError, match=UTP_PROGRAM_MISMATCH_MESSAGE):
-        resolve_utp(separate, program)
+    result = resolve_utp(separate, program)
+    assert result.table_totals == totals
+    assert tuple(topic.title for topic in result.topics) == (
+        "Техника лазания по рельефу",
+        "Страховка и карабины",
+        "Скалолазные узлы",
+    )
 
 
 def test_key_program_only_blocks_without_requested_year() -> None:
@@ -393,7 +385,7 @@ def test_key_program_only_blocks_without_requested_year() -> None:
     program = validate_upload(
         UploadPurpose.PROGRAM, program_path.name, program_path.read_bytes()
     )
-    with pytest.raises(UtpResolutionError, match="год не выбран"):
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
         resolve_utp(None, program)
 
 
@@ -405,7 +397,7 @@ def test_key_embedded_year_two_is_not_first_year_hours() -> None:
     assert infer_study_year_number(result.metadata.study_year) == 2
 
 
-def test_key_separate_year_two_stays_source_with_adaptation_notice() -> None:
+def test_key_separate_year_two_stays_source_without_program_hours_notice() -> None:
     utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
     validated_utp = validate_upload(UploadPurpose.UTP, utp_path.name, utp_path.read_bytes())
@@ -416,8 +408,7 @@ def test_key_separate_year_two_stays_source_with_adaptation_notice() -> None:
     assert result.table_totals == Hours(72, 22, 50)
     assert len(result.topics) == 13
     assert infer_study_year_number(result.metadata.study_year) == 2
-    assert RECONCILE_LEAD in result.warnings
-    assert any("144" in warning and "72" in warning for warning in result.warnings)
+    assert RECONCILE_LEAD not in result.warnings
     status, diffs = compare_embedded_to_separate(
         parse_utp(program_path.read_bytes(), study_year=2),
         validated_utp.parsed,
@@ -426,36 +417,38 @@ def test_key_separate_year_two_stays_source_with_adaptation_notice() -> None:
     assert diffs
 
 
-def test_separate_year_two_does_not_fall_back_to_similar_year_one() -> None:
+def test_program_embedded_year_does_not_override_external_year() -> None:
     similar = Hours(72, 24, 48)
     program = _program_upload(
         _multi_year_program((1, similar, "Введение в тему"))
     )
     separate = _separate_utp(2, similar)
-    with pytest.raises(UtpResolutionError, match="противоречат"):
-        resolve_utp(separate, program)
+    result = resolve_utp(separate, program)
+    assert result.study_year == 2
+    assert result.table_totals == similar
 
 
-def test_tour_guides_explicit_year_three_versus_program_year_one_blocks() -> None:
+def test_program_filename_year_is_only_a_hint_for_external_plan() -> None:
     utp_path = REFERENCES / "УТП ТП 3г. 2ч.docx"
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     validated_utp = validate_upload(UploadPurpose.UTP, utp_path.name, utp_path.read_bytes())
     validated_program = validate_upload(
         UploadPurpose.PROGRAM, program_path.name, program_path.read_bytes()
     )
-    with pytest.raises(UtpResolutionError, match="противоречат"):
+    with pytest.raises(UtpResolutionError, match="Годовой итог внешнего УТП"):
         resolve_utp(validated_utp, validated_program)
 
 
-def test_key_separate_and_tour_guides_program_year_conflict_blocks() -> None:
+def test_program_year_does_not_override_external_plan_without_user_selection() -> None:
     key_utp = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
     tp_program = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     validated_utp = validate_upload(UploadPurpose.UTP, key_utp.name, key_utp.read_bytes())
     validated_program = validate_upload(
         UploadPurpose.PROGRAM, tp_program.name, tp_program.read_bytes()
     )
-    with pytest.raises(UtpResolutionError, match="противоречат"):
-        resolve_utp(validated_utp, validated_program)
+    result = resolve_utp(validated_utp, validated_program)
+    assert result.study_year == 2
+    assert result.table_totals == Hours(72, 22, 50)
 
 
 def test_parse_program_and_matching_receive_selected_year() -> None:

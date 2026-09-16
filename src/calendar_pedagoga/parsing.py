@@ -47,11 +47,11 @@ class UtpMetadata:
     academic_year_mentions: tuple = ()
     study_year: str | None = None
     student_age: str | None = None
-    hours_per_week: int | None = None
-    hours_per_year: int | None = None
+    hours_per_week: HourValue | None = None
+    hours_per_year: HourValue | None = None
     study_weeks: int | None = None
     teacher_name: str | None = None
-    stated_schedule_hours: int | None = None
+    stated_schedule_hours: HourValue | None = None
     workload_provenance: str | None = None
 
 

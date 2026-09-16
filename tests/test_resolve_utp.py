@@ -11,7 +11,7 @@ from calendar_pedagoga.resolve_utp import (
     apply_workload_from_separate,
     resolve_utp,
 )
-from calendar_pedagoga.scheduling import build_schedule
+from calendar_pedagoga.scheduling import build_schedule, ordered_topics
 from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 
 
@@ -71,20 +71,13 @@ def _synthetic_separate(
     )
 
 
-def test_embedded_utp_from_tour_guides_program() -> None:
+def test_embedded_utp_is_not_a_production_plan() -> None:
     program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     program = validate_upload(
         UploadPurpose.PROGRAM, program_path.name, program_path.read_bytes()
     )
-    result = resolve_utp(None, program)
-    assert result.table_totals == Hours(72, 27, 45)
-    assert len(result.topics) >= 20
-    assert result.metadata.study_weeks == 36
-    assert result.metadata.hours_per_week == 2
-    assert result.metadata.workload_provenance == "derived_36x2"
-    assert AUTO_WORKLOAD_WARNING in result.warnings
-    schedule = build_schedule(result)
-    assert len(schedule.weeks) == 36
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
+        resolve_utp(None, program)
 
 
 def test_separate_utp_has_priority_over_embedded_table() -> None:
@@ -97,9 +90,9 @@ def test_separate_utp_has_priority_over_embedded_table() -> None:
     result = resolve_utp(validated_utp, validated_program)
     assert result.table_totals == Hours(72, 22, 50)
     assert len(result.topics) == 13
-    assert result.metadata.workload_provenance == "document"
+    assert result.metadata.workload_provenance == "external_utp"
     assert AUTO_WORKLOAD_WARNING not in result.warnings
-    assert any("72" in warning and "144" in warning for warning in result.warnings)
+    assert not any("144" in warning for warning in result.warnings)
 
 
 def test_key_regression_separate_files() -> None:
@@ -123,7 +116,7 @@ def test_program_without_embedded_or_separate_utp_fails() -> None:
         "program.docx",
         _program_without_utp(),
     )
-    with pytest.raises(UtpResolutionError, match="не найден учебно-тематический план"):
+    with pytest.raises(UtpResolutionError, match="подтверждённый источник"):
         resolve_utp(None, program)
 
 
@@ -201,6 +194,6 @@ def test_separate_topic_hours_not_replaced_by_embedded_totals() -> None:
     assert isinstance(before, UtpParseResult)
     result = resolve_utp(validated_utp, validated_program)
     assert [(topic.number, topic.title, topic.hours) for topic in result.topics] == [
-        (topic.number, topic.title, topic.hours) for topic in before.topics
+        (topic.number, topic.title, topic.hours) for topic in ordered_topics(before)
     ]
     assert result.table_totals == before.table_totals == Hours(72, 22, 50)

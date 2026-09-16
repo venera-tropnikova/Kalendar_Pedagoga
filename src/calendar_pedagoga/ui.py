@@ -87,6 +87,7 @@ from calendar_pedagoga.resolve_utp import (
     embedded_study_years,
     resolve_utp,
 )
+from calendar_pedagoga.confirmed_study_plan import ConfirmedStudyPlan
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
     UploadPurpose,
@@ -3905,7 +3906,7 @@ def _execute_calendar_generation(
     status_slot=None,
 ) -> None:
     utp = validated_utp.parsed
-    assert isinstance(utp, UtpParseResult)
+    assert isinstance(utp, (ConfirmedStudyPlan, UtpParseResult))
     program = None
     if validated_program is not None:
         program = validated_program.parsed
@@ -4247,7 +4248,7 @@ def run_app() -> None:
         academic_year = context["academic_year"]
 
         utp = validated_utp.parsed
-        assert isinstance(utp, UtpParseResult)
+        assert isinstance(utp, (ConfirmedStudyPlan, UtpParseResult))
         program = None
         if validated_program is not None:
             program = validated_program.parsed

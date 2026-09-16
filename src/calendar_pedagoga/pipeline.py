@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
 from calendar_pedagoga.ai_provider import AIProvider, AIUsage, OpenAIProvider
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
+from calendar_pedagoga.confirmed_study_plan import (
+    ConfirmedStudyPlan,
+    confirmed_plan_from_external_utp,
+)
 from calendar_pedagoga.docx_generation import build_output_filename, generate_calendar_docx
 from calendar_pedagoga.docx_qa import (
     has_blocking_qa_issues,
@@ -99,7 +103,7 @@ def _study_year_hints(
 
 
 def run_calendar_pipeline(
-    utp: UtpParseResult,
+    plan: ConfirmedStudyPlan | UtpParseResult,
     program: ProgramData | None,
     *,
     academic_year: str,
@@ -117,6 +121,14 @@ def run_calendar_pipeline(
 ) -> PipelineResult:
     """Выполнить полный конвейер формирования календарного плана."""
 
+    confirmed = (
+        plan
+        if isinstance(plan, ConfirmedStudyPlan)
+        else confirmed_plan_from_external_utp(plan, source_name=source_utp_name)
+    )
+    # Legacy consumers receive a projection whose topics and every workload
+    # value originate exclusively from ConfirmedStudyPlan.
+    utp = confirmed.as_utp_parse_result()
     if on_progress is not None:
         on_progress("Формируем календарный план…")
     schedule = build_schedule(utp, academic_year)

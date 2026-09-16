@@ -11,6 +11,7 @@ import zipfile
 from docx import Document
 
 from calendar_pedagoga.parsing import UtpParseResult, parse_utp
+from calendar_pedagoga.confirmed_study_plan import ConfirmedStudyPlan
 from calendar_pedagoga.program_parsing import (
     LegacyDocUnsupportedError,
     ProgramData,
@@ -39,7 +40,7 @@ class ValidatedUpload:
     purpose: UploadPurpose
     filename: str
     content: bytes
-    parsed: UtpParseResult | ProgramData | None = None
+    parsed: ConfirmedStudyPlan | UtpParseResult | ProgramData | None = None
 
 
 _ALLOWED_EXTENSIONS = {

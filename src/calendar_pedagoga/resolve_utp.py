@@ -7,6 +7,11 @@ from pathlib import Path
 import re
 
 from calendar_pedagoga.matching import normalize_title
+from calendar_pedagoga.confirmed_study_plan import (
+    ConfirmedStudyPlan,
+    ConfirmedStudyPlanError,
+    confirmed_plan_from_external_utp,
+)
 from calendar_pedagoga.parsing import (
     Hours,
     Section,
@@ -444,16 +449,15 @@ def resolve_utp(
     *,
     program_study_year: int | None = None,
     program_study_weeks: int | None = None,
-) -> UtpParseResult:
-    """Вернуть УТП: отдельный файл — источник плана; embedded — сверка того же года.
+) -> ConfirmedStudyPlan:
+    """Resolve the production plan only from a confirmed external UTP.
 
-    Requested year: separate.metadata.study_year, иначе имя separate-файла.
-    Этот год выбирает embedded-таблицу. Часы/темы того же года дают NOTICE,
-    а не BLOCK. Явный чужой год программы — BLOCK, без fallback на «похожую»
-    таблицу другого года.
+    PROGRAM remains a semantic/matching source and never supplies production
+    topics or workload. ``program_study_weeks`` is retained temporarily for
+    call-site compatibility until the workload UI is migrated.
     """
 
-    program_bytes = _program_docx_bytes(program_document)
+    del program_document, program_study_weeks
     if optional_utp_upload is not None:
         parsed = optional_utp_upload.parsed
         if not isinstance(parsed, UtpParseResult):
@@ -470,51 +474,17 @@ def resolve_utp(
                 f"Год обучения программы ({program_study_year}) и отдельного УТП "
                 f"({separate_year}) противоречат друг другу."
             )
-        embedded_year = separate_year or program_study_year
         try:
-            embedded = parse_utp(program_bytes, study_year=embedded_year)
-        except UtpYearSelectionError as error:
-            found_years = _embedded_years(program_bytes)
-            if (
-                embedded_year is not None
-                and len(found_years) == 1
-                and embedded_year not in found_years
-            ):
-                raise UtpResolutionError(
-                    f"Год обучения программы ({found_years[0]}) и отдельного УТП "
-                    f"({embedded_year}) противоречат друг другу."
-                ) from error
+            resolved = apply_workload_from_separate(parsed)
+            return confirmed_plan_from_external_utp(
+                resolved,
+                study_year=program_study_year or separate_year,
+                source_name=optional_utp_upload.filename,
+            )
+        except ConfirmedStudyPlanError as error:
             raise UtpResolutionError(str(error)) from error
-        except Exception:
-            return apply_workload_from_separate(parsed)
-        compatibility = _program_utp_compatibility(
-            parsed,
-            embedded,
-            program_document,
-            optional_utp_upload.filename,
-        )
-        if compatibility == "BLOCK":
-            raise UtpResolutionError(UTP_PROGRAM_MISMATCH_MESSAGE)
-        notice = (
-            (UTP_PROGRAM_UNCERTAIN_NOTICE,)
-            if compatibility == "NOTICE"
-            else ()
-        )
-        return _reconcile_separate(parsed, embedded, embedded_year, notice)
 
-    try:
-        embedded = parse_utp(program_bytes, study_year=program_study_year)
-    except UtpYearSelectionError as error:
-        raise UtpResolutionError(str(error)) from error
-    except Exception as error:
-        raise UtpResolutionError(
-            "В программе не найден учебно-тематический план. "
-            "Загрузите УТП отдельным файлом."
-        ) from error
-    if not embedded.topics or not embedded.sections:
-        raise UtpResolutionError(
-            "В программе не найден учебно-тематический план. "
-            "Загрузите УТП отдельным файлом."
-        )
-    embedded = apply_user_study_weeks(embedded, program_study_weeks)
-    return apply_workload_from_document(embedded)
+    raise UtpResolutionError(
+        "Не найден подтверждённый источник тем и часов. "
+        "Загрузите отдельный учебно-тематический план."
+    )
