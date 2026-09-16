@@ -66,9 +66,23 @@ from calendar_pedagoga.organization_template import (
 )
 from calendar_pedagoga.pipeline import (
     PipelineError,
+    SemanticReviewRequired,
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
+    _lesson_rows_from_v2,
     run_calendar_pipeline,
+)
+from calendar_pedagoga.content_engine_v2 import (
+    LessonContentV2Row,
+    build_lesson_content_v2,
+    validate_manual_lesson_content,
+)
+from calendar_pedagoga.semantic_review import (
+    ManualSemanticConfirmation,
+    SemanticReviewCase,
+    apply_manual_semantic_confirmations,
+    build_review_context_fingerprint,
+    build_semantic_review_cases,
 )
 from calendar_pedagoga.docx_generation import (
     _allow_row_split,
@@ -91,6 +105,7 @@ from calendar_pedagoga.resolve_utp import (
 from calendar_pedagoga.confirmed_study_plan import (
     ConfirmedStudyPlan,
     ConfirmedStudyPlanError,
+    confirmed_plan_from_external_utp,
     confirmed_plan_from_manual_rows,
     hour_value_from_input,
 )
@@ -215,8 +230,15 @@ def _reset_analysis_state() -> None:
         "calendar_check_error",
         "calendar_busy",
         "calendar_work_status",
+        "semantic_review_scope",
+        "semantic_review_confirmations",
+        "semantic_review_issues",
+        "semantic_review_pipeline_cases",
     ):
         st.session_state.pop(key, None)
+    for key in tuple(st.session_state):
+        if str(key).startswith(("semantic_review_input_", "semantic_review_read_")):
+            st.session_state.pop(key, None)
 
 
 def _clear_upload_slot(slot: str) -> None:
@@ -3369,6 +3391,185 @@ def _reviews_for_scope(scope: str) -> dict:
     return st.session_state.setdefault("match_reviews", {})
 
 
+def _clear_semantic_review_state() -> None:
+    for key in (
+        "semantic_review_scope",
+        "semantic_review_confirmations",
+        "semantic_review_issues",
+        "semantic_review_pipeline_cases",
+    ):
+        st.session_state.pop(key, None)
+    for key in tuple(st.session_state):
+        if str(key).startswith(("semantic_review_input_", "semantic_review_read_")):
+            st.session_state.pop(key, None)
+
+
+def _semantic_review_confirmations_for_scope(
+    scope: str,
+) -> dict[str, ManualSemanticConfirmation]:
+    """Return only confirmations bound to the current semantic inputs."""
+
+    if st.session_state.get("semantic_review_scope") != scope:
+        _clear_semantic_review_state()
+        st.session_state["semantic_review_scope"] = scope
+        st.session_state["semantic_review_confirmations"] = {}
+        st.session_state["semantic_review_issues"] = {}
+    return st.session_state.setdefault("semantic_review_confirmations", {})
+
+
+def _semantic_review_row_by_id(
+    cases: tuple[SemanticReviewCase, ...],
+    rows: tuple[LessonContentV2Row, ...],
+) -> dict[str, LessonContentV2Row]:
+    by_week = {row.source.week_number: row for row in rows}
+    return {
+        case.review_id: by_week[case.week_number]
+        for case in cases
+        if case.week_number in by_week
+    }
+
+
+def _store_semantic_confirmation(
+    *,
+    scope: str,
+    case: SemanticReviewCase,
+    row: LessonContentV2Row,
+    planned_result: str,
+    assessment_method: str,
+) -> tuple[str, ...]:
+    """Validate exact teacher text and persist it only after PASS."""
+
+    confirmations = _semantic_review_confirmations_for_scope(scope)
+    validation = validate_manual_lesson_content(
+        row,
+        planned_result=planned_result,
+        assessment_method=assessment_method,
+    )
+    issues = st.session_state.setdefault("semantic_review_issues", {})
+    if not validation.accepted:
+        confirmations.pop(case.review_id, None)
+        issues[case.review_id] = validation.issues
+        return validation.issues
+    confirmations[case.review_id] = ManualSemanticConfirmation(
+        review_id=case.review_id,
+        source_fingerprint=case.source_fingerprint,
+        planned_result=planned_result.strip(),
+        assessment_method=assessment_method.strip(),
+    )
+    issues.pop(case.review_id, None)
+    _invalidate_generated_plan()
+    st.session_state["calendar_generate_after_check"] = True
+    return ()
+
+
+def _validated_semantic_confirmations(
+    *,
+    cases: tuple[SemanticReviewCase, ...],
+    rows: tuple[LessonContentV2Row, ...],
+    confirmations: Mapping[str, ManualSemanticConfirmation],
+) -> tuple[dict[str, ManualSemanticConfirmation], tuple[SemanticReviewCase, ...]]:
+    """Revalidate session data; session state itself is never trusted."""
+
+    application = apply_manual_semantic_confirmations(rows, cases, confirmations)
+    accepted_ids = set(application.accepted_review_ids)
+    valid = {
+        review_id: confirmation
+        for review_id, confirmation in confirmations.items()
+        if review_id in accepted_ids
+    }
+    return valid, application.pending_cases
+
+
+def _render_semantic_review_section(
+    *,
+    scope: str,
+    cases: tuple[SemanticReviewCase, ...],
+    rows: tuple[LessonContentV2Row, ...],
+) -> bool:
+    """Render blocked weeks and return True while DOCX must stay blocked."""
+
+    if not cases:
+        return False
+    confirmations = _semantic_review_confirmations_for_scope(scope)
+    valid, pending = _validated_semantic_confirmations(
+        cases=cases,
+        rows=rows,
+        confirmations=confirmations,
+    )
+    if len(valid) != len(confirmations):
+        confirmations.clear()
+        confirmations.update(valid)
+    issues_by_id = st.session_state.setdefault("semantic_review_issues", {})
+    row_by_id = _semantic_review_row_by_id(cases, rows)
+
+    st.markdown("## Требуется подтверждение содержания")
+    st.write(f"Подтверждено {len(valid)} из {len(cases)}")
+    for case in cases:
+        row = row_by_id[case.review_id]
+        st.markdown(f"### Неделя №{case.week_number}")
+        st.markdown(f"**Тема:** {case.topic_title}")
+        st.markdown("**SOURCE:**")
+        st.code(case.program_source or "SOURCE из программы отсутствует")
+        st.markdown("**Причины NEEDS_REVIEW:**")
+        for reason in case.reasons:
+            st.markdown(f"- {reason}")
+        st.markdown("**Предложенный RESULT:**")
+        st.code(case.proposed_result or "—")
+        st.markdown("**Предложенный CONTROL:**")
+        st.code(case.proposed_control or "—")
+
+        confirmation = valid.get(case.review_id)
+        widget_suffix = case.review_id.rsplit(":", 1)[-1][:16]
+        result_key = f"semantic_review_input_result_{widget_suffix}"
+        control_key = f"semantic_review_input_control_{widget_suffix}"
+        if confirmation is not None:
+            st.text_area(
+                "Результат педагога",
+                value=confirmation.planned_result,
+                disabled=True,
+                key=f"semantic_review_read_result_{widget_suffix}",
+            )
+            st.text_area(
+                "Контроль педагога",
+                value=confirmation.assessment_method,
+                disabled=True,
+                key=f"semantic_review_read_control_{widget_suffix}",
+            )
+            st.success("Содержание подтверждено.")
+            if st.button("Изменить", key=f"semantic_review_change_{widget_suffix}"):
+                confirmations.pop(case.review_id, None)
+                issues_by_id.pop(case.review_id, None)
+                st.session_state[result_key] = confirmation.planned_result
+                st.session_state[control_key] = confirmation.assessment_method
+                _invalidate_generated_plan()
+                st.session_state["calendar_generate_after_check"] = True
+                st.rerun()
+            continue
+
+        result = st.text_area(
+            "Результат педагога",
+            value="",
+            key=result_key,
+        )
+        control = st.text_area(
+            "Контроль педагога",
+            value="",
+            key=control_key,
+        )
+        for issue in issues_by_id.get(case.review_id, ()):
+            st.error(issue)
+        if st.button("Подтвердить", key=f"semantic_review_confirm_{widget_suffix}"):
+            _store_semantic_confirmation(
+                scope=scope,
+                case=case,
+                row=row,
+                planned_result=result,
+                assessment_method=control,
+            )
+            st.rerun()
+    return bool(pending)
+
+
 def _invalidate_generated_plan() -> None:
     had_result = bool(
         st.session_state.get("calendar_download")
@@ -4019,6 +4220,7 @@ def _execute_calendar_generation(
     class_name: str,
     teacher_name: str,
     reviews: dict,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
     status_slot=None,
 ) -> None:
     utp = validated_utp.parsed
@@ -4054,6 +4256,7 @@ def _execute_calendar_generation(
                     class_name=class_name,
                     teacher_name=teacher_name,
                     match_reviews=reviews,
+                    manual_confirmations=manual_confirmations,
                     on_progress=_progress,
                 )
                 operation.publish_result(result.filename, result.content)
@@ -4066,6 +4269,11 @@ def _execute_calendar_generation(
                 )
             status_widget.update(label=_STATUS_READY, state="complete")
             _set_work_status(_STATUS_READY)
+    except SemanticReviewRequired as error:
+        stored_issues = st.session_state.setdefault("semantic_review_issues", {})
+        stored_issues.update(dict(error.confirmation_errors))
+        st.session_state["semantic_review_pipeline_cases"] = error.review_cases
+        _set_work_status("")
     except (PipelineError, ScheduleValidationError, ValueError) as error:
         _emit_generation_error_to_stderr(error)
         st.session_state["calendar_generation_error"] = str(error)
@@ -4085,6 +4293,8 @@ def _show_generation_controls(
     teacher_name: str,
     matches: tuple[ContentMatch, ...] = (),
     review_scope_id: str | None = None,
+    semantic_review_blocked: bool = False,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
     status_slot=None,
 ) -> None:
     current_revision = _generator_revision()
@@ -4102,7 +4312,9 @@ def _show_generation_controls(
         and st.session_state.get("calendar_download")
     )
     reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
-    generate_blocked = bool(unresolved_disputed(matches, reviews))
+    generate_blocked = bool(
+        unresolved_disputed(matches, reviews) or semantic_review_blocked
+    )
     has_error = bool(st.session_state.get("calendar_generation_error"))
     should_generate = (
         bool(st.session_state.get("calendar_generate_after_check"))
@@ -4124,6 +4336,7 @@ def _show_generation_controls(
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
+        st.session_state.pop("semantic_review_pipeline_cases", None)
         try:
             _execute_calendar_generation(
                 validated_utp=validated_utp,
@@ -4134,6 +4347,7 @@ def _show_generation_controls(
                 class_name=class_name,
                 teacher_name=teacher_name,
                 reviews=reviews,
+                manual_confirmations=manual_confirmations,
                 status_slot=status_slot,
             )
         finally:
@@ -4416,10 +4630,45 @@ def run_app() -> None:
                 validated_utp.filename,
                 match_reviews=reviews,
             )
-            lessons = _build_pipeline_lesson_content(
-                content_rows,
-                use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+            confirmed_plan = (
+                utp
+                if isinstance(utp, ConfirmedStudyPlan)
+                else confirmed_plan_from_external_utp(
+                    utp,
+                    source_name=validated_utp.filename,
+                )
             )
+            semantic_revision = _generator_revision()
+            semantic_scope = build_review_context_fingerprint(
+                plan=confirmed_plan,
+                program=program,
+                academic_year=academic_year,
+                schedule=schedule,
+                semantic_revision=semantic_revision,
+            )
+            v2_rows = build_lesson_content_v2(content_rows)
+            semantic_cases = build_semantic_review_cases(
+                v2_rows,
+                context_fingerprint=semantic_scope,
+            )
+            semantic_confirmations = _semantic_review_confirmations_for_scope(
+                semantic_scope
+            )
+            semantic_application = apply_manual_semantic_confirmations(
+                v2_rows,
+                semantic_cases,
+                semantic_confirmations,
+            )
+            try:
+                lessons = _build_pipeline_lesson_content(
+                    content_rows,
+                    use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+                    manual_confirmations=semantic_confirmations,
+                    review_context_fingerprint=semantic_scope,
+                    semantic_revision=semantic_revision,
+                )
+            except SemanticReviewRequired:
+                lessons = _lesson_rows_from_v2(semantic_application.rows)
             matches = (
                 tuple(
                     match_utp_to_program(
@@ -4449,6 +4698,17 @@ def run_app() -> None:
         if unresolved_disputed(matches, reviews):
             _clear_work_busy()
 
+        semantic_review_blocked = _render_semantic_review_section(
+            scope=semantic_scope,
+            cases=semantic_cases,
+            rows=v2_rows,
+        )
+        semantic_confirmations = _semantic_review_confirmations_for_scope(
+            semantic_scope
+        )
+        if semantic_review_blocked:
+            _clear_work_busy()
+
         _render_teacher_analysis_screen(
             utp=utp,
             program=program,
@@ -4472,6 +4732,8 @@ def run_app() -> None:
                 teacher_name=teacher_name,
                 matches=matches,
                 review_scope_id=review_scope_id,
+                semantic_review_blocked=semantic_review_blocked,
+                manual_confirmations=semantic_confirmations,
                 status_slot=status_slot,
             ),
         )
