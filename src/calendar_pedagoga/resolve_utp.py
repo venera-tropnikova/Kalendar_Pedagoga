@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 import re
 
-from calendar_pedagoga.academic_year import APPROVED_WEEK_COUNT
 from calendar_pedagoga.matching import normalize_title
 from calendar_pedagoga.parsing import (
     Hours,
@@ -31,10 +30,6 @@ SEPARATE_WEEKLY_REQUIRED = (
     "Во внешнем УТП не указана постоянная недельная нагрузка. "
     "Укажите число часов в неделю явно — система не подставляет 2 ч/нед "
     "и не выводит нагрузку из годового итога."
-)
-SEPARATE_WEEK_GRID_MISMATCH = (
-    f"Календарная сетка строится на {APPROVED_WEEK_COUNT} учебных неделях. "
-    "Число недель во внешнем УТП должно совпадать с сеткой либо не указываться."
 )
 SEPARATE_YEARLY_MISMATCH = (
     "Годовой итог внешнего УТП не согласуется с числом недель и часов в неделю. "
@@ -155,10 +150,9 @@ def apply_workload_from_document(result: UtpParseResult) -> UtpParseResult:
 
 
 def apply_workload_from_separate(result: UtpParseResult) -> UtpParseResult:
-    """Нагрузка внешнего УТП: явный ч/нед, сетка 36, без hardcode 72→2 и yearly÷weeks.
+    """Нагрузка внешнего УТП: явные недели и ч/нед, без вычисления из итога.
 
-    Темы и table_totals не меняются. Недели без явного указания берутся только
-    как календарная сетка APPROVED_WEEK_COUNT. Неоднозначность — BLOCK.
+    Темы и table_totals не меняются. Любая неоднозначность — BLOCK.
     """
 
     metadata = result.metadata
@@ -172,12 +166,10 @@ def apply_workload_from_separate(result: UtpParseResult) -> UtpParseResult:
         raise UtpResolutionError(SEPARATE_WEEKLY_REQUIRED)
 
     if weeks is None:
-        weeks = APPROVED_WEEK_COUNT
-        provenance = "document_weekly_calendar_grid"
-    else:
-        if weeks != APPROVED_WEEK_COUNT:
-            raise UtpResolutionError(SEPARATE_WEEK_GRID_MISMATCH)
-        provenance = metadata.workload_provenance or "document"
+        raise UtpResolutionError(MISSING_STUDY_WEEKS_MESSAGE)
+    if weeks <= 0:
+        raise UtpResolutionError(MISSING_STUDY_WEEKS_MESSAGE)
+    provenance = metadata.workload_provenance or "document"
 
     if yearly is not None and weeks * weekly != yearly:
         raise UtpResolutionError(SEPARATE_YEARLY_MISMATCH)

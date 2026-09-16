@@ -13,7 +13,13 @@ from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.parsing import Hours, Topic, UtpMetadata, UtpParseResult, parse_utp
 from calendar_pedagoga.resolve_utp import resolve_utp
-from calendar_pedagoga.scheduling import AcademicWeek, ScheduleResult, ScheduledElement, build_schedule
+from calendar_pedagoga.scheduling import (
+    AcademicWeek,
+    ScheduleResult,
+    ScheduledElement,
+    build_academic_weeks,
+    build_schedule,
+)
 from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 from calendar_pedagoga.program_parsing import (
     ProgramData,
@@ -342,7 +348,25 @@ def test_local_grid_gap_and_short_week_do_not_change_schedule() -> None:
     assert _verdicts(gap_report)["vacation_gap"] == "warning"
 
 
-def test_other_year_skips_approved_grid_and_vacation_profile() -> None:
+def test_consistent_32_week_approved_year_grid_passes() -> None:
+    schedule = ScheduleResult(
+        weeks=build_academic_weeks("2026–2027", 32),
+        elements=(),
+    )
+
+    report = evaluate_normative_mvp(
+        _utp(study_weeks=32, hours_per_week=3, hours_per_year=96, table_total=96),
+        _program(),
+        academic_year="2026–2027",
+        schedule=schedule,
+    )
+
+    grid = next(item for item in report.checks if item.check_id == "academic_grid")
+    assert grid.verdict is NormativeVerdict.PASS
+    assert "числа недель: 32" in grid.teacher_text
+
+
+def test_other_year_checks_dynamic_grid_without_approved_vacation_profile() -> None:
     schedule = build_schedule(parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"), "2027–2028")
     report = evaluate_normative_mvp(
         parse_utp(REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"),
@@ -351,10 +375,10 @@ def test_other_year_skips_approved_grid_and_vacation_profile() -> None:
         schedule=schedule,
     )
     verdicts = _verdicts(report)
-    assert verdicts["academic_grid"] == "warning"
+    assert verdicts["academic_grid"] == "pass"
     assert verdicts["vacation_gap"] == "not_checked"
     assert verdicts["academic_year_match"] == "warning"
-    assert "только утверждённая сетка 2026–2027" in " ".join(
+    assert "базовым профилем 2027–2028" in " ".join(
         item.teacher_text for item in report.checks if item.check_id == "academic_grid"
     )
 

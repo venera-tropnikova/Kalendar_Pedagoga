@@ -555,35 +555,52 @@ def _check_academic_grid(
             NormativeLayer.LOCAL,
         )
     selected = normalize_academic_year(academic_year)
-    if selected != APPROVED_ACADEMIC_YEAR:
+    if selected is None:
         return NormativeCheck(
             "academic_grid",
-            NormativeVerdict.WARNING,
-            "Проверяется только утверждённая сетка 2026–2027 на 36 недель.",
+            NormativeVerdict.NOT_CHECKED,
+            "Сетка не сверялась: учебный год задан некорректно.",
             NormativeLayer.LOCAL,
         )
+    weeks_count = len(schedule.weeks)
     try:
-        expected = build_academic_weeks(APPROVED_ACADEMIC_YEAR, APPROVED_WEEK_COUNT)
+        expected = build_academic_weeks(selected, weeks_count)
     except ValueError:
         return NormativeCheck(
             "academic_grid",
             NormativeVerdict.NOT_CHECKED,
-            "Эталонную сетку 2026–2027 не удалось прочитать.",
+            "Эталонную сетку выбранного учебного года не удалось построить.",
             NormativeLayer.LOCAL,
         )
     actual = tuple((week.start, week.end) for week in schedule.weeks)
     wanted = tuple((week.start, week.end) for week in expected)
     if actual == wanted:
+        if selected == APPROVED_ACADEMIC_YEAR and weeks_count == APPROVED_WEEK_COUNT:
+            teacher_text = (
+                "Календарная сетка совпадает с утверждённой: "
+                "2026–2027, 36 недель."
+            )
+        elif selected == APPROVED_ACADEMIC_YEAR:
+            teacher_text = (
+                "Календарная сетка согласована с утверждённым профилем "
+                f"2026–2027 для фактического числа недель: {weeks_count}."
+            )
+        else:
+            teacher_text = (
+                f"Календарная сетка согласована с базовым профилем {selected} "
+                f"для фактического числа недель: {weeks_count}."
+            )
         return NormativeCheck(
             "academic_grid",
             NormativeVerdict.PASS,
-            "Календарная сетка совпадает с утверждённой: 2026–2027, 36 недель.",
+            teacher_text,
             NormativeLayer.LOCAL,
         )
     return NormativeCheck(
         "academic_grid",
         NormativeVerdict.WARNING,
-        "Календарная сетка отличается от утверждённой сетки 2026–2027 / 36 недель.",
+        f"Календарная сетка отличается от ожидаемой сетки {selected} "
+        f"при фактическом числе недель {weeks_count}.",
         NormativeLayer.LOCAL,
     )
 

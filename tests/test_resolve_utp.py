@@ -139,7 +139,7 @@ def test_separate_216_does_not_invent_6h_from_yearly_and_grid() -> None:
         )
 
 
-def test_separate_explicit_weekly_preserves_topics_for_common_totals() -> None:
+def test_separate_explicit_weekly_without_weeks_blocks() -> None:
     cases = (
         (72, 2),
         (108, 3),
@@ -149,15 +149,29 @@ def test_separate_explicit_weekly_preserves_topics_for_common_totals() -> None:
     )
     for yearly, weekly in cases:
         source = _synthetic_separate(yearly=yearly, weekly=weekly, weeks=None)
-        before_topics = source.topics
-        result = apply_workload_from_separate(source)
-        assert result.metadata.hours_per_week == weekly
-        assert result.metadata.study_weeks == 36
-        assert result.metadata.hours_per_year == yearly
-        assert result.topics == before_topics
-        assert result.table_totals == source.table_totals
-        assert result.metadata.workload_provenance == "document_weekly_calendar_grid"
-        assert AUTO_WORKLOAD_WARNING not in result.warnings
+        with pytest.raises(UtpResolutionError, match="количество учебных недель"):
+            apply_workload_from_separate(source)
+
+
+@pytest.mark.parametrize(
+    ("yearly", "weekly", "weeks"),
+    ((96, 3, 32), (128, 4, 32), (72, 2, 36)),
+)
+def test_separate_explicit_dynamic_weeks_preserve_source(
+    yearly: int,
+    weekly: int,
+    weeks: int,
+) -> None:
+    source = _synthetic_separate(yearly=yearly, weekly=weekly, weeks=weeks)
+    result = apply_workload_from_separate(source)
+
+    assert result.metadata.hours_per_week == weekly
+    assert result.metadata.study_weeks == weeks
+    assert result.metadata.hours_per_year == yearly
+    assert result.topics == source.topics
+    assert result.table_totals == source.table_totals
+    assert result.metadata.workload_provenance == "document"
+    assert AUTO_WORKLOAD_WARNING not in result.warnings
 
 
 def test_separate_non_divisible_yearly_with_explicit_weekly_blocks() -> None:

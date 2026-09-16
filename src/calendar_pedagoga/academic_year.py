@@ -222,8 +222,11 @@ def resolve_academic_year_from_documents(
     return resolve_academic_year(mentions_from_utp(utp), mentions_from_program(program))
 
 
-def missing_local_exceptions_warning(academic_year: str) -> str:
+def missing_local_exceptions_warning(
+    academic_year: str,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> str:
     return (
         f"Для учебного года {academic_year} каникулы и праздники не заданы. "
-        "Использована базовая сетка из 36 недель без переноса занятий."
+        f"Использована базовая сетка из {weeks_count} недель без переноса занятий."
     )

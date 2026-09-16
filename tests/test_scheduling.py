@@ -1,9 +1,14 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from calendar_pedagoga.parsing import parse_utp
-from calendar_pedagoga.scheduling import build_academic_weeks, build_schedule
+from calendar_pedagoga.parsing import Hours, parse_utp
+from calendar_pedagoga.scheduling import (
+    ScheduleValidationError,
+    build_academic_weeks,
+    build_schedule,
+)
 
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
@@ -68,3 +73,66 @@ def test_other_year_does_not_copy_2026_winter_gap() -> None:
     assert approved != other
     assert approved[17][0].isoformat() == "2026-12-28"
     assert all(week[0].year != 2026 for week in other)
+
+
+def _variable_week_utp(*, total: int, weekly: int, weeks: int):
+    source = parse_utp(REFERENCES / "УТП ТП 3г. 2ч.docx")
+    extra = total - source.table_totals.total
+    last = source.topics[-1]
+    topics = (
+        *source.topics[:-1],
+        replace(
+            last,
+            hours=Hours(
+                last.hours.total + extra,
+                last.hours.theory,
+                last.hours.practice + extra,
+            ),
+        ),
+    )
+    return replace(
+        source,
+        metadata=replace(
+            source.metadata,
+            hours_per_year=total,
+            hours_per_week=weekly,
+            study_weeks=weeks,
+            workload_provenance="document",
+        ),
+        topics=topics,
+        table_totals=Hours(
+            total,
+            source.table_totals.theory,
+            source.table_totals.practice + extra,
+        ),
+    )
+
+
+@pytest.mark.parametrize(("total", "weekly"), ((96, 3), (128, 4)))
+def test_dynamic_32_week_schedule_preserves_hours(total: int, weekly: int) -> None:
+    schedule = build_schedule(
+        _variable_week_utp(total=total, weekly=weekly, weeks=32)
+    )
+
+    assert len(schedule.weeks) == 32
+    assert [week.number for week in schedule.weeks] == list(range(1, 33))
+    assert sum(element.hours for element in schedule.elements) == total
+    assert all(
+        sum(
+            element.hours
+            for element in schedule.elements
+            if element.week.number == week.number
+        )
+        == weekly
+        for week in schedule.weeks
+    )
+
+
+def test_inconsistent_36_week_workload_remains_blocked() -> None:
+    with pytest.raises(ScheduleValidationError, match="пустые часы"):
+        build_schedule(_variable_week_utp(total=96, weekly=3, weeks=36))
+
+
+def test_dynamic_grid_requires_positive_week_count() -> None:
+    with pytest.raises(ValueError, match="положительным"):
+        build_academic_weeks("2026–2027", 0)

@@ -78,11 +78,11 @@ def _approved_2026_2027_ranges(weeks_count: int) -> list[tuple[date, date]]:
     while len(ranges) < weeks_count:
         ranges.append((start, start + timedelta(days=6)))
         start += timedelta(days=7)
-    return ranges
+    return ranges[:weeks_count]
 
 
 def _basic_academic_week_ranges(start_year: int, weeks_count: int) -> list[tuple[date, date]]:
-    """36 календарных недель от 1 сентября без годовых каникул и переносов."""
+    """Запрошенное число недель от 1 сентября без годовых каникул и переносов."""
 
     start = date(start_year, 9, 1)
     first_end = start + timedelta(days=6 - start.weekday())
@@ -96,13 +96,16 @@ def _basic_academic_week_ranges(start_year: int, weeks_count: int) -> list[tuple
 
 
 def build_academic_weeks(
-    academic_year: str = "2026–2027", weeks_count: int = 36
+    academic_year: str = "2026–2027",
+    weeks_count: int = APPROVED_WEEK_COUNT,
 ) -> tuple[AcademicWeek, ...]:
-    """Построить сетку: профиль 2026–2027 или базовые 36 недель другого года."""
+    """Построить фактическую сетку, сохраняя 36 недель legacy-default."""
 
     canonical = normalize_academic_year(academic_year)
-    if canonical is None or weeks_count != APPROVED_WEEK_COUNT:
-        raise ValueError("Учебный год должен быть парой YYYY–YYYY+1, сетка — 36 недель.")
+    if canonical is None:
+        raise ValueError("Учебный год должен быть парой YYYY–YYYY+1.")
+    if weeks_count <= 0:
+        raise ValueError("Количество учебных недель должно быть положительным.")
     if canonical == APPROVED_ACADEMIC_YEAR:
         ranges = _approved_2026_2027_ranges(weeks_count)
     else:
@@ -166,7 +169,7 @@ def build_schedule(
     warnings = (
         ()
         if canonical == APPROVED_ACADEMIC_YEAR
-        else (missing_local_exceptions_warning(canonical),)
+        else (missing_local_exceptions_warning(canonical, weeks_count),)
     )
     result = ScheduleResult(weeks, tuple(elements), warnings)
     validate_schedule(result, utp)

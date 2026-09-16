@@ -25,6 +25,7 @@ from docx.opc.exceptions import PackageNotFoundError
 
 from calendar_pedagoga.academic_year import (
     APPROVED_ACADEMIC_YEAR,
+    APPROVED_WEEK_COUNT,
     AcademicYearResolution,
     AcademicYearStatus,
     academic_year_period,
@@ -433,8 +434,10 @@ def _academic_period_caption(academic_year: str) -> str:
 def _academic_day_sets(
     academic_year: str,
     class_name: str = "",
+    *,
+    weeks_count: int = APPROVED_WEEK_COUNT,
 ) -> tuple[set[date], set[date], set[date]]:
-    weeks = build_academic_weeks(academic_year)
+    weeks = build_academic_weeks(academic_year, weeks_count)
     study: set[date] = set()
     short: set[date] = set()
     approved = academic_year == APPROVED_ACADEMIC_YEAR
@@ -479,11 +482,17 @@ def _calendar_day_class(
     return ""
 
 
-def _academic_calendar_html(academic_year: str) -> str:
+def _academic_calendar_html(
+    academic_year: str,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> str:
     period = academic_year_period(academic_year)
     if period is None:
         return ""
-    study, short, breaks = _academic_day_sets(academic_year)
+    study, short, breaks = _academic_day_sets(
+        academic_year,
+        weeks_count=weeks_count,
+    )
     month_calendar = calendar.Calendar(firstweekday=0)
     blocks: list[str] = []
     year, month = period[0].year, period[0].month
@@ -532,9 +541,12 @@ def _week_date_caption(start: date, end: date) -> str:
     )
 
 
-def _short_weeks_note(academic_year: str) -> str:
+def _short_weeks_note(
+    academic_year: str,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> str:
     short = tuple(
-        week for week in build_academic_weeks(academic_year)
+        week for week in build_academic_weeks(academic_year, weeks_count)
         if (week.end - week.start).days < 6
     )
     if not short:
@@ -623,9 +635,17 @@ def _calendar_plan_snapshot(
     except (BadZipFile, PackageNotFoundError, IndexError):
         return fallback
 
-def _render_week_detail(academic_year: str, week_number: int) -> None:
+def _render_week_detail(
+    academic_year: str,
+    week_number: int,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> None:
     week = next(
-        (item for item in build_academic_weeks(academic_year) if item.number == week_number),
+        (
+            item
+            for item in build_academic_weeks(academic_year, weeks_count)
+            if item.number == week_number
+        ),
         None,
     )
     if week is None:
@@ -679,12 +699,13 @@ def _month_weeks(
     academic_year: str,
     year: int,
     month: int,
+    weeks_count: int = APPROVED_WEEK_COUNT,
 ) -> tuple[object, ...]:
     """Недели месяца по той же принадлежности, что в календарной сетке."""
 
     return tuple(
         week
-        for week in build_academic_weeks(academic_year)
+        for week in build_academic_weeks(academic_year, weeks_count)
         if week.start.year == year and week.start.month == month
     )
 
@@ -707,13 +728,15 @@ def _monthly_plan_docx(
     academic_year: str,
     year: int,
     month: int,
+    weeks_count: int = APPROVED_WEEK_COUNT,
 ) -> bytes:
     """Выделить строки месяца из готового годового DOCX без пересчёта."""
 
     from docx.table import _Cell
 
     selected_weeks = {
-        week.number for week in _month_weeks(academic_year, year, month)
+        week.number
+        for week in _month_weeks(academic_year, year, month, weeks_count)
     }
     if not selected_weeks:
         raise ValueError("В выбранном месяце нет строк календарного плана.")
@@ -808,9 +831,14 @@ def _adjacent_academic_month(
     return target if first <= target <= last else None
 
 
-def _render_month_detail(academic_year: str, year: int, month: int) -> None:
+def _render_month_detail(
+    academic_year: str,
+    year: int,
+    month: int,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> None:
     month_title = f"{_MONTH_TITLES[month]} {year}"
-    weeks = _month_weeks(academic_year, year, month)
+    weeks = _month_weeks(academic_year, year, month, weeks_count)
     st.markdown(
         f'<p class="kp-week-title">{html.escape(month_title)}</p>',
         unsafe_allow_html=True,
@@ -839,6 +867,7 @@ def _render_month_detail(academic_year: str, year: int, month: int) -> None:
             academic_year,
             year,
             month,
+            weeks_count,
         )
         st.download_button(
             f"Скачать план на {_MONTH_TITLES[month].lower()} {year}",
@@ -1075,14 +1104,19 @@ def _render_calendar_month(
             )
 
 
-def _render_calendar_months(academic_year: str) -> None:
+def _render_calendar_months(
+    academic_year: str,
+    weeks_count: int = APPROVED_WEEK_COUNT,
+) -> None:
     period = academic_year_period(academic_year)
     if period is None:
         return
     study, short, breaks = _academic_day_sets(
-        academic_year, str(st.session_state.get("class_name") or "")
+        academic_year,
+        str(st.session_state.get("class_name") or ""),
+        weeks_count=weeks_count,
     )
-    weeks = tuple(build_academic_weeks(academic_year))
+    weeks = tuple(build_academic_weeks(academic_year, weeks_count))
     year, month = period[0].year, period[0].month
     months: list[tuple[int, int]] = []
     while len(months) < 12:
@@ -1111,10 +1145,13 @@ def _show_year_calendar_dialog() -> None:
     academic_year = str(st.session_state.get("kp_calendar_year") or "")
     if not academic_year:
         return
+    weeks_count = int(
+        st.session_state.get("kp_calendar_weeks") or APPROVED_WEEK_COUNT
+    )
     _install_calendar_translate_guard()
     selected = st.session_state.get("kp_selected_week")
     if selected:
-        _render_week_detail(academic_year, int(selected))
+        _render_week_detail(academic_year, int(selected), weeks_count)
         return
     selected_month = st.session_state.get("kp_selected_month")
     if selected_month:
@@ -1123,13 +1160,14 @@ def _show_year_calendar_dialog() -> None:
             academic_year,
             int(selected_year),
             int(selected_month_number),
+            weeks_count,
         )
         return
     st.markdown(
         f'<p class="kp-cal-dialog-lead">{html.escape(_academic_period_caption(academic_year))}</p>',
         unsafe_allow_html=True,
     )
-    _render_calendar_months(academic_year)
+    _render_calendar_months(academic_year, weeks_count)
     st.markdown(
         _recommended_break_cards_html(
             academic_year,
@@ -1150,7 +1188,7 @@ def _show_year_calendar_dialog() -> None:
     )
     st.markdown(
         '<div class="kp-cal-footer">'
-        f'<p>{html.escape(_short_weeks_note(academic_year))}</p>'
+        f'<p>{html.escape(_short_weeks_note(academic_year, weeks_count))}</p>'
         '<div class="kp-cal-legend">'
         '<span><i class="kp-cal-week"></i>№ — номер недели календарного плана</span>'
         '<span><i class="kp-cal-holiday"></i>Красный — выходной / официальный праздник</span>'
@@ -1164,13 +1202,19 @@ def _show_year_calendar_dialog() -> None:
     )
 
 
-def _render_year_calendar_card(academic_year: str, *, owner: str) -> None:
+def _render_year_calendar_card(
+    academic_year: str,
+    *,
+    owner: str,
+    study_weeks: int = APPROVED_WEEK_COUNT,
+) -> None:
     st.markdown(
         '<div class="kp-cal-card">'
         '<div class="kp-cal-card-icon" aria-hidden="true">📅</div>'
         '<div class="kp-cal-card-copy">'
         f'<div class="kp-step-title">Календарь {html.escape(academic_year)} учебного года</div>'
-        '<div class="kp-cal-card-lead">Недели №1–36 соответствуют строкам календарного плана</div>'
+        f'<div class="kp-cal-card-lead">Недели №1–{study_weeks} '
+        'соответствуют строкам календарного плана</div>'
         f'<div class="kp-step-note">{html.escape(_academic_period_caption(academic_year))}</div>'
         "</div></div>",
         unsafe_allow_html=True,
@@ -1182,6 +1226,7 @@ def _render_year_calendar_card(academic_year: str, *, owner: str) -> None:
         key=f"kp_toggle_year_calendar_{owner}",
     ):
         st.session_state["kp_calendar_year"] = academic_year
+        st.session_state["kp_calendar_weeks"] = study_weeks
         st.session_state["kp_calendar_open"] = True
         st.session_state["kp_calendar_owner"] = owner
         st.session_state.pop("kp_selected_week", None)
@@ -1192,6 +1237,7 @@ def _render_year_calendar_card(academic_year: str, *, owner: str) -> None:
         and st.session_state.get("kp_calendar_owner") == owner
     ):
         st.session_state["kp_calendar_year"] = academic_year
+        st.session_state["kp_calendar_weeks"] = study_weeks
         _show_year_calendar_dialog()
 
 
@@ -2806,7 +2852,7 @@ def _render_program_study_weeks_input(
     if embedded.metadata.study_weeks is not None:
         st.session_state.pop("program_study_weeks", None)
         st.session_state.pop("program_study_weeks_scope", None)
-        return None, False
+        return embedded.metadata.study_weeks, False
 
     yearly = embedded.metadata.hours_per_year
     if yearly is None and embedded.table_totals is not None:
@@ -2969,7 +3015,11 @@ def _render_upload_screen() -> tuple[
             disabled=bool(st.session_state.get("calendar_busy")),
         )
         if not st.session_state.get("analysis_ready") or form_open:
-            _render_year_calendar_card(str(fields[3]), owner="inputs")
+            _render_year_calendar_card(
+                str(fields[3]),
+                owner="inputs",
+                study_weeks=fields[8] or APPROVED_WEEK_COUNT,
+            )
         _render_normative_panel()
     return (*fields, check_clicked)
 
@@ -3785,7 +3835,11 @@ def _render_teacher_analysis_screen(
 
     if after_summary is not None:
         after_summary()
-    _render_year_calendar_card(academic_year, owner="analysis")
+    _render_year_calendar_card(
+        academic_year,
+        owner="analysis",
+        study_weeks=weeks,
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 

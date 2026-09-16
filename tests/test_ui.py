@@ -483,6 +483,21 @@ def test_source_study_weeks_do_not_show_additional_input() -> None:
     assert not any(
         item.label == "Количество учебных недель" for item in app.number_input
     )
+    assert "Недели №1–32 соответствуют строкам календарного плана" in _page_text(app)
+
+    next(
+        button for button in app.button if button.label == "Открыть календарь"
+    ).click().run()
+    week_buttons = [button for button in app.button if button.label.startswith("№")]
+    assert [button.label for button in week_buttons] == [
+        f"№{number}" for number in range(1, 33)
+    ]
+
+
+def test_default_calendar_card_keeps_36_week_legacy_profile() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+
+    assert "Недели №1–36 соответствуют строкам календарного плана" in _page_text(app)
 
 
 def test_missing_source_study_weeks_require_explicit_input() -> None:
