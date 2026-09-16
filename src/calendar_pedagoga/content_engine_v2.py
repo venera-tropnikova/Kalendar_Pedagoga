@@ -362,6 +362,8 @@ def _noun_gen_to_acc(word: str) -> str:
         return word
     if low.endswith(("ений", "яний", "аний")) and len(word) > 5:
         return word[:-2] + "ия"
+    if low.endswith("ствий") and len(word) > 6:
+        return word[:-2] + "ия"
     if low.endswith("ций") and len(word) > 5:
         return word[:-1] + "и"
     # Soft gen.pl «линий» → «линии» (not hard «-ей»).
@@ -657,6 +659,17 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
                 has_post_head = True
                 continue
             acc_core = _noun_gen_to_acc(core)
+            # Zero-ending gen.pl heads are ambiguous in isolation. A preceding
+            # gen.pl adjective proves the plural object frame:
+            # «голосовых команд» -> «голосовые команды».
+            pending_adjs = pending_cores()
+            if (
+                acc_core == core
+                and pending_adjs
+                and re.search(r"(?i)(?:ых|их)$", pending_adjs[-1][2])
+                and re.search(r"(?i)[бвгджзйклмнпрстфхцчшщ]$", core)
+            ):
+                acc_core = core + ("и" if core[-1].casefold() in "гкхжчшщ" else "ы")
             plural, gender = _noun_acc_features(core, acc_core)
             apply_pending(plural, gender)
             core = acc_core
@@ -8278,6 +8291,16 @@ def _knowledge_cite_key(text: str) -> str:
     return _normalize_spaces(text).strip(" .:;").casefold().replace("ё", "е")
 
 
+def _normalize_governed_verbal_noun(text: str) -> str:
+    """Repair a verbal noun in -нии after an adjacent direct nominal head."""
+
+    return re.sub(
+        r"(?i)\b([а-яё-]+а)\s+([а-яё-]+(?:ании|янии|ении))\b",
+        lambda match: f"{match.group(1)} {match.group(2)[:-1]}я",
+        text or "",
+    )
+
+
 def _feminine_acc_citation(text: str) -> str:
     """Regular feminine nom -а/-я → acc -у/-ю on the first word only."""
 
@@ -8305,7 +8328,9 @@ def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
     obj = _knowledge_cite_key(_knowledge_result_object(sentence))
     if len(obj) < 4:
         return False
-    head = _normalize_spaces(clause).strip(" .")
+    head = _normalize_governed_verbal_noun(
+        _normalize_spaces(clause).strip(" .")
+    )
     cite = _knowledge_cite_key(head)
     if not cite:
         return False
@@ -9328,6 +9353,170 @@ def _rebuild_control_before_final_gate(
     return control
 
 
+def _source_spelling_restorations(text: str, source_context: str) -> str:
+    """Restore a unique SOURCE case form changed by an unsafe final-letter guess."""
+
+    source_words = re.findall(r"[А-Яа-яЁё-]+", source_context or "")
+    by_stem: dict[str, list[str]] = {}
+    for word in source_words:
+        key = word.casefold().replace("ё", "е")[:-1]
+        if len(key) >= 5:
+            by_stem.setdefault(key, []).append(word)
+
+    def restore(match: re.Match[str]) -> str:
+        word = match.group(0)
+        if not word.casefold().endswith("ии"):
+            return word
+        key = word.casefold().replace("ё", "е")[:-1]
+        candidates = {
+            candidate
+            for candidate in by_stem.get(key, [])
+            if candidate.casefold().replace("ё", "е") != word.casefold().replace("ё", "е")
+            and candidate.casefold().endswith(("ия", "ий"))
+        }
+        preferred = {candidate for candidate in candidates if candidate.casefold().endswith("ия")}
+        if len(preferred) == 1:
+            candidates = preferred
+        if len(candidates) != 1:
+            return word
+        candidate = next(iter(candidates))
+        return _match_caps(word, candidate.casefold())
+
+    return re.sub(r"[А-Яа-яЁё-]+", restore, text or "")
+
+
+def _object_starts_in_proven_genitive(obj: str) -> bool:
+    words = re.findall(r"[А-Яа-яЁё-]+", _normalize_spaces(obj))
+    if not words:
+        return False
+    first = words[0].casefold()
+    if first.endswith(("ых", "их")) and len(words) > 1:
+        return True
+    return first.endswith(("ов", "ев", "ёв", "ей", "ствий", "ений", "аний", "яний", "ок"))
+
+
+def _normalize_factored_result_grammar(result: str, source_context: str) -> str:
+    """Normalize only grammar proven by SOURCE or a direct-object frame.
+
+    This deliberately runs after semantic factoring. Conditions, dosage tails,
+    predicate groups and sentence order are retained verbatim.
+    """
+
+    if not _normalize_spaces(result).strip(" ."):
+        return ""
+    restored = _source_spelling_restorations(result, source_context)
+    # A direct nominal head followed immediately by a verbal noun cannot govern
+    # a prepositional -нии form. Keep the lexical stem and restore genitive -ния.
+    restored = _normalize_governed_verbal_noun(restored)
+
+    def fold_participation_heading(match: re.Match[str]) -> str:
+        first_tail = _normalize_spaces(match.group(2))
+        heading_tail = _normalize_spaces(match.group(3))
+        first_stems = {stem[:4] for stem in _meaning_stems(first_tail)}
+        heading_stems = {stem[:4] for stem in _meaning_stems(heading_tail)}
+        if not first_stems or not first_stems.issubset(heading_stems):
+            return match.group(0)
+        return f"{match.group(1)}{heading_tail}:"
+
+    restored = re.sub(
+        r"(?i)(участвует\s+в\s+играх\s+на\s+)([^.!?:]{3,80})\s+"
+        r"игры\s+на\s+([^:.;!?]{3,80}):",
+        fold_participation_heading,
+        restored,
+    )
+    sentences = _result_sentences(restored)
+    normalized: list[str] = []
+    for sentence in sentences:
+        verb = _leading_finite_verb(sentence).casefold()
+        if not verb or verb in _KNOWLEDGE_RESULT_VERBS or verb == "участвует":
+            normalized.append(_cap_sentence(sentence.rstrip(".")))
+            continue
+        match = re.match(r"(?i)^([А-Яа-яЁё-]+)\s+(.+?)\.?$", sentence.strip())
+        if match is None:
+            normalized.append(_cap_sentence(sentence.rstrip(".")))
+            continue
+        source_obj = match.group(2)
+        target_obj = source_obj
+        if not _object_starts_in_proven_genitive(target_obj):
+            conjunct = re.search(
+                r"(?i)\s+и\s+(?=[а-яё-]+(?:ов|ев|ёв|ей|ствий|ений|аний|яний|ок)\b)",
+                target_obj,
+            )
+            if conjunct is not None:
+                tail = target_obj[conjunct.end() :]
+                try:
+                    target_obj = (
+                        target_obj[: conjunct.end()]
+                        + _inflect_object_phrase(tail, case="acc")
+                    )
+                except _UncertainGrammar:
+                    pass
+        if not _object_starts_in_proven_genitive(target_obj):
+            normalized.append(_cap_sentence(f"{match.group(1)} {target_obj}".rstrip(".")))
+            continue
+        try:
+            obj = _inflect_object_phrase(target_obj, case="acc")
+        except _UncertainGrammar:
+            normalized.append(_cap_sentence(sentence.rstrip(".")))
+            continue
+        normalized.append(_cap_sentence(f"{match.group(1)} {obj}".rstrip(".")))
+    return _normalize_spaces(" ".join(normalized))
+
+
+def _blocking_grammar_issues(result: str, control: str, source_context: str) -> tuple[str, ...]:
+    """Grammar errors that must not cross the immutable DOCX boundary."""
+
+    issues: list[str] = []
+    if _normalize_factored_result_grammar(result, source_context) != _normalize_spaces(result):
+        issues.append("RESULT требует доказанной грамматической нормализации")
+    if _control_requires_case_rebuild(control):
+        issues.append("CONTROL содержит неподдерживаемое падежное управление")
+    if _control_quotes_result_action(control):
+        issues.append("CONTROL механически цитирует RESULT")
+    return tuple(dict.fromkeys(issues))
+
+
+def _apply_blocking_grammar_gate(
+    candidate: ContentEngineV2Result,
+    *,
+    source_context: str,
+) -> ContentEngineV2Result:
+    """Demote required coverage when final RESULT/CONTROL grammar is unsafe."""
+
+    issues = _blocking_grammar_issues(
+        candidate.planned_result,
+        candidate.assessment_method,
+        source_context,
+    )
+    if not issues:
+        return candidate
+    role_map = dict(candidate.clause_roles)
+    already_blocked = any(
+        status == "NEEDS_REVIEW"
+        and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+        for clause, status in candidate.clause_coverage
+    )
+    demoted = False
+    coverage_items: list[tuple[str, str]] = []
+    for clause, status in candidate.clause_coverage:
+        if (
+            not already_blocked
+            and not demoted
+            and status == "COVERED"
+            and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+        ):
+            status = "NEEDS_REVIEW"
+            demoted = True
+        coverage_items.append((clause, status))
+    coverage = tuple(coverage_items)
+    warnings = tuple(
+        dict.fromkeys(
+            (*candidate.warnings, *(f"NEEDS_REVIEW: blocking grammar gate: {issue}" for issue in issues))
+        )
+    )
+    return replace(candidate, clause_coverage=coverage, warnings=warnings)
+
+
 def _finalize_content_fields(
     candidate: ContentEngineV2Result,
     *,
@@ -9371,6 +9560,13 @@ def _finalize_content_fields(
             )
     else:
         result_for_gate = _compress_exercise_catalogues_in_text(result_for_gate)
+    source_context = _normalize_spaces(
+        f"{theory_text} {practice_text} {program_content}"
+    )
+    result_for_gate = _normalize_factored_result_grammar(
+        result_for_gate,
+        source_context,
+    )
     control = _rebuild_control_before_final_gate(
         result_for_gate,
         candidate.assessment_method,
@@ -9397,7 +9593,7 @@ def _finalize_content_fields(
         theory_hours=theory_hours,
         practice_hours=practice_hours,
     )
-    return _apply_semantic_completeness_gate(
+    after_semantic = _apply_semantic_completeness_gate(
         after_grammar,
         topic_title=topic_title,
         theory_text=theory_text,
@@ -9407,6 +9603,31 @@ def _finalize_content_fields(
         practice_hours=practice_hours,
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
+    )
+
+    # Semantic recovery can reintroduce a pre-factoring clause form. Normalize
+    # that accepted RESULT once more, then rebuild CONTROL from the exact final
+    # wording before the immutable blocking gate.
+    final_result = _normalize_factored_result_grammar(
+        after_semantic.planned_result,
+        source_context,
+    )
+    final_control = _rebuild_control_before_final_gate(
+        final_result,
+        after_semantic.assessment_method,
+        lesson_type=after_semantic.lesson_type,
+        theory_hours=theory_hours,
+        practice_hours=practice_hours,
+    )
+    after_semantic = replace(
+        after_semantic,
+        planned_result=final_result,
+        assessment_method=final_control,
+    )
+
+    return _apply_blocking_grammar_gate(
+        after_semantic,
+        source_context=source_context,
     )
 
 
