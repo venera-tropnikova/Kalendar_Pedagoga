@@ -143,6 +143,88 @@ def _pdf(monkeypatch, fragments, cols=None, page_texts=None):
     monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
 
 
+def _pdf_with_trailing_page(
+    monkeypatch, *, trailing_text='', trailing_drawings=(), trailing_tables=()
+):
+    import pymupdf
+
+    data_pages = (
+        [('Month', '19', 'abcdef')],
+        [('Month', '20', 'gh')],
+    )
+
+    def table(rows):
+        return SimpleNamespace(
+            col_count=3,
+            extract=lambda rows=rows: [[], [], *rows],
+        )
+
+    pages = [
+        SimpleNamespace(
+            find_tables=lambda rows=rows: SimpleNamespace(tables=[table(rows)]),
+            get_text=lambda *args, **kwargs: '',
+            get_drawings=lambda: [],
+        )
+        for rows in data_pages
+    ]
+    pages.append(SimpleNamespace(
+        find_tables=lambda: SimpleNamespace(tables=list(trailing_tables)),
+        get_text=lambda *args, **kwargs: trailing_text,
+        get_drawings=lambda: list(trailing_drawings),
+    ))
+
+    class Pdf:
+        page_count = len(pages)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def __iter__(self): return iter(pages)
+
+    monkeypatch.setattr(pymupdf, 'open', lambda **kwargs: Pdf())
+
+
+def test_fully_blank_trailing_pdf_page_is_ignored(monkeypatch):
+    _pdf_with_trailing_page(monkeypatch)
+
+    layouts = qa._data_row_page_layout_pdf(_source(), b'pdf', 2)
+
+    assert layouts is not None
+    assert len(layouts) == 2
+
+
+def test_trailing_pdf_page_with_only_page_number_is_ignored(monkeypatch):
+    _pdf_with_trailing_page(monkeypatch, trailing_text='\u200b3\n')
+
+    layouts = qa._data_row_page_layout_pdf(_source(), b'pdf', 2)
+
+    assert layouts is not None
+    assert len(layouts) == 2
+
+
+def test_trailing_pdf_page_with_text_fails_closed(monkeypatch):
+    _pdf_with_trailing_page(monkeypatch, trailing_text='Продолжение календаря')
+
+    assert qa._data_row_page_layout_pdf(_source(), b'pdf', 2) is None
+    assert qa._SEGMENTATION_DIAG.get('result') == 'nonblank_trailing_page'
+
+
+@pytest.mark.parametrize('tail_kind', ['drawing', 'table'])
+def test_trailing_pdf_page_with_drawing_or_table_fails_closed(monkeypatch, tail_kind):
+    drawings = ({'type': 'line'},) if tail_kind == 'drawing' else ()
+    tables = (
+        SimpleNamespace(col_count=3, extract=lambda: [[], []]),
+    ) if tail_kind == 'table' else ()
+    _pdf_with_trailing_page(
+        monkeypatch,
+        trailing_drawings=drawings,
+        trailing_tables=tables,
+    )
+
+    assert qa._data_row_page_layout_pdf(_source(), b'pdf', 2) is None
+    assert qa._SEGMENTATION_DIAG.get('result') in {
+        'nonblank_trailing_page', 'extra_table_after_rows',
+    }
+
+
 def test_pdf_measures_continuation_and_monthly_week_numbers(monkeypatch):
     _pdf(monkeypatch, [[['Month', '19', 'abc']], [['', '', 'def'], ['Month', '20', 'gh']]])
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2) == (

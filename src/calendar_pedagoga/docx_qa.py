@@ -1137,6 +1137,45 @@ def _slice_by_normalized_lengths(text: str, lengths: list[int]) -> tuple[str, ..
     return pieces if "".join(pieces) == text else None
 
 
+def _page_has_only_page_number(text: str, page_number: int) -> bool:
+    """Technical footer number and invisible spacing are not meaningful text."""
+
+    cleaned = (
+        (text or "")
+        .replace("\u00a0", " ")
+        .replace("\u200b", "")
+        .replace("\ufeff", "")
+    )
+    leftover = re.sub(
+        rf"(?<!\d){re.escape(str(page_number))}(?!\d)", " ", cleaned
+    )
+    return leftover.strip() == ""
+
+
+def _is_safe_blank_trailing_pdf_page(
+    page,
+    *,
+    page_number: int,
+    page_count: int | None,
+    layouts_done: int,
+    total_rows: int,
+    found_tables: list,
+) -> bool:
+    """Ignore only a proven renderer tail after every calendar row matched."""
+
+    if page_count is None or page_number != page_count:
+        return False
+    if layouts_done != total_rows or found_tables:
+        return False
+    try:
+        if page.get_drawings():
+            return False
+        text = page.get_text("text")
+    except Exception:
+        return False
+    return _page_has_only_page_number(text, page_number)
+
+
 def _data_row_page_layout_pdf(
     content: bytes, pdf: bytes, total_rows: int,
 ) -> tuple[DataRowPageLayout, ...] | None:
@@ -1201,10 +1240,37 @@ def _data_row_page_layout_pdf(
         page_count = getattr(document, "page_count", None)
         pdf_norm = _normalized_pdf_text(document)
         for page_number, page in enumerate(document, start=1):
-            found = page.find_tables().tables
+            found = list(page.find_tables().tables)
             if not found:
+                if len(layouts) >= total_rows:
+                    if _is_safe_blank_trailing_pdf_page(
+                        page,
+                        page_number=page_number,
+                        page_count=page_count,
+                        layouts_done=len(layouts),
+                        total_rows=total_rows,
+                        found_tables=found,
+                    ):
+                        continue
+                    _record_segmentation_diag(
+                        result="nonblank_trailing_page",
+                        page=page_number,
+                        pages=page_count,
+                        layouts_done=len(layouts),
+                        total_rows=total_rows,
+                    )
+                    return None
                 # A tall first row can push the table off the title page.
                 continue
+            if len(layouts) >= total_rows:
+                _record_segmentation_diag(
+                    result="extra_table_after_rows",
+                    page=page_number,
+                    pages=page_count,
+                    layouts_done=len(layouts),
+                    total_rows=total_rows,
+                )
+                return None
             tables = [table for table in found
                       if table.col_count == len(source.columns)]
             if len(tables) != 1:
