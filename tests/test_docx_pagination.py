@@ -225,6 +225,50 @@ def test_trailing_pdf_page_with_drawing_or_table_fails_closed(monkeypatch, tail_
     }
 
 
+def test_visual_qa_reuses_safe_trailing_page_proof(monkeypatch, tmp_path):
+    _pdf_with_trailing_page(monkeypatch, trailing_text='\u200b3\n')
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes', lambda _content: b'pdf')
+
+    assert qa._safe_blank_trailing_visual_page_number(
+        _source(), rendered_page_count=3,
+    ) == 3
+
+
+def test_visual_qa_keeps_unproven_empty_last_page_blocking(monkeypatch, tmp_path):
+    reports = (
+        qa.VisualPageReport(1, tmp_path / 'page_01.png', 1000, 700, 9000, 0.05),
+        qa.VisualPageReport(2, tmp_path / 'page_02.png', 1000, 700, 100, 0.0),
+    )
+    monkeypatch.setattr(qa, 'find_microsoft_word', lambda: True)
+    monkeypatch.setattr(qa, 'render_docx_pages', lambda *_args: tuple())
+    monkeypatch.setattr(qa, 'analyze_visual_pages', lambda _paths: reports)
+    monkeypatch.setattr(
+        qa, '_safe_blank_trailing_visual_page_number', lambda *_args, **_kwargs: None,
+    )
+
+    issues = qa.validate_calendar_docx_visual(b'docx')
+
+    assert any('Страница 2: недостаточно видимого содержания' in issue.message for issue in issues)
+    assert any('Последняя страница: таблица не читается' in issue.message for issue in issues)
+
+
+def test_visual_qa_ignores_only_proven_safe_last_page(monkeypatch, tmp_path):
+    reports = (
+        qa.VisualPageReport(1, tmp_path / 'page_01.png', 1000, 700, 9000, 0.05),
+        qa.VisualPageReport(2, tmp_path / 'page_02.png', 1000, 700, 100, 0.0),
+    )
+    monkeypatch.setattr(qa, 'find_microsoft_word', lambda: True)
+    monkeypatch.setattr(qa, 'render_docx_pages', lambda *_args: tuple())
+    monkeypatch.setattr(qa, 'analyze_visual_pages', lambda _paths: reports)
+    monkeypatch.setattr(
+        qa,
+        '_safe_blank_trailing_visual_page_number',
+        lambda *_args, **_kwargs: 2,
+    )
+
+    assert qa.validate_calendar_docx_visual(b'docx') == ()
+
+
 def test_pdf_measures_continuation_and_monthly_week_numbers(monkeypatch):
     _pdf(monkeypatch, [[['Month', '19', 'abc']], [['', '', 'def'], ['Month', '20', 'gh']]])
     assert qa._data_row_page_spans_pdf(_source(), b'pdf', 2) == (

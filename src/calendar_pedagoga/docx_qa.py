@@ -1176,6 +1176,61 @@ def _is_safe_blank_trailing_pdf_page(
     return _page_has_only_page_number(text, page_number)
 
 
+def _safe_blank_trailing_visual_page_number(
+    content: bytes,
+    *,
+    rendered_page_count: int,
+) -> int | None:
+    """Prove that the last visual page is the same safe renderer tail."""
+
+    try:
+        source = Document(BytesIO(content))
+    except Exception:
+        return None
+    if not source.tables:
+        return None
+    total_rows = len(source.tables[0].rows) - 2
+    if total_rows <= 0 or rendered_page_count <= 1:
+        return None
+
+    pdf = _docx_to_pdf_bytes(content)
+    if pdf is None:
+        return None
+    try:
+        layouts = _data_row_page_layout_pdf(content, pdf, total_rows)
+    except Exception:
+        return None
+    if layouts is None or len(layouts) != total_rows:
+        return None
+    if max(layout.span.end_page for layout in layouts) >= rendered_page_count:
+        return None
+
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf, filetype="pdf") as document:
+            page_count = getattr(document, "page_count", None)
+            if page_count != rendered_page_count:
+                return None
+            pages = list(document)
+            if not pages:
+                return None
+            page = pages[-1]
+            found_tables = list(page.find_tables().tables)
+            if _is_safe_blank_trailing_pdf_page(
+                page,
+                page_number=rendered_page_count,
+                page_count=page_count,
+                layouts_done=len(layouts),
+                total_rows=total_rows,
+                found_tables=found_tables,
+            ):
+                return rendered_page_count
+    except Exception:
+        return None
+    return None
+
+
 def _data_row_page_layout_pdf(
     content: bytes, pdf: bytes, total_rows: int,
 ) -> tuple[DataRowPageLayout, ...] | None:
@@ -1973,8 +2028,23 @@ def validate_calendar_docx_visual(content: bytes) -> tuple[QAIssue, ...]:
         if not reports:
             return (QAIssue(QASeverity.ERROR, "Не удалось отрендерить страницы DOCX."),)
 
+        last = reports[-1]
+        safe_trailing_page = None
+        if (
+            last.size_bytes < _MIN_PAGE_FILE_BYTES
+            or last.ink_ratio < _MIN_INK_RATIO
+        ):
+            safe_trailing_page = _safe_blank_trailing_visual_page_number(
+                content,
+                rendered_page_count=len(reports),
+            )
+
         for report in reports:
-            if report.size_bytes < _MIN_PAGE_FILE_BYTES:
+            is_safe_trailing_page = report.page_number == safe_trailing_page
+            if (
+                report.size_bytes < _MIN_PAGE_FILE_BYTES
+                and not is_safe_trailing_page
+            ):
                 issues.append(
                     QAIssue(
                         QASeverity.ERROR,
@@ -1988,7 +2058,7 @@ def validate_calendar_docx_visual(content: bytes) -> tuple[QAIssue, ...]:
                         f"Страница {report.page_number}: некорректный размер изображения.",
                     )
                 )
-            if report.ink_ratio < _MIN_INK_RATIO:
+            if report.ink_ratio < _MIN_INK_RATIO and not is_safe_trailing_page:
                 issues.append(
                     QAIssue(
                         QASeverity.ERROR,
@@ -2004,8 +2074,10 @@ def validate_calendar_docx_visual(content: bytes) -> tuple[QAIssue, ...]:
                     "Страница 1: шапка/таблица не видны на рендере.",
                 )
             )
-        last = reports[-1]
-        if last.ink_ratio < _MIN_INK_RATIO:
+        if (
+            last.ink_ratio < _MIN_INK_RATIO
+            and last.page_number != safe_trailing_page
+        ):
             issues.append(
                 QAIssue(
                     QASeverity.ERROR,
