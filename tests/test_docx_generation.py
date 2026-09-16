@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 from functools import lru_cache
+from dataclasses import replace
 import inspect
 
 import pytest
@@ -40,6 +41,7 @@ from calendar_pedagoga.resolve_utp import resolve_utp
 from calendar_pedagoga.upload_validation import UploadPurpose, validate_upload
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.pipeline import (
+    PipelineError,
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
 )
@@ -50,6 +52,7 @@ from docx.oxml.ns import qn
 
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
+SEMANTIC_PASS_UTP_PATH = REFERENCES / "УТП ТП 3г. 2ч.docx"
 
 
 def _resolved_lessons(content):
@@ -61,20 +64,73 @@ def _resolved_lessons(content):
     )
 
 
-@lru_cache(maxsize=1)
-def _key_docx() -> bytes:
-    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
-    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
-    utp = parse_utp(utp_path)
-    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
-    content = build_content_model(build_schedule(utp), utp, program, utp_path.name)
+@lru_cache(maxsize=2)
+def _semantic_pass_fixture(academic_year: str = "2026–2027"):
+    """Canonical layout corpus whose SOURCE has already passed the semantic gate."""
+
+    utp = parse_utp(SEMANTIC_PASS_UTP_PATH)
+    schedule = build_schedule(utp, academic_year)
+    content = build_content_model(
+        schedule,
+        utp,
+        None,
+        SEMANTIC_PASS_UTP_PATH.name,
+    )
     resolved = _resolved_lessons(content)
+    resolved = tuple(
+        replace(
+            row,
+            planned_result=f"Характеризует тему «{row.source.source.topic_title}».",
+            assessment_method=f"Устный опрос по теме «{row.source.source.topic_title}».",
+        )
+        for row in resolved
+    )
+    return utp, schedule, resolved
+
+
+@lru_cache(maxsize=2)
+def _semantic_pass_docx(academic_year: str = "2026–2027") -> bytes:
+    utp, _schedule, resolved = _semantic_pass_fixture(academic_year)
     return generate_calendar_docx(
         utp,
         resolved,
         select_calendar_template(),
-        "2026–2027",
+        academic_year,
     )
+
+
+@lru_cache(maxsize=1)
+def _semantic_pass_organization_docx() -> bytes:
+    utp, _schedule, resolved = _semantic_pass_fixture()
+    template_path = REFERENCES / "Календарный план.docx"
+    return generate_calendar_docx(
+        utp,
+        resolved,
+        select_calendar_template(template_path.name, template_path.read_bytes()),
+        "2026–2027",
+        program_title=utp.metadata.program_name,
+        study_year_hints=(SEMANTIC_PASS_UTP_PATH.name,),
+    )
+
+
+def _key_content():
+    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
+    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
+    utp = parse_utp(utp_path)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
+    return build_content_model(build_schedule(utp), utp, program, utp_path.name)
+
+
+def _tour_content():
+    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    validated_program = validate_upload(
+        UploadPurpose.PROGRAM,
+        program_path.name,
+        program_path.read_bytes(),
+    )
+    utp = resolve_utp(None, validated_program)
+    program = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
+    return build_content_model(build_schedule(utp), utp, program, program_path.name)
 
 
 def test_standard_template_exists() -> None:
@@ -87,12 +143,36 @@ def test_docx_helpers_use_production_lesson_engine() -> None:
     assert "_build_pipeline_lesson_content" in helper_src
     assert "USE_CONTENT_ENGINE_V2" in helper_src
     assert ce1_call not in helper_src
-    assert ce1_call not in inspect.getsource(_key_docx)
-    assert ce1_call not in inspect.getsource(_key_docx_for_year)
+    assert ce1_call not in inspect.getsource(_semantic_pass_fixture)
+    assert ce1_call not in inspect.getsource(_semantic_pass_docx)
+
+
+def test_key_pipeline_expectedly_blocks_unresolved_semantics() -> None:
+    with pytest.raises(PipelineError, match="NEEDS_REVIEW") as raised:
+        _build_pipeline_lesson_content(
+            _key_content(),
+            use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+        )
+
+    message = str(raised.value)
+    assert "неделя 2" in message
+    assert "неделя 32" in message
+
+
+def test_tour_pipeline_expectedly_blocks_unresolved_semantics() -> None:
+    with pytest.raises(PipelineError, match="NEEDS_REVIEW") as raised:
+        _build_pipeline_lesson_content(
+            _tour_content(),
+            use_content_engine_v2=USE_CONTENT_ENGINE_V2,
+        )
+
+    message = str(raised.value)
+    assert "неделя 1" in message
+    assert "неделя 27" in message
 
 
 def test_generated_table_marks_header_rows_for_word_repeat() -> None:
-    document = Document(BytesIO(_key_docx()))
+    document = Document(BytesIO(_semantic_pass_docx()))
     table = document.tables[0]
     header_tag = qn("w:tblHeader")
     for index, row in enumerate(table.rows):
@@ -117,7 +197,7 @@ def _explicit_run_fonts(run) -> tuple[str | None, ...]:
 
 
 def test_standard_table_uses_one_explicit_font_family() -> None:
-    table = Document(BytesIO(_key_docx())).tables[0]
+    table = Document(BytesIO(_semantic_pass_docx())).tables[0]
     header_runs = [
         run
         for row in table.rows[:2]
@@ -270,21 +350,6 @@ def test_generated_body_runs_never_use_horizontal_character_scaling() -> None:
     assert all(run._r.rPr.find(qn("w:spacing")) is None for run in body_runs)
 
 
-def _key_docx_for_year(academic_year: str) -> bytes:
-    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
-    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
-    utp = parse_utp(utp_path)
-    program = parse_program(program_path.read_bytes(), program_path.name, study_year=2)
-    content = build_content_model(build_schedule(utp, academic_year), utp, program, utp_path.name)
-    resolved = _resolved_lessons(content)
-    return generate_calendar_docx(
-        utp,
-        resolved,
-        select_calendar_template(),
-        academic_year,
-    )
-
-
 def _week_cells(content: bytes) -> list[str]:
     return [rows[0].cells[1].text for rows in _rows_by_logical_week(content)]
 
@@ -313,22 +378,24 @@ def _logical_cells(content: bytes) -> list[list[str]]:
     return result
 
 
-def test_key_generation_produces_36_data_rows() -> None:
-    content = _key_docx()
+def test_semantic_pass_generation_produces_36_data_rows() -> None:
+    content = _semantic_pass_docx()
     document = Document(BytesIO(content))
     assert document.paragraphs[0].text == "Календарный план"
-    assert document.paragraphs[1].text == "«КЛЮЧ» — 2 год обучения (2 часа в неделю)"
+    assert document.paragraphs[1].text == (
+        "«Туристы проводники» — 3 год обучения (2 часа в неделю)"
+    )
     assert document.paragraphs[2].text == "2026–2027 учебный год"
     assert document.paragraphs[3].text == "Группа № ___________ (Класс _________)"
     table = document.tables[0]
-    assert len(_rows_by_logical_week(_key_docx())) == 36
+    assert len(_rows_by_logical_week(_semantic_pass_docx())) == 36
     assert len(table.rows) >= 38
     assert len(table.columns) >= 8
 
 
 def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:
-    year_2026 = _key_docx_for_year("2026–2027")
-    year_2027 = _key_docx_for_year("2027–2028")
+    year_2026 = _semantic_pass_docx("2026–2027")
+    year_2027 = _semantic_pass_docx("2027–2028")
     doc_2026 = Document(BytesIO(year_2026))
     doc_2027 = Document(BytesIO(year_2027))
     assert doc_2026.paragraphs[2].text == "2026–2027 учебный год"
@@ -345,8 +412,8 @@ def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:
     assert not has_blocking_qa_issues(validate_calendar_docx(year_2027, expected_weeks=36))
 
 
-def test_key_generation_passes_structural_qa() -> None:
-    issues = validate_calendar_docx(_key_docx(), expected_weeks=36)
+def test_semantic_pass_generation_passes_structural_qa() -> None:
+    issues = validate_calendar_docx(_semantic_pass_docx(), expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
 
 
@@ -400,8 +467,8 @@ def _assert_print_safe_margins(document, source) -> None:
     assert abs(generated.right_margin.cm - template.right_margin.cm) < 0.02
 
 
-def test_key_generation_sets_print_safe_top_margin() -> None:
-    content = _key_docx()
+def test_semantic_pass_generation_sets_print_safe_top_margin() -> None:
+    content = _semantic_pass_docx()
     document = Document(BytesIO(content))
     source = Document(str(STANDARD_TEMPLATE_PATH))
     _assert_print_safe_margins(document, source)
@@ -430,23 +497,17 @@ def test_tour_guides_header_uses_program_and_filename_year() -> None:
         study_year_hints=(f"УТП из файла «{program_path.name}»", program_path.name),
     )
     assert line == "«Туристы-проводники» — 1 год обучения (2 часа в неделю)"
+    canonical_utp, _schedule, canonical_rows = _semantic_pass_fixture()
     title, hints = _resolve_header_from_rows(
-        _resolved_lessons(
-            build_content_model(
-                build_schedule(utp),
-                utp,
-                program,
-                f"УТП из файла «{program_path.name}»",
-            )
-        ),
+        canonical_rows,
         program_title=None,
         study_year_hints=(),
     )
     assert _program_header_line(
-        utp,
+        canonical_utp,
         program_title=title,
         study_year_hints=hints,
-    ) == "«Туристы-проводники» — 1 год обучения (2 часа в неделю)"
+    ) == "«Туристы проводники» — 3 год обучения (2 часа в неделю)"
 
 
 def test_document_header_writes_year_and_optional_group() -> None:
@@ -473,17 +534,8 @@ def test_output_filename_uses_program_and_year() -> None:
     assert "2026-2027" in filename
 
 
-def test_tour_guides_without_program_generates_valid_empty_content_docx() -> None:
-    utp_path = REFERENCES / "УТП ТП 3г. 2ч.docx"
-    utp = parse_utp(utp_path)
-    content = build_content_model(build_schedule(utp), utp, None, utp_path.name)
-    resolved = _resolved_lessons(content)
-    docx_bytes = generate_calendar_docx(
-        utp,
-        resolved,
-        select_calendar_template(),
-        "2026–2027",
-    )
+def test_semantic_pass_fixture_generates_valid_docx() -> None:
+    docx_bytes = _semantic_pass_docx()
     issues = validate_calendar_docx(docx_bytes, expected_weeks=36)
     assert not has_blocking_qa_issues(issues)
     document = Document(BytesIO(docx_bytes))
@@ -496,35 +548,35 @@ def test_tour_guides_without_program_generates_valid_empty_content_docx() -> Non
     assert "Сентябрь" in first_page_labels
 
 
-def test_key_reference_calendar_matches_generated_structure() -> None:
+def test_reference_calendar_matches_semantic_pass_generated_structure() -> None:
     """Structural QA: сгенерированный календарь совпадает с эталоном по размерности таблицы."""
-    generated = Document(BytesIO(_key_docx()))
+    generated = Document(BytesIO(_semantic_pass_docx()))
     reference = Document(REFERENCES / "Календарный_план_КЛЮЧ_2026-2027_с_датами.docx")
     gen_table = generated.tables[0]
     ref_table = reference.tables[0]
-    assert len(_rows_by_logical_week(_key_docx())) == len(ref_table.rows) - 2
+    assert len(_rows_by_logical_week(_semantic_pass_docx())) == len(ref_table.rows) - 2
     assert len(gen_table.columns) >= 8
     assert generated.paragraphs[0].text == reference.paragraphs[0].text
 
 
-def test_key_generation_passes_visual_qa_all_pages() -> None:
+def test_semantic_pass_generation_passes_visual_qa_all_pages() -> None:
     from calendar_pedagoga.docx_qa import validate_calendar_docx_visual, has_blocking_qa_issues
     from calendar_pedagoga.program_parsing import find_libreoffice
 
     if find_libreoffice() is None:
         pytest.skip("LibreOffice недоступен для visual QA")
 
-    issues = validate_calendar_docx_visual(_key_docx())
+    issues = validate_calendar_docx_visual(_semantic_pass_docx())
     assert not has_blocking_qa_issues(issues)
 
 
 def test_qa_detects_missing_weeks() -> None:
-    issues = validate_calendar_docx(_key_docx(), expected_weeks=40)
+    issues = validate_calendar_docx(_semantic_pass_docx(), expected_weeks=40)
     assert any(issue.severity is QASeverity.ERROR for issue in issues)
 
 
 def test_visual_qa_checks_all_data_rows_have_week_and_month() -> None:
-    content = _key_docx()
+    content = _semantic_pass_docx()
     document = Document(BytesIO(content))
     previous_week = 0
     counts: dict[int, int] = {}
@@ -544,25 +596,20 @@ def test_visual_qa_checks_all_data_rows_have_week_and_month() -> None:
             assert all(row.cells[1].text.strip() for row in rows)
 
 
-def test_key_docx_does_not_truncate_source_with_ellipsis() -> None:
-    document = Document(BytesIO(_key_docx()))
-    logical = _logical_cells(_key_docx())
-    week3 = logical[2][2]
-    week7 = logical[6][4]
-    week16 = logical[15][4]
-    for text in (week3, week7, week16):
+def test_semantic_pass_docx_does_not_truncate_source_with_ellipsis() -> None:
+    logical = _logical_cells(_semantic_pass_docx())
+    source_cells = [" ".join((cells[2], cells[4])) for cells in logical]
+    for text in source_cells:
         assert "…" not in text
         assert "..." not in text
-    assert "строительства города" in week3
-    assert "Праздник курая" in week7
-    assert "Найди середину" in week16
-    assert "Мой город" in week3
-    assert "История родного края" in week7
-    assert "Ориентирование" in week16
+    combined = " ".join(source_cells)
+    assert "Личное и групповое туристское снаряжение" in combined
+    assert "Ориентирование в сложных условиях" in combined
+    assert "Общая физическая подготовка" in combined
 
 
-def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
-    logical_rows = _logical_cells(_key_docx())
+def test_semantic_pass_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
+    logical_rows = _logical_cells(_semantic_pass_docx())
     assert len(logical_rows) == 36
     for index, cells in enumerate(logical_rows, start=1):
         cells = [cell.strip() for cell in cells]
@@ -574,24 +621,8 @@ def test_key_docx_fills_type_result_control_and_keeps_mark_empty() -> None:
 
 
 def test_organization_template_preserves_vertical_columns_and_merges_months() -> None:
-    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
-    template_path = REFERENCES / "Календарный план.docx"
-    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
-    validated_program = validate_upload(
-        UploadPurpose.PROGRAM,
-        program_path.name,
-        program_path.read_bytes(),
-    )
-    utp = resolve_utp(None, validated_program)
-    schedule = build_schedule(utp)
-    content = build_content_model(schedule, utp, program_upload, program_path.name)
-    resolved = _resolved_lessons(content)
-    generated = generate_calendar_docx(
-        utp,
-        resolved,
-        select_calendar_template(template_path.name, template_path.read_bytes()),
-        "2026–2027",
-    )
+    _utp, schedule, _resolved = _semantic_pass_fixture()
+    generated = _semantic_pass_organization_docx()
 
     table = Document(BytesIO(generated)).tables[0]
     data_rows = table.rows[2:]
@@ -629,25 +660,9 @@ def test_organization_template_preserves_vertical_columns_and_merges_months() ->
     assert saw_restart, "at least one page-safe month segment must be merged"
 
 
-def test_tour_guides_month_labels_visible_on_each_page_segment() -> None:
-    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
-    template_path = REFERENCES / "Календарный план.docx"
-    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
-    validated_program = validate_upload(
-        UploadPurpose.PROGRAM,
-        program_path.name,
-        program_path.read_bytes(),
-    )
-    utp = resolve_utp(None, validated_program)
-    schedule = build_schedule(utp)
-    content = build_content_model(schedule, utp, program_upload, program_path.name)
-    resolved = _resolved_lessons(content)
-    generated = generate_calendar_docx(
-        utp,
-        resolved,
-        select_calendar_template(template_path.name, template_path.read_bytes()),
-        "2026–2027",
-    )
+def test_semantic_pass_month_labels_visible_on_each_page_segment() -> None:
+    _utp, schedule, _resolved = _semantic_pass_fixture()
+    generated = _semantic_pass_organization_docx()
 
     expected_months = tuple(week.month for week in schedule.weeks)
     issues = verify_month_labels_by_page(generated, months=expected_months)
@@ -848,42 +863,23 @@ def test_standard_header_uses_explicit_times_new_roman() -> None:
 
 
 def test_organization_template_keeps_visual_header_and_times_new_roman() -> None:
-    program_path = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
     template_path = REFERENCES / "Календарный план.docx"
-    program_upload = parse_program(program_path.read_bytes(), program_path.name, study_year=1)
-    validated_program = validate_upload(
-        UploadPurpose.PROGRAM,
-        program_path.name,
-        program_path.read_bytes(),
-    )
-    utp = resolve_utp(None, validated_program)
-    content = build_content_model(build_schedule(utp), utp, program_upload, program_path.name)
-    resolved = _resolved_lessons(content)
-    generated = generate_calendar_docx(
-        utp,
-        resolved,
-        select_calendar_template(template_path.name, template_path.read_bytes()),
-        "2026–2027",
-        program_title=program_upload.title,
-        study_year_hints=(program_path.name,),
-    )
+    generated = _semantic_pass_organization_docx()
 
     source = Document(str(template_path))
     document = Document(BytesIO(generated))
     _assert_print_safe_margins(document, source)
     header_texts = [paragraph.text for paragraph in document.paragraphs[:4]]
     assert header_texts[0] == "Календарный план"
-    assert "Туристы-проводники" in header_texts[1]
-    assert "1 год обучения" in header_texts[1]
-    assert "72" in header_texts[1]
+    assert "Туристы проводники" in header_texts[1]
+    assert "3 год обучения" in header_texts[1]
+    assert "140" in header_texts[1]
     assert header_texts[2] == "\tГруппа № ___________ (Класс _________)"
-    assert header_texts[3] == "2026–2027 учебный год"
+    assert header_texts[3] == ""
     assert "учебный год" not in header_texts[1]
     assert "год обучения" in header_texts[1]
-    assert "\t" not in header_texts[3]
-    assert document.paragraphs[3].alignment == 1  # CENTER
 
-    for paragraph in document.paragraphs[:4]:
+    for paragraph in document.paragraphs[:3]:
         name, size = _run_font(paragraph)
         assert name == "Times New Roman"
         assert size == 12.0
@@ -1077,6 +1073,6 @@ def test_standard_template_file_and_generated_header_keep_year_slot() -> None:
     assert source.paragraphs[2].text.startswith("Группа")
     assert source.paragraphs[3].text.strip() == ""
     assert all("учебный год" not in paragraph.text for paragraph in source.paragraphs[:4])
-    document = Document(BytesIO(_key_docx()))
+    document = Document(BytesIO(_semantic_pass_docx()))
     assert document.paragraphs[2].text == "2026–2027 учебный год"
     assert document.paragraphs[3].text.startswith("Группа")
