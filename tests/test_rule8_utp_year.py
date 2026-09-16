@@ -15,6 +15,7 @@ from calendar_pedagoga.resolve_utp import (
     UTP_PROGRAM_MISMATCH_MESSAGE,
     UtpResolutionError,
     compare_embedded_to_separate,
+    embedded_study_years,
     resolve_utp,
 )
 from calendar_pedagoga.upload_validation import UploadPurpose, ValidatedUpload, validate_upload
@@ -133,6 +134,64 @@ def test_parse_utp_blocks_when_requested_year_missing() -> None:
     )
     with pytest.raises(UtpYearSelectionError, match="3-го года"):
         parse_utp(data, study_year=3)
+
+
+def test_single_embedded_utp_year_is_selected_automatically() -> None:
+    program = _program_upload(
+        _multi_year_program((1, Hours(72, 24, 48), "Тема первого года"))
+    )
+
+    assert embedded_study_years(program) == (1,)
+    result = resolve_utp(None, program)
+
+    assert infer_study_year_number(result.metadata.study_year) == 1
+    assert any(topic.title == "Тема первого года" for topic in result.topics)
+
+
+def test_multiple_embedded_utps_require_program_year_selection() -> None:
+    program = _program_upload(
+        _multi_year_program(
+            (1, Hours(36, 12, 24), "Тема первого года"),
+            (2, Hours(72, 24, 48), "Тема второго года"),
+        )
+    )
+
+    assert embedded_study_years(program) == (1, 2)
+    with pytest.raises(UtpResolutionError, match="год не выбран"):
+        resolve_utp(None, program)
+
+
+def test_selected_second_program_year_uses_its_embedded_utp() -> None:
+    program = _program_upload(
+        _multi_year_program(
+            (1, Hours(36, 12, 24), "Тема первого года"),
+            (2, Hours(72, 24, 48), "Тема второго года"),
+        )
+    )
+
+    result = resolve_utp(None, program, program_study_year=2)
+
+    assert result.table_totals == Hours(72, 24, 48)
+    assert infer_study_year_number(result.metadata.study_year) == 2
+    assert any(topic.title == "Тема второго года" for topic in result.topics)
+    assert all(topic.title != "Тема первого года" for topic in result.topics)
+
+
+def test_separate_utp_remains_source_after_program_year_selection() -> None:
+    totals = Hours(72, 24, 48)
+    program = _program_upload(
+        _multi_year_program(
+            (1, Hours(36, 12, 24), "Тема первого года"),
+            (2, totals, "Тема программы второго года"),
+        )
+    )
+    separate = _separate_utp(2, totals, topic_title="Тема отдельного УТП")
+
+    result = resolve_utp(separate, program, program_study_year=2)
+
+    assert result.topics == separate.parsed.topics
+    assert any(topic.title == "Тема отдельного УТП" for topic in result.topics)
+    assert all(topic.title != "Тема программы второго года" for topic in result.topics)
 
 
 def test_resolve_same_year_identical_structure_is_pass() -> None:

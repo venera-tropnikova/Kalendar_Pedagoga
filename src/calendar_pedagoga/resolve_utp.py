@@ -388,6 +388,12 @@ def _embedded_years(program_bytes: bytes) -> tuple[int, ...]:
     return tuple(dict.fromkeys(years))
 
 
+def embedded_study_years(program_document: ValidatedUpload) -> tuple[int, ...]:
+    """Return only study years that are explicitly present in embedded UTPs."""
+
+    return _embedded_years(_program_docx_bytes(program_document))
+
+
 def _reconcile_separate(
     separate: UtpParseResult,
     embedded: UtpParseResult,
@@ -408,6 +414,17 @@ def _reconcile_separate(
     extra: tuple[str, ...] = ()
     if status == RECONCILE_NOTICE:
         extra = (RECONCILE_LEAD, *diffs)
+    if (
+        separate_year is not None
+        and infer_study_year_number(separate.metadata.study_year) is None
+    ):
+        separate = _with_metadata(
+            separate,
+            replace(
+                separate.metadata,
+                study_year=f"{separate_year} год обучения",
+            ),
+        )
     return apply_workload_from_separate(
         _with_metadata(separate, separate.metadata, (*compatibility_notice, *extra))
     )
@@ -416,6 +433,8 @@ def _reconcile_separate(
 def resolve_utp(
     optional_utp_upload: ValidatedUpload | None,
     program_document: ValidatedUpload,
+    *,
+    program_study_year: int | None = None,
 ) -> UtpParseResult:
     """Вернуть УТП: отдельный файл — источник плана; embedded — сверка того же года.
 
@@ -433,18 +452,28 @@ def resolve_utp(
                 "Загруженный файл УТП не содержит учебно-тематический план."
             )
         separate_year = study_year_from_utp(parsed, optional_utp_upload.filename)
+        if (
+            separate_year is not None
+            and program_study_year is not None
+            and separate_year != program_study_year
+        ):
+            raise UtpResolutionError(
+                f"Год обучения программы ({program_study_year}) и отдельного УТП "
+                f"({separate_year}) противоречат друг другу."
+            )
+        embedded_year = separate_year or program_study_year
         try:
-            embedded = parse_utp(program_bytes, study_year=separate_year)
+            embedded = parse_utp(program_bytes, study_year=embedded_year)
         except UtpYearSelectionError as error:
             found_years = _embedded_years(program_bytes)
             if (
-                separate_year is not None
+                embedded_year is not None
                 and len(found_years) == 1
-                and separate_year not in found_years
+                and embedded_year not in found_years
             ):
                 raise UtpResolutionError(
                     f"Год обучения программы ({found_years[0]}) и отдельного УТП "
-                    f"({separate_year}) противоречат друг другу."
+                    f"({embedded_year}) противоречат друг другу."
                 ) from error
             raise UtpResolutionError(str(error)) from error
         except Exception:
@@ -462,10 +491,10 @@ def resolve_utp(
             if compatibility == "NOTICE"
             else ()
         )
-        return _reconcile_separate(parsed, embedded, separate_year, notice)
+        return _reconcile_separate(parsed, embedded, embedded_year, notice)
 
     try:
-        embedded = parse_utp(program_bytes)
+        embedded = parse_utp(program_bytes, study_year=program_study_year)
     except UtpYearSelectionError as error:
         raise UtpResolutionError(str(error)) from error
     except Exception as error:

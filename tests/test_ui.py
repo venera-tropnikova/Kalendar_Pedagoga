@@ -123,6 +123,36 @@ def _disputed_utp_docx() -> bytes:
     return stream.getvalue()
 
 
+def _program_with_embedded_utp_years(*years: int) -> bytes:
+    document = Document()
+    document.add_paragraph("Дополнительная общеобразовательная программа «ТЕСТ»")
+    roman_years = {1: "I", 2: "II", 3: "III"}
+    for year in years:
+        document.add_paragraph(
+            f"Учебно-тематический план {roman_years.get(year, year)} год обучения"
+        )
+        table = document.add_table(rows=6, cols=5)
+        for cell, value in zip(
+            table.rows[0].cells,
+            ("№", "Тема", "всего", "теория", "практика"),
+            strict=True,
+        ):
+            cell.text = value
+        rows = (
+            ("1", f"Раздел {year}", "36", "12", "24"),
+            ("1.1", f"Тема {year}.1", "12", "4", "8"),
+            ("1.2", f"Тема {year}.2", "12", "4", "8"),
+            ("1.3", f"Тема {year}.3", "12", "4", "8"),
+            ("Итого", "", "36", "12", "24"),
+        )
+        for row_index, values in enumerate(rows, start=1):
+            for cell, value in zip(table.rows[row_index].cells, values, strict=True):
+                cell.text = value
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
 def _upload(app: AppTest, index: int, path: Path) -> None:
     app.get("file_uploader")[index].set_value((path.name, path.read_bytes(), DOCX_MIME))
 
@@ -367,6 +397,46 @@ def test_utp_year_is_suggested_after_upload() -> None:
     assert "2026–2027" in notices
     assert "УТП" in notices
     assert "2026–2027 / 2027–2028" not in notices
+
+
+def test_multiple_embedded_utps_show_distinct_program_year_selector() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload_bytes(
+        app,
+        0,
+        "program-multi-year.docx",
+        _program_with_embedded_utp_years(1, 2, 3),
+    )
+    app.run()
+
+    selectors = [
+        item
+        for item in app.selectbox
+        if item.label == "Год обучения по программе"
+    ]
+    assert len(selectors) == 1
+    assert selectors[0].options == ["1 год", "2 год", "3 год"]
+    assert selectors[0].value is None
+    assert int(app.number_input[0].value) == default_academic_year_start()
+
+    selectors[0].set_value(2).run()
+    assert app.session_state["program_study_year"] == 2
+
+
+def test_single_embedded_utp_year_is_auto_selected_without_selector() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+    _upload_bytes(
+        app,
+        0,
+        "program-single-year.docx",
+        _program_with_embedded_utp_years(2),
+    )
+    app.run()
+
+    assert not any(
+        item.label == "Год обучения по программе" for item in app.selectbox
+    )
+    assert app.session_state["program_study_year"] == 2
 
 
 def test_analysis_screen_shows_study_year_from_program_filename() -> None:

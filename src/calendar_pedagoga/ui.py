@@ -82,6 +82,7 @@ from calendar_pedagoga.resolve_utp import (
     RECONCILE_LEAD,
     UTP_PROGRAM_UNCERTAIN_NOTICE,
     UtpResolutionError,
+    embedded_study_years,
     resolve_utp,
 )
 from calendar_pedagoga.transient_documents import TransientDocumentSession
@@ -160,10 +161,16 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
 
 def _refresh_generation_inputs(
     utp_file, program_file, template_file, academic_year, group_number, class_name,
-    teacher_name,
+    teacher_name, program_study_year,
 ) -> None:
     revision = _generator_revision()
-    analysis = _inputs_fingerprint(utp_file, program_file, template_file, academic_year)
+    analysis = _inputs_fingerprint(
+        utp_file,
+        program_file,
+        template_file,
+        academic_year,
+        program_study_year,
+    )
     inputs = _inputs_fingerprint(analysis, group_number, class_name, teacher_name)
     _sync_generation_fingerprint((inputs, revision))
     analysis_fingerprint = (analysis, revision)
@@ -2740,6 +2747,42 @@ def _render_academic_year_input(utp_file, program_file) -> str:
     return academic_year
 
 
+def _render_program_study_year_input(program_file) -> int | None:
+    """Render a distinct embedded-program year selector when selection is needed."""
+
+    if program_file is None:
+        st.session_state.pop("program_study_year", None)
+        return None
+    try:
+        program = ValidatedUpload(
+            UploadPurpose.PROGRAM,
+            program_file.name,
+            program_file.getvalue(),
+        )
+        years = embedded_study_years(program)
+    except Exception:
+        years = ()
+    if len(years) == 1:
+        st.session_state["program_study_year"] = years[0]
+        return years[0]
+    if len(years) < 2:
+        st.session_state.pop("program_study_year", None)
+        return None
+
+    current = st.session_state.get("program_study_year")
+    if current not in years:
+        st.session_state["program_study_year"] = None
+    return st.selectbox(
+        "Год обучения по программе",
+        options=years,
+        index=None,
+        format_func=lambda year: f"{year} год",
+        placeholder="Выберите год обучения",
+        key="program_study_year",
+        help="Выберите год обучения внутри программы; это не календарный учебный год.",
+    )
+
+
 def _form_is_open() -> bool:
     if st.session_state.get("ui_edit_inputs"):
         return True
@@ -2754,7 +2797,16 @@ def _open_input_form() -> None:
     st.rerun()
 
 
-def _render_upload_fields() -> tuple[object | None, object | None, object | None, str, str, str, str]:
+def _render_upload_fields() -> tuple[
+    object | None,
+    object | None,
+    object | None,
+    str,
+    str,
+    str,
+    str,
+    int | None,
+]:
     left_col, right_col = st.columns((1.06, 0.94), gap="medium")
     with left_col:
         st.markdown(
@@ -2802,6 +2854,7 @@ def _render_upload_fields() -> tuple[object | None, object | None, object | None
             unsafe_allow_html=True,
         )
         academic_year = _render_academic_year_input(utp_file, program_file)
+        program_study_year = _render_program_study_year_input(program_file)
         group_number, class_name, teacher_name = _render_group_class_fields()
 
     return (
@@ -2812,10 +2865,21 @@ def _render_upload_fields() -> tuple[object | None, object | None, object | None
         group_number,
         class_name,
         teacher_name,
+        program_study_year,
     )
 
 
-def _render_upload_screen() -> tuple[object | None, object | None, object | None, str, str, str, str, bool]:
+def _render_upload_screen() -> tuple[
+    object | None,
+    object | None,
+    object | None,
+    str,
+    str,
+    str,
+    str,
+    int | None,
+    bool,
+]:
     _inject_landing_styles()
     form_open = _form_is_open()
 
@@ -3896,6 +3960,7 @@ def run_app() -> None:
         group_number,
         class_name,
         teacher_name,
+        program_study_year,
         check_clicked,
     ) = _render_upload_screen()
 
@@ -3964,7 +4029,11 @@ def run_app() -> None:
                         if transient_template is not None
                         else None
                     )
-                    resolved_utp = resolve_utp(validated_utp_upload, validated_program)
+                    resolved_utp = resolve_utp(
+                        validated_utp_upload,
+                        validated_program,
+                        program_study_year=program_study_year,
+                    )
                 except UploadValidationError as error:
                     _abort_document_check(str(error))
                     return

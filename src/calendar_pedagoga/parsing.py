@@ -406,6 +406,20 @@ _UTP_PLAN_HEADING = re.compile(
 _STUDY_YEAR_IN_HEADING = re.compile(
     r"(\d+)\s*[-–—]?\s*(?:го|ый|ой|ий|я)?\s*года?\s+обучен"
 )
+_ROMAN_STUDY_YEAR_IN_HEADING = re.compile(
+    r"\b(viii|vii|vi|iv|v|iii|ii|i)\s*[-–—]?\s*"
+    r"(?:го|ый|ой|ий|я)?\s*года?\s+обучен"
+)
+_ROMAN_STUDY_YEARS = {
+    "i": 1,
+    "ii": 2,
+    "iii": 3,
+    "iv": 4,
+    "v": 5,
+    "vi": 6,
+    "vii": 7,
+    "viii": 8,
+}
 
 
 def _is_utp_plan_heading(text: str) -> bool:
@@ -427,6 +441,9 @@ def heading_study_year(text: str) -> int | None:
     ):
         if token in low and "год" in low:
             return number
+    roman = _ROMAN_STUDY_YEAR_IN_HEADING.search(low)
+    if roman:
+        return _ROMAN_STUDY_YEARS[roman.group(1)]
     found = _STUDY_YEAR_IN_HEADING.search(low)
     if not found:
         return None
