@@ -76,6 +76,15 @@ class LessonContentV2Row:
     clause_roles: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass(frozen=True)
+class ManualContentValidation:
+    """Read-only verdict for teacher-entered RESULT/CONTROL."""
+
+    accepted: bool
+    row: LessonContentV2Row
+    issues: tuple[str, ...] = ()
+
+
 REQUIRED_ACTION = "REQUIRED_ACTION"
 REQUIRED_KNOWLEDGE = "REQUIRED_KNOWLEDGE"
 REQUIRED_OBJECT = "REQUIRED_OBJECT"
@@ -10051,6 +10060,107 @@ def format_unresolved_review_block_message(
         "незакрытые обязательные SOURCE-фрагменты (NEEDS_REVIEW). "
         "DOCX как готовый документ не выдаётся. "
         + " | ".join(parts)
+    )
+
+
+def validate_manual_lesson_content(
+    row: LessonContentV2Row,
+    *,
+    planned_result: str,
+    assessment_method: str,
+) -> ManualContentValidation:
+    """Apply existing immutable gates without deriving or rewriting text.
+
+    A previous ``NEEDS_REVIEW`` is not copied into the manual candidate:
+    every REQUIRED source clause is proved again against the exact entered
+    RESULT.  Acceptance is evidence-based, never a boolean override.
+    """
+
+    result = (planned_result or "").strip()
+    control = (assessment_method or "").strip()
+    issues: list[str] = []
+    if not result:
+        issues.append("RESULT не заполнен")
+    if not control:
+        issues.append("CONTROL не заполнен")
+
+    role_map = dict(row.clause_roles)
+    coverage: list[tuple[str, str]] = []
+    for clause, _prior_status in row.clause_coverage:
+        role = role_map.get(clause, REQUIRED_ACTION)
+        if not _role_is_required(role):
+            coverage.append((clause, _OPTIONAL_COVERAGE_STATUS))
+            continue
+        preserved = bool(result) and _clause_meaning_preserved_in_result(
+            clause,
+            result,
+            topic_title=row.source.topic_title,
+            theory_hours=row.source.theory_hours,
+            practice_hours=row.source.practice_hours,
+        )
+        coverage.append((clause, "COVERED" if preserved else "NEEDS_REVIEW"))
+        if not preserved:
+            issues.append(f"RESULT не сохраняет обязательный SOURCE: {clause}")
+        if _r13_must_abstain_action_reconstruction(clause):
+            issues.append(
+                "R13: SOURCE требует fail-closed проверки и не допускает "
+                "ручного подтверждения как положительного действия ученика"
+            )
+
+    candidate = ContentEngineV2Result(
+        frame=ActionFrame(
+            row.source.program_content_full,
+            row.action,
+            row.object,
+            row.conditions,
+        ),
+        lesson_type=row.lesson_type,
+        planned_result=result,
+        assessment_method=control,
+        theory_text=row.theory_text,
+        practice_text=row.practice_text,
+        warnings=(),
+        clause_coverage=tuple(coverage),
+        clause_roles=row.clause_roles,
+    )
+    if result:
+        grammar_probe = _apply_result_grammar_gate(
+            candidate,
+            topic_title=row.source.topic_title,
+            theory_text=row.theory_text,
+            practice_text=row.practice_text,
+            program_content=row.source.program_content_full,
+            theory_hours=row.source.theory_hours,
+            practice_hours=row.source.practice_hours,
+        )
+        if grammar_probe.planned_result != result or any(
+            status == "NEEDS_REVIEW"
+            and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+            for clause, status in grammar_probe.clause_coverage
+        ):
+            issues.append("RESULT не прошёл существующий grammar gate")
+
+    source_context = _normalize_spaces(
+        f"{row.theory_text} {row.practice_text} {row.source.program_content_full}"
+    )
+    issues.extend(_blocking_grammar_issues(result, control, source_context))
+    if result and control and not _control_covers_all_result_items(result, control):
+        issues.append("CONTROL не покрывает все RESULT-items")
+    issues.extend(_rc_verbosity_block_reasons(result, control))
+    unique_issues = tuple(dict.fromkeys(issues))
+    validated_row = replace(
+        row,
+        planned_result=result,
+        assessment_method=control,
+        clause_coverage=tuple(coverage),
+        warnings=tuple(
+            warning for warning in row.warnings if "NEEDS_REVIEW" not in warning
+        ),
+    )
+    return ManualContentValidation(
+        accepted=not unique_issues,
+        row=validated_row,
+        issues=unique_issues,
     )
 
 

@@ -35,6 +35,15 @@ from calendar_pedagoga.organization_template import CalendarTemplateSelection
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import build_schedule
+from calendar_pedagoga.generator_revision import generator_revision
+from calendar_pedagoga.semantic_review import (
+    ManualSemanticConfirmation,
+    SemanticReviewCase,
+    apply_manual_semantic_confirmations,
+    build_review_context_fingerprint,
+    build_semantic_review_cases,
+    review_context_fingerprint_from_rows,
+)
 
 
 # Внутренний флаг. True = CE 2.0 в UI-пайплайне. False мгновенно возвращает CE 1.0.
@@ -43,6 +52,34 @@ USE_CONTENT_ENGINE_V2 = True
 
 class PipelineError(RuntimeError):
     """Операция формирования календаря не может быть завершена."""
+
+
+class SemanticReviewRequired(PipelineError):
+    """Structured fail-closed result for unresolved CE2 weeks."""
+
+    status = "REVIEW_REQUIRED"
+
+    def __init__(
+        self,
+        review_cases: tuple[SemanticReviewCase, ...],
+        *,
+        confirmation_errors: tuple[tuple[str, tuple[str, ...]], ...] = (),
+        accepted_review_ids: tuple[str, ...] = (),
+    ) -> None:
+        self.review_cases = review_cases
+        self.confirmation_errors = confirmation_errors
+        self.accepted_review_ids = accepted_review_ids
+        blocks = tuple(
+            (case.week_number, case.reasons or case.required_clauses)
+            for case in review_cases
+        )
+        message = format_unresolved_review_block_message(blocks)
+        if not message and confirmation_errors:
+            message = (
+                "Календарный план не готов: подтверждения semantic review "
+                "недействительны или устарели."
+            )
+        super().__init__(message)
 
 
 def _content_engine_v2_enabled(override: bool | None) -> bool:
@@ -70,13 +107,35 @@ def _build_pipeline_lesson_content(
     content_rows: tuple[CalendarContentRow, ...],
     *,
     use_content_engine_v2: bool,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    review_context_fingerprint: str | None = None,
+    semantic_revision: str | None = None,
 ) -> tuple[LessonContentRow, ...]:
     if use_content_engine_v2:
         v2_rows = build_lesson_content_v2(content_rows)
         blocks = unresolved_mandatory_review_blocks(v2_rows)
-        if blocks:
-            raise PipelineError(format_unresolved_review_block_message(blocks))
-        return _lesson_rows_from_v2(v2_rows)
+        if not blocks:
+            return _lesson_rows_from_v2(v2_rows)
+        context = review_context_fingerprint or review_context_fingerprint_from_rows(
+            v2_rows,
+            semantic_revision=semantic_revision or generator_revision(),
+        )
+        cases = build_semantic_review_cases(
+            v2_rows,
+            context_fingerprint=context,
+        )
+        application = apply_manual_semantic_confirmations(
+            v2_rows,
+            cases,
+            manual_confirmations,
+        )
+        if application.pending_cases or application.errors:
+            raise SemanticReviewRequired(
+                application.pending_cases,
+                confirmation_errors=application.errors,
+                accepted_review_ids=application.accepted_review_ids,
+            )
+        return _lesson_rows_from_v2(application.rows)
     return build_lesson_content(content_rows)
 
 
@@ -117,6 +176,8 @@ def run_calendar_pipeline(
     teacher_name: str | None = None,
     use_content_engine_v2: bool | None = None,
     match_reviews: Mapping | None = None,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    semantic_revision: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> PipelineResult:
     """Выполнить полный конвейер формирования календарного плана."""
@@ -140,9 +201,20 @@ def run_calendar_pipeline(
         match_reviews=match_reviews,
     )
     use_ce2 = _content_engine_v2_enabled(use_content_engine_v2)
+    revision = semantic_revision or generator_revision()
+    review_context = build_review_context_fingerprint(
+        plan=confirmed,
+        program=program,
+        academic_year=academic_year,
+        schedule=schedule,
+        semantic_revision=revision,
+    )
     lesson_rows = _build_pipeline_lesson_content(
         content_rows,
         use_content_engine_v2=use_ce2,
+        manual_confirmations=manual_confirmations,
+        review_context_fingerprint=review_context,
+        semantic_revision=revision,
     )
 
     ai_result = None
