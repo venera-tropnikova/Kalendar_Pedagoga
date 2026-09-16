@@ -11,7 +11,7 @@ from calendar_pedagoga.academic_year import (
     missing_local_exceptions_warning,
     normalize_academic_year,
 )
-from calendar_pedagoga.parsing import Topic, UtpParseResult
+from calendar_pedagoga.parsing import HourValue, Topic, UtpParseResult
 
 
 MONTHS = {
@@ -42,7 +42,7 @@ class ScheduledElement:
     topic_number: str | None
     topic: str
     part_type: str
-    hours: int
+    hours: HourValue
     week: AcademicWeek
 
 
@@ -139,7 +139,7 @@ def build_schedule(
     weeks = build_academic_weeks(academic_year, weeks_count)
     elements: list[ScheduledElement] = []
     week_index = 0
-    used = 0
+    used: HourValue = 0
     for topic in ordered_topics(utp):
         for part_type, amount in (
             ("theory", topic.hours.theory),

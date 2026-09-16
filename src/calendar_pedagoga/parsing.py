@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from io import BytesIO
 from itertools import zip_longest
 from pathlib import Path
@@ -12,11 +13,14 @@ from typing import BinaryIO
 from docx import Document
 
 
+HourValue = int | Decimal
+
+
 @dataclass(frozen=True)
 class Hours:
-    total: int
-    theory: int
-    practice: int
+    total: HourValue
+    theory: HourValue
+    practice: HourValue
 
 
 @dataclass(frozen=True)
@@ -77,12 +81,20 @@ def _match(text: str, pattern: str) -> str | None:
     return _clean(found.group(1)) if found else None
 
 
-def _integer(value: str | None) -> int:
+def _hour_value(value: str | None) -> HourValue:
     cleaned = _clean(value or "")
     if not cleaned or cleaned in {"-", "–", "—"}:
         return 0
-    found = re.search(r"\d+", cleaned)
-    return int(found.group()) if found else 0
+    found = re.search(r"\d+(?:[.,]\d+)?", cleaned)
+    if found is None:
+        return 0
+    token = found.group().replace(",", ".")
+    if "." not in token:
+        return int(token)
+    value_decimal = Decimal(token)
+    if value_decimal == value_decimal.to_integral_value():
+        return int(value_decimal)
+    return value_decimal.normalize()
 
 
 def _number_and_title(value: str) -> tuple[str | None, str]:
@@ -189,7 +201,7 @@ def _parse_numbered_hours_rows(
         title = cells[title_idx] if title_idx < len(cells) else ""
         blob = " ".join(cells)
         if re.search(r"\bитого\b", blob, re.IGNORECASE):
-            totals = Hours(*(_integer(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
+            totals = Hours(*(_hour_value(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
             continue
         number, label_title = _number_and_title(label)
         if number is None:
@@ -197,7 +209,7 @@ def _parse_numbered_hours_rows(
                 continue
             continue
         started = True
-        hours = Hours(*(_integer(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
+        hours = Hours(*(_hour_value(cells[i]) if i < len(cells) else 0 for i in hour_idxs))
         if "." not in number:
             section_title = label_title or _number_and_title(title)[1]
             current_section = section_title
@@ -231,12 +243,12 @@ def _parse_six_column_table(
             continue
         label, title = cells[0], cells[2] or cells[1]
         if re.match(r"^итого\b", title, re.IGNORECASE):
-            totals = Hours(*(_integer(cells[i]) for i in (3, 4, 5)))
+            totals = Hours(*(_hour_value(cells[i]) for i in (3, 4, 5)))
             continue
         number, label_title = _number_and_title(label)
         if number is None:
             continue
-        hours = Hours(*(_integer(cells[i]) for i in (3, 4, 5)))
+        hours = Hours(*(_hour_value(cells[i]) for i in (3, 4, 5)))
         if "." not in number:
             section_title = label_title or _number_and_title(title)[1]
             current_section = section_title
@@ -267,7 +279,7 @@ def _parse_compact_table(
         cells = [cell.text for cell in row.cells]
         raw_title = cells[0].strip()
         if "всего часов" in _clean(raw_title).lower():
-            totals = Hours(*(_integer(cells[i]) for i in (1, 2, 3)))
+            totals = Hours(*(_hour_value(cells[i]) for i in (1, 2, 3)))
             continue
         title_paragraphs = [
             paragraph for paragraph in row.cells[0].paragraphs if _clean(paragraph.text)
@@ -305,7 +317,7 @@ def _parse_compact_table(
             title: str,
             raw_values: tuple[str, str, str],
         ) -> Hours:
-            hours = Hours(*(_integer(value) for value in raw_values))
+            hours = Hours(*(_hour_value(value) for value in raw_values))
             if hours.total != hours.theory + hours.practice:
                 position_label = " ".join(part for part in (number, title) if part)
                 raise CompactTableParseError(

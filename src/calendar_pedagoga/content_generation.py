@@ -17,7 +17,7 @@ from calendar_pedagoga.matching import (
     match_utp_to_program,
     normalize_title,
 )
-from calendar_pedagoga.parsing import UtpParseResult
+from calendar_pedagoga.parsing import HourValue, UtpParseResult
 from calendar_pedagoga.program_parsing import (
     ProgramContentItem,
     ProgramData,
@@ -31,8 +31,8 @@ class WeekTopicPart:
     topic_number: str | None
     topic_title: str
     section: str
-    theory_hours: int
-    practice_hours: int
+    theory_hours: HourValue
+    practice_hours: HourValue
     match_status: MatchStatus
     program_section: str
     program_topic: str
@@ -52,9 +52,9 @@ class CalendarContentRow:
     topic_number: str | None
     topic_title: str
     source_topic_title: str
-    theory_hours: int
-    practice_hours: int
-    total_hours: int
+    theory_hours: HourValue
+    practice_hours: HourValue
+    total_hours: HourValue
     match_status: MatchStatus
     program_section: str
     program_topic: str
@@ -354,7 +354,7 @@ def build_content_model(
         key = (element.week.number, element.topic_number, element.topic, element.section)
         if key not in grouped:
             grouped[key] = {"element": element, "theory": 0, "practice": 0}
-        grouped[key][element.part_type] = int(grouped[key][element.part_type]) + element.hours
+        grouped[key][element.part_type] = grouped[key][element.part_type] + element.hours
 
     section_content: dict[
         tuple[tuple[int, str | None, str, str], str],
@@ -387,7 +387,7 @@ def build_content_model(
                         data["element"].section,
                     )
                     == topic_key_value
-                    and int(data[part_type]) > 0
+                    and data[part_type] > 0
                 ]
                 assigned = _assign_section_blocks(
                     blocks,
@@ -442,8 +442,8 @@ def build_content_model(
                 warnings = (f"Тема УТП «{element.topic}» не сопоставлена с программой.",)
         else:
             warnings = ()
-        theory = int(data["theory"])
-        practice = int(data["practice"])
+        theory = data["theory"]
+        practice = data["practice"]
         assigned_parts = [
             section_content[(group_key, part_type)]
             for part_type in ("theory", "practice")
