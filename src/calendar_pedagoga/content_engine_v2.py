@@ -5710,6 +5710,15 @@ def _control_has_long_result_quotes(control: str) -> bool:
     return bool(re.search(r"«[^»]{72,}»", text))
 
 
+def _control_quotes_result_action(control: str) -> bool:
+    """True only for quoted finite RESULT wording, not quoted game names."""
+
+    for quoted in re.findall(r"«([^»]+)»", control or ""):
+        if _leading_finite_verb(quoted):
+            return True
+    return False
+
+
 def _control_nearly_duplicates_result(result: str, control: str) -> bool:
     control_text = _normalize_spaces(control)
     result_text = _normalize_spaces(result)
@@ -5732,6 +5741,8 @@ def _rc_verbosity_block_reasons(result: str, control: str) -> tuple[str, ...]:
         reasons.append("RESULT/CONTROL содержат повторяющийся каталог ОФП")
     if _control_has_long_result_quotes(control):
         reasons.append("CONTROL содержит длинные цитаты RESULT")
+    if _control_quotes_result_action(control):
+        reasons.append("CONTROL цитирует RESULT вместо semantic labels")
     return tuple(reasons)
 
 
@@ -5811,8 +5822,140 @@ def _shorten_control_action_phrase(phrase: str, *, limit: int = 70) -> str:
     return shortened or (verb or phrase[:limit])
 
 
+def _control_label_without_dosage(obj: str) -> str:
+    """Keep the semantic label and conditions; dosage stays authoritative in RESULT."""
+
+    label = _compress_exercise_catalogues_in_text(obj)
+    for marker in _dosage_markers(label):
+        label = label.replace(marker, "")
+    label = re.sub(r"\(\s*\)", "", label)
+    label = re.sub(r"(?i)\(?\s*приложение\s*№?\s*\d+\s*\)?", "", label)
+    label = re.sub(r"\s+([,;:.])", r"\1", label)
+    return _normalize_spaces(label).strip(" ,.;")
+
+
+def _compact_control_skill_label(label: str) -> str:
+    """Keep the assessed skill head while RESULT retains its full evidence."""
+
+    compact = _normalize_spaces(label).strip(" ,.;")
+    # Named examples remain mandatory in RESULT, but CONTROL assesses the
+    # semantic game/exercise category before the explanatory colon.
+    if ":" in compact:
+        head, tail = compact.split(":", 1)
+        if "«" in tail or "»" in tail:
+            compact = head
+    compact = re.sub(
+        r"(?i)\b(игр\w+\s+на\s+(?:развитие\s+)?[^:;,.]+?)\s+"
+        r"\1(?=\s*[:;,.]|$)",
+        r"\1",
+        compact,
+    )
+    return _normalize_spaces(compact).strip(" ,.;")
+
+
+def _compact_control_labels(obj: str) -> list[str]:
+    """Return ordered skill labels, not a restatement of the whole RESULT.
+
+    Dosage-bearing coordinated items are independently recoverable, so each
+    can contribute its own semantic head.  Otherwise fail closed to one
+    shortened object that still retains its first checkable noun.
+    """
+
+    cleaned = _control_label_without_dosage(obj)
+    if not cleaned:
+        return []
+    items = _split_week_action_items(obj)
+    dosage_items = [_action_item_dosage(item) for item in items]
+    if len(items) > 1 and all(item is not None for item in dosage_items):
+        candidates = [
+            _control_label_without_dosage(item[0])
+            for item in dosage_items
+            if item is not None
+        ]
+    else:
+        candidates = [cleaned]
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        label = _compact_control_skill_label(candidate)
+        key = label.casefold().replace("ё", "е")
+        if label and key not in seen:
+            seen.add(key)
+            labels.append(label)
+    return labels
+
+
+def _control_requires_case_rebuild(control: str) -> bool:
+    """Detect supported malformed labels that must be rebuilt from RESULT."""
+
+    text = _normalize_spaces(control)
+    return bool(
+        re.search(
+            r"(?i)\bна\s+[а-яё-]+(?:ых|их)\s+[а-яё-]+(?:ов|ев|ёв|ей|ий|ств)\b",
+            text,
+        )
+        or re.search(
+            r"(?i)\bи\s+[а-яё-]+(?:ов|ев|ёв|ей|ствий|ений|аний|яний|ок)\b",
+            text,
+        )
+        or re.search(r"(?i)(?:^|[:,;]\s*)играх\b", text)
+    )
+
+
+def _semantic_labels_control(result: str) -> str:
+    """Build one CONTROL from compact RESULT labels without quoting predicates."""
+
+    compact_result = _strip_result_provenance_context(
+        _compress_exercise_catalogues_in_text(result)
+    )
+    segments = _result_control_segments(compact_result)
+    if not segments:
+        return ""
+
+    knowledge = [
+        obj for verb, obj in segments if verb in _KNOWLEDGE_RESULT_VERBS and obj
+    ]
+    # A colon introduces unchanged, already-proven RESULT objects without a
+    # lossy suffix-based attempt to manufacture dative government for a long
+    # coordinated list.
+    oral = "устный опрос: " + _join_and(knowledge) if knowledge else ""
+
+    observed_labels: list[str] = []
+    observed_seen: set[str] = set()
+    for verb, obj in segments:
+        if verb in _KNOWLEDGE_RESULT_VERBS or not obj:
+            continue
+        if not (_VERB_TO_VERBAL_NOUN.get(verb) or _FINITE_TO_NOUN.get(verb)):
+            return ""
+        compact_labels = _compact_control_labels(obj)
+        if not compact_labels:
+            return ""
+        if verb == "участвует":
+            compact_labels = [
+                "участие " + label if re.match(r"(?i)^в\s+", label) else label
+                for label in compact_labels
+            ]
+        for label in compact_labels:
+            key = label.casefold().replace("ё", "е")
+            if key not in observed_seen:
+                observed_seen.add(key)
+                observed_labels.append(label)
+
+    observed = ""
+    if observed_labels:
+        observed = "Педагогическое наблюдение: " + _join_and(observed_labels)
+    if oral and observed:
+        return f"{oral}; {observed}"
+    return oral or observed
+
+
 def _quoted_actions_control(result: str) -> str:
-    """Compact pedagogical CONTROL — never use RESULT wholesale quotes."""
+    """Legacy entry point: compact semantic CONTROL without RESULT quotations."""
+
+    semantic = _semantic_labels_control(result)
+    if semantic:
+        return semantic
 
     compact_result = _compress_exercise_catalogues_in_text(result)
     finite_sentences = [
@@ -5833,17 +5976,6 @@ def _quoted_actions_control(result: str) -> str:
 
     if re.search(r"(?i)\bили\b|\bпо выбору\b", compact_result):
         return "практическая проверка изделия по выбору"
-
-    parts: list[str] = []
-    for phrase in finite_sentences:
-        phrase = _shorten_control_action_phrase(phrase)
-        item = _format_control_action_quote(phrase)
-        if item.casefold() not in {part.casefold() for part in parts}:
-            parts.append(item)
-        if len(parts) >= 4:
-            break
-    if parts:
-        return "практическая проверка " + "; ".join(parts)
 
     rebuilt = _control_from_proven_result(compact_result)
     if rebuilt and not _control_has_long_result_quotes(rebuilt):
@@ -8177,18 +8309,47 @@ def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
     cite = _knowledge_cite_key(head)
     if not cite:
         return False
-    if obj == cite:
-        return True
+    variants = [cite]
+    acc = _knowledge_cite_key(_feminine_acc_citation(head))
+    proven = _proven_theory_object(head)
+    if proven:
+        variants.append(_knowledge_cite_key(proven))
+    for variant in dict.fromkeys(item for item in variants if item):
+        if obj == variant:
+            return True
+        # A compact knowledge sentence keeps each independently covered clause
+        # as a complete ordered list item under one shared predicate.
+        if re.search(
+            rf"(?:^|,\s+|\s+и\s+){re.escape(variant)}(?:$|,\s+|\s+и\s+)",
+            obj,
+        ):
+            return True
+        tokens = variant.split()
+        if len(tokens) > 1 and _common_semantic_head(variant):
+            shared_head = tokens[0]
+            factored_tail = " ".join(tokens[1:])
+            head_at = re.search(rf"(?:^|\s){re.escape(shared_head)}(?:\s|$)", obj)
+            tail_at = re.search(
+                rf"(?:^|,\s+|\s+и\s+){re.escape(factored_tail)}(?:$|,\s+|\s+и\s+)",
+                obj,
+            )
+            if head_at and tail_at and head_at.start() < tail_at.start():
+                return True
     if len(cite) >= 8 and (
         obj.startswith(cite + ",")
         or obj.startswith(cite + " ")
         or f"характеризует {cite}" in obj
     ):
         return True
-    acc = _knowledge_cite_key(_feminine_acc_citation(head))
-    return bool(acc) and (
+    if bool(acc) and (
         obj == acc or obj.startswith(acc + ",") or obj.startswith(acc + " ")
-    )
+    ):
+        return True
+    # A grammar-only ending repair may stop being a literal SOURCE citation.
+    # It is still the same object only when every non-adjectival meaning stem
+    # from that clause remains present in the accepted knowledge object.
+    stems = _meaning_stems(head)
+    return bool(stems) and all(stem[:4] in obj for stem in stems)
 
 
 # Instrumental is the case of an activity complement, not of a knowledge field.
@@ -8300,14 +8461,26 @@ def _apply_result_grammar_gate(
             continue
         if _result_grammar_issue(sentence) != "unproven_knowledge_object_case":
             continue
-        if not _admissible_knowledge_object(_knowledge_result_object(sentence)):
-            continue
-        for clause, status in original.clause_coverage:
-            if status != "COVERED" or not _knowledge_result_cites_clause(sentence, clause):
-                continue
+        verb = _leading_finite_verb(sentence)
+        cited = [
+            clause
+            for clause, status in original.clause_coverage
+            if status == "COVERED"
+            and _knowledge_result_cites_clause(sentence, clause)
+            and (
+                (obj := (
+                    _proven_theory_object(clause)
+                    or _feminine_acc_citation(clause)
+                    or _normalize_spaces(clause).strip(" .")
+                ))
+                and _knowledge_object_safe_to_fold(
+                    f"{verb} {obj}.", verb, obj
+                )
+            )
+        ]
+        if cited:
             replacements[sentence] = sentence
-            restored.add(clause)
-            break
+            restored.update(cited)
     source_text = _normalize_spaces(f"{theory_text} {program_content}")
     knowledge_source = any(_is_theory_knowledge_token(word) for word in source_text.split())
     for sentence in rejected if knowledge_source else ():
@@ -8468,7 +8641,10 @@ def _rebuild_control_from_accepted_result(
 
     if not _normalize_spaces(result).strip():
         return _normalize_spaces(control)
-    if _control_covers_all_result_items(result, control):
+    repeated_oral = len(
+        re.findall(r"(?i)\bустный опрос(?:\s+по|:)", control)
+    ) > 1
+    if _control_covers_all_result_items(result, control) and not repeated_oral:
         return control
     # Named-form CONTROL is valid only for a single named activity RESULT.
     sentences = [s for s in _result_sentences(result) if _leading_finite_verb(s)]
@@ -9130,13 +9306,26 @@ def _rebuild_control_before_final_gate(
             control = rebuilt
     control = _prefer_quoted_control_if_incomplete(result, control)
     control = _unified_process_performance_control(result, control)
-    return _rebuild_control_from_accepted_result(
+    control = _rebuild_control_from_accepted_result(
         result,
         control,
         lesson_type=lesson_type,
         theory_hours=theory_hours,
         practice_hours=practice_hours,
     )
+    compact = _semantic_labels_control(result)
+    if (
+        compact
+        and _control_covers_all_result_items(result, compact)
+        and (
+            len(compact) < len(control)
+            or _control_quotes_result_action(control)
+            or "приложение" in control.casefold()
+            or _control_requires_case_rebuild(control)
+        )
+    ):
+        control = compact
+    return control
 
 
 def _finalize_content_fields(
@@ -9554,6 +9743,303 @@ def _vary_repeated_independent_characterize(sentences: list[str]) -> list[str]:
     return rewritten
 
 
+_COMPACT_KNOWLEDGE_PREDICATES = frozenset({"характеризует", "называет"})
+
+
+def _balanced_fold_object(text: str) -> bool:
+    """Only self-contained objects may enter a shared predicate list."""
+
+    pairs = (("(", ")"), ("[", "]"), ("{", "}"), ("«", "»"), ("„", "“"))
+    for opening, closing in pairs:
+        depth = 0
+        for char in text:
+            if char == opening:
+                depth += 1
+            elif char == closing:
+                depth -= 1
+                if depth < 0:
+                    return False
+        if depth:
+            return False
+    return text.count('"') % 2 == 0
+
+
+_COMMON_SEMANTIC_HEAD_STEMS = (
+    "упражнен",
+    "игр",
+    "техник",
+    "лазан",
+    "страхов",
+)
+
+
+def _strip_result_provenance_context(result: str) -> str:
+    """Remove appendix references that are SOURCE provenance, not outcomes."""
+
+    cleaned = re.sub(
+        r"(?i)\(\s*(?:выполняет\s+)?приложение\s*№?\s*\d+\s*\)",
+        "",
+        result or "",
+    )
+    cleaned = re.sub(
+        r"(?i)(?:^|(?<=[.!?])\s+)выполняет\s+приложение\s*№?\s*\d+\s*\.?",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+([.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\.\s*){2,}", ". ", cleaned)
+    return _normalize_spaces(cleaned).strip()
+
+
+def _common_semantic_head(text: str) -> str:
+    """Return only a grammar-backed head family allowed for factoring."""
+
+    first = _normalize_spaces(text).split()[:1]
+    if not first:
+        return ""
+    token = _strip_punct_word(first[0])[1].casefold().replace("ё", "е")
+    return next((stem for stem in _COMMON_SEMANTIC_HEAD_STEMS if token.startswith(stem)), "")
+
+
+def _unwrap_redundant_action_wrapper(verb: str, obj: str) -> str:
+    """Drop only a proven action wrapper whose finite predicate already carries it."""
+
+    normalized = _normalize_spaces(obj).strip(" ,.;")
+    if verb.casefold() != "отрабатывает":
+        return normalized
+    match = re.fullmatch(
+        r"(?i)техник[ауи]\s+выполнения\s+(упражнен\w+)(\s+.+)",
+        normalized,
+    )
+    if match is None:
+        return normalized
+    # Under «Отрабатывает» the repeated nominal wrapper adds no independent
+    # meaning. The exercise relation, object, condition and dosage stay intact.
+    return _normalize_spaces("упражнения" + match.group(2))
+
+
+def _safe_common_head_factor(verb: str, objects: list[str]) -> str | None:
+    """Factor one homogeneous object run while retaining every ordered tail."""
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for obj in objects:
+        normalized = _unwrap_redundant_action_wrapper(verb, obj)
+        key = normalized.casefold().replace("ё", "е")
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(normalized)
+    if len(unique) < 2:
+        return unique[0] if unique else None
+    if any(
+        not _balanced_fold_object(obj)
+        or any(mark in obj for mark in ";:!?")
+        or any(
+            _is_action_finite_token(token)
+            for token in re.findall(r"[А-Яа-яЁё]+", obj)
+        )
+        for obj in unique
+    ):
+        return None
+    heads = [_common_semantic_head(obj) for obj in unique]
+    if not heads[0] or len(set(heads)) != 1:
+        return None
+    dosed = [_action_item_dosage(obj) for obj in unique]
+    if all(item is not None for item in dosed):
+        # Dosage-bearing frames stay whole here. The dedicated frame compactor
+        # below may merge exact labels, while different conditions/difficulties
+        # retain an explicit action object next to every dosage.
+        return None
+
+    tokenized = [obj.split() for obj in unique]
+    prefix_len = 0
+    while all(len(tokens) > prefix_len for tokens in tokenized):
+        if any("(" in tokens[prefix_len] or ")" in tokens[prefix_len] for tokens in tokenized):
+            break
+        values = {
+            tokens[prefix_len].casefold().replace("ё", "е")
+            for tokens in tokenized
+        }
+        if len(values) != 1:
+            break
+        prefix_len += 1
+    if not prefix_len:
+        return None
+    # A shared preposition alone does not prove a shared relation:
+    # «упражнения на развитие ... / на равновесие» keeps both full tails.
+    while prefix_len > 1 and tokenized[0][prefix_len - 1].casefold() in _PREPOSITIONS:
+        prefix_len -= 1
+
+    suffix_len = 0
+    while all(len(tokens) - prefix_len > suffix_len for tokens in tokenized):
+        if any("(" in tokens[-1 - suffix_len] or ")" in tokens[-1 - suffix_len] for tokens in tokenized):
+            break
+        values = {
+            tokens[-1 - suffix_len].casefold().replace("ё", "е")
+            for tokens in tokenized
+        }
+        if len(values) != 1:
+            break
+        suffix_len += 1
+    middles = [
+        tokens[prefix_len : len(tokens) - suffix_len if suffix_len else None]
+        for tokens in tokenized
+    ]
+    if any(not middle for middle in middles):
+        return None
+
+    prefix = " ".join(tokenized[0][:prefix_len])
+    middle_text = _join_and([" ".join(middle) for middle in middles])
+    suffix = " ".join(tokenized[0][-suffix_len:]) if suffix_len else ""
+    if prefix_len == 1 and all(
+        middle[0].casefold() in _PREPOSITIONS for middle in middles
+    ):
+        return _normalize_spaces(f"{prefix}: {middle_text} {suffix}")
+    return _normalize_spaces(f"{prefix} {middle_text} {suffix}")
+
+
+def _factor_common_head_object_runs(verb: str, objects: list[str]) -> list[str]:
+    """Factor only consecutive objects sharing one proven semantic head."""
+
+    factored: list[str] = []
+    index = 0
+    while index < len(objects):
+        head = _common_semantic_head(
+            _unwrap_redundant_action_wrapper(verb, objects[index])
+        )
+        end = index + 1
+        while head and end < len(objects):
+            following = _common_semantic_head(
+                _unwrap_redundant_action_wrapper(verb, objects[end])
+            )
+            if following != head:
+                break
+            end += 1
+        run = objects[index:end]
+        compact = _safe_common_head_factor(verb, run) if len(run) > 1 else None
+        if compact is not None:
+            factored.append(compact)
+        else:
+            factored.extend(run)
+        index = end
+    return factored
+
+
+def _render_predicate_objects(verb: str, objects: list[str]) -> str:
+    compact = _factor_common_head_object_runs(verb, objects)
+    if not compact:
+        return ""
+    if len(compact) == 1:
+        return compact[0]
+    return (
+        ", ".join(compact)
+        if any(" и " in item or "," in item for item in compact)
+        else _join_and(compact)
+    )
+
+
+def _practice_object_safe_to_fold(obj: str) -> bool:
+    """Reject punctuation whose scope cannot be proved after sentence joining."""
+
+    return bool(obj) and _balanced_fold_object(obj) and not any(
+        mark in obj for mark in ";:!?"
+    )
+
+
+def _knowledge_object_safe_to_fold(sentence: str, verb: str, obj: str) -> bool:
+    """Prove one object independently before it shares a knowledge predicate."""
+
+    normalized = _normalize_spaces(sentence).strip()
+    if not obj or _leading_finite_verb(normalized).casefold() != verb.casefold():
+        return False
+    if "по теме" in normalized.casefold() or any(mark in obj for mark in ";:!?"):
+        return False
+    if not _balanced_fold_object(obj):
+        return False
+    if any(
+        _is_action_finite_token(token)
+        for token in re.findall(r"[А-Яа-яЁё]+", obj)
+    ):
+        return False
+    issue = _result_grammar_issue(
+        normalized if normalized.endswith(".") else normalized + "."
+    )
+    if not issue:
+        return True
+    if issue != "unproven_knowledge_object_case" or verb.casefold() != "характеризует":
+        return False
+    if not _admissible_knowledge_object(obj):
+        return False
+    # A SOURCE citation may legitimately have an inanimate nominative-looking
+    # head whose accusative form is identical. Do not extend that allowance to
+    # a clearly oblique head (e.g. «правилу»): the final SOURCE-aware grammar
+    # gate will prove every retained list item separately.
+    tokens = _normalize_spaces(obj).split()
+    head = next((token for token in tokens if not _is_adjective(token)), "")
+    core = _strip_punct_word(head)[1]
+    if not core or _proven_feminine_acc_form(core):
+        return bool(core)
+    return not core.casefold().endswith(("ому", "ему", "ым", "им", "у", "ю"))
+
+
+def _fold_safe_knowledge_predicate_runs(sentences: list[str]) -> list[str]:
+    """Fold consecutive equal knowledge predicates, or keep the whole run."""
+
+    folded: list[str] = []
+    index = 0
+    while index < len(sentences):
+        first = sentences[index]
+        verb = _leading_finite_verb(first)
+        key = verb.casefold()
+        if key not in _COMPACT_KNOWLEDGE_PREDICATES:
+            folded.append(first)
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(sentences):
+            following = _leading_finite_verb(sentences[end]).casefold()
+            if following != key:
+                break
+            end += 1
+        run = sentences[index:end]
+        if len(run) < 2:
+            folded.extend(run)
+            index = end
+            continue
+
+        objects = [_drop_leading_verb(item).rstrip(" .") for item in run]
+        if not all(
+            _knowledge_object_safe_to_fold(item, verb, obj)
+            for item, obj in zip(run, objects)
+        ):
+            folded.extend(run)
+            index = end
+            continue
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for obj in objects:
+            normalized = _normalize_spaces(obj)
+            object_key = normalized.casefold().replace("ё", "е")
+            if object_key in seen:
+                continue
+            seen.add(object_key)
+            unique.append(normalized)
+        listed = _render_predicate_objects(verb, unique)
+        compact = _cap_sentence(f"{verb} {listed}") if listed else ""
+        # The combined object chain must also pass; otherwise no sentence in
+        # the run is changed, including exact duplicates.
+        combined_issue = _result_grammar_issue(compact) if compact else "empty"
+        if combined_issue not in {"", "unproven_knowledge_object_case"}:
+            folded.extend(run)
+        else:
+            folded.append(compact)
+        index = end
+    return folded
+
+
 def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
     """One predicate per run of actions that share it; every object is kept.
 
@@ -9563,6 +10049,7 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
     stay consecutive-only so independent theory sentences are not reordered.
     """
 
+    sentences = _fold_safe_knowledge_predicate_runs(sentences)
     resumable = frozenset(
         {
             "определяет",
@@ -9594,11 +10081,7 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
     def flush() -> None:
         nonlocal verb, objects
         if objects:
-            listed = (
-                ", ".join(objects)
-                if any(" и " in item or "," in item for item in objects)
-                else _join_and(objects)
-            )
+            listed = _render_predicate_objects(verb, objects)
             folded.append(_cap_sentence(f"{verb} {listed}"))
             if verb:
                 slots[verb.casefold()] = objects
@@ -9627,19 +10110,27 @@ def _fold_repeated_predicates(sentences: list[str]) -> list[str]:
             flush()
             folded.append(sentence if sentence.endswith((".", "!", "?")) else f"{sentence}.")
             continue
+        if verb and verb.casefold() == key and (
+            not _practice_object_safe_to_fold(obj)
+            or any(not _practice_object_safe_to_fold(item) for item in objects)
+        ):
+            flush()
         # A finished colon enumeration must not absorb a later independent action.
-        if key in resumable and key in slots and not any(":" in item for item in slots[key]):
+        if (
+            key in resumable
+            and key in slots
+            and _practice_object_safe_to_fold(obj)
+            and not any(
+                ":" in item or "," in item or " и " in item for item in slots[key]
+            )
+        ):
             prior = slots[key]
             if obj.casefold() not in {item.casefold() for item in prior}:
                 prior.append(obj)
             # Rewrite the already folded sentence that owns this verb.
             for index, item in enumerate(folded):
                 if _leading_finite_verb(item).casefold() == key:
-                    listed = (
-                        ", ".join(prior)
-                        if any(" и " in part or "," in part for part in prior)
-                        else _join_and(prior)
-                    )
+                    listed = _render_predicate_objects(current, prior)
                     folded[index] = _cap_sentence(f"{current} {listed}")
                     break
             continue
@@ -9858,8 +10349,11 @@ def _fold_week_result(result: str) -> str:
     proven, so listing their objects adds nothing and removes nothing.
     """
 
+    result_without_provenance = _strip_result_provenance_context(result)
     folded = _normalize_spaces(
-        " ".join(_fold_repeated_predicates(_result_sentences(result)))
+        " ".join(
+            _fold_repeated_predicates(_result_sentences(result_without_provenance))
+        )
     )
     folded = _compact_repeated_homogeneous_action_frames(folded)
     return _compress_exercise_catalogues_in_text(folded)
@@ -9903,7 +10397,7 @@ def _unified_process_performance_control(result: str, control: str) -> str:
 
 
 def _merge_independent_part_results(results: list[str]) -> str:
-    """Keep each topic's RESULT as its own sentence. Do not fold same verbs."""
+    """Keep topic order while safely folding equal knowledge predicates."""
 
     sentences: list[str] = []
     seen: set[str] = set()
@@ -9918,7 +10412,7 @@ def _merge_independent_part_results(results: list[str]) -> str:
             continue
         seen.add(key)
         sentences.append(text)
-    sentences = _vary_repeated_independent_characterize(sentences)
+    sentences = _fold_safe_knowledge_predicate_runs(sentences)
     return _normalize_spaces(" ".join(sentences))
 
 

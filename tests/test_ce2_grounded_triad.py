@@ -531,8 +531,10 @@ def test_multi_topic_week_keeps_independent_grounded_triads():
     assert "истори" in merged_low or "истори" in control_low or any(
         "NEEDS_REVIEW" in warning for warning in merged.warnings
     )
-    assert " и роль " not in merged_low
-    assert "; " in merged.assessment_method or merged.assessment_method.count("устный опрос") >= 1
+    assert "историю прибора в городе" in merged_low
+    assert "роль прибора в обучении" in merged_low
+    assert merged.planned_result.count("Характеризует") == 1
+    assert merged.assessment_method.count("устный опрос") == 1
 
 
 @pytest.mark.parametrize(

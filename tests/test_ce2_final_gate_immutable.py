@@ -145,6 +145,49 @@ def test_fold_does_not_change_meaning_after_final_gate() -> None:
     assert "клетк" in refolded.casefold() and "мембран" in refolded.casefold()
 
 
+def test_knowledge_fold_keeps_every_source_clause_covered() -> None:
+    theory = "История прибора. Назначение прибора. Устройство прибора."
+    prepared = ContentEngineV2Result(
+        frame=ActionFrame(theory, "характеризует", "история прибора", ""),
+        lesson_type="теоретическое занятие",
+        planned_result=(
+            "Характеризует историю прибора. "
+            "Характеризует назначение прибора. "
+            "Характеризует устройство прибора."
+        ),
+        assessment_method=(
+            "устный опрос по истории прибора; "
+            "устный опрос по назначению прибора; "
+            "устный опрос по устройству прибора"
+        ),
+        theory_text=theory,
+        practice_text="",
+        clause_coverage=(
+            ("История прибора", "COVERED"),
+            ("Назначение прибора", "COVERED"),
+            ("Устройство прибора", "COVERED"),
+        ),
+    )
+
+    final = _finalize_content_fields(
+        prepared,
+        topic_title="Прибор",
+        theory_text=theory,
+        practice_text="",
+        program_content=theory,
+        theory_hours=2,
+        practice_hours=0,
+    )
+
+    assert final.planned_result == (
+        "Характеризует историю прибора, назначение прибора и устройство прибора."
+    )
+    assert final.assessment_method == (
+        "устный опрос: историю прибора, назначение прибора и устройство прибора"
+    )
+    assert all(status == "COVERED" for _, status in final.clause_coverage)
+
+
 def test_grammar_rejection_after_fold_demotes_clause() -> None:
     theory = "Строение клетки. Функции мембраны."
     candidate = ContentEngineV2Result(

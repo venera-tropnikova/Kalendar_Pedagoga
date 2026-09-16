@@ -334,6 +334,199 @@ def test_week_compaction_does_not_merge_different_difficulty() -> None:
     assert "сложных трасс (по 4 раза)" in result.casefold()
 
 
+def test_week_compaction_folds_three_characterize_objects() -> None:
+    result = _fold_week_result(
+        "Характеризует историю прибора. "
+        "Характеризует назначение прибора. "
+        "Характеризует устройство прибора."
+    )
+
+    assert result == (
+        "Характеризует историю прибора, назначение прибора и устройство прибора."
+    )
+
+
+def test_week_compaction_folds_three_named_objects() -> None:
+    result = _fold_week_result(
+        "Называет виды узлов. Называет виды страховки. Называет виды снаряжения."
+    )
+
+    assert result == "Называет виды узлов, виды страховки и виды снаряжения."
+
+
+def test_week_compaction_keeps_mixed_knowledge_predicates_in_two_groups() -> None:
+    result = _fold_week_result(
+        "Характеризует историю прибора. Характеризует устройство прибора. "
+        "Называет виды приборов. Называет части приборов."
+    )
+
+    assert result == (
+        "Характеризует историю прибора и устройство прибора. "
+        "Называет виды приборов и части приборов."
+    )
+
+
+def test_week_compaction_deduplicates_knowledge_object() -> None:
+    result = _fold_week_result(
+        "Характеризует историю прибора. Характеризует историю прибора."
+    )
+
+    assert result == "Характеризует историю прибора."
+
+
+def test_week_compaction_keeps_grammar_unsafe_knowledge_run() -> None:
+    source = (
+        "Характеризует историю прибора. "
+        "Характеризует правилу безопасного поведения."
+    )
+
+    assert _fold_week_result(source) == source
+
+
+def test_week_common_head_factors_three_ordered_objects() -> None:
+    result = _fold_week_result(
+        "Отрабатывает технику выполнения упражнений на развитие силовых качеств. "
+        "Отрабатывает технику выполнения упражнений на развитие координации. "
+        "Отрабатывает технику выполнения упражнений на развитие скоростных способностей."
+    )
+
+    assert result == (
+        "Отрабатывает упражнения на развитие силовых качеств, координации "
+        "и скоростных способностей."
+    )
+
+
+def test_week_common_head_keeps_ordered_dosage_vector() -> None:
+    result = _fold_week_result(
+        "Выполняет упражнения на равновесие (3 раза). "
+        "Выполняет упражнения на равновесие (4 раза)."
+    )
+
+    assert result == "Выполняет упражнения на равновесие (3 и 4 раза)."
+    assert "заданн" not in result.casefold()
+
+
+def test_week_common_head_preserves_different_conditions() -> None:
+    result = _fold_week_result(
+        "Выполняет упражнения на равновесие с опорой. "
+        "Выполняет упражнения на равновесие без опоры."
+    )
+
+    assert "с опорой" in result.casefold()
+    assert "без опоры" in result.casefold()
+
+
+def test_week_common_head_keeps_mixed_predicates_separate() -> None:
+    result = _fold_week_result(
+        "Выполняет упражнения на равновесие. "
+        "Отрабатывает технику страховки."
+    )
+
+    assert result == (
+        "Выполняет упражнения на равновесие. Отрабатывает технику страховки."
+    )
+
+
+def test_week_common_head_fails_closed_on_ambiguous_enumeration() -> None:
+    source = (
+        "Выполняет упражнения на пресс: подъём ног. "
+        "Выполняет упражнения на равновесие."
+    )
+
+    assert _fold_week_result(source) == source
+
+
+def test_appendix_reference_is_provenance_not_result() -> None:
+    source = (
+        "Выполнение упражнений на развитие мышц пресса (приложение №1). "
+        "Выполнение упражнений на равновесие (приложение №1)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Практика",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    assert "приложение" not in derived.planned_result.casefold()
+    assert "мышц пресса" in derived.planned_result.casefold()
+    assert "равновес" in derived.planned_result.casefold()
+    assert all(status == "COVERED" for _, status in derived.clause_coverage)
+
+
+def test_common_head_control_uses_semantic_labels_without_result_quotes() -> None:
+    source = (
+        "Выполнение упражнений на развитие мышц пресса. "
+        "Выполнение упражнений на равновесие."
+    )
+    derived = derive_fields_v2(
+        topic_title="Практика",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    control = derived.assessment_method.casefold()
+    assert control.startswith("педагогическое наблюдение:")
+    assert "мышц пресса" in control
+    assert "равновес" in control
+    assert "выполнение —" not in control
+    assert "«выполняет" not in control
+    assert all(status == "COVERED" for _, status in derived.clause_coverage)
+
+
+def test_control_compacts_dosage_items_to_ordered_skill_labels() -> None:
+    source = (
+        "Лазание лёгких трасс (по 3 раза). "
+        "Круговое ОФП (2 круга). "
+        "Коллективные приседания (40 раз)."
+    )
+    derived = derive_fields_v2(
+        topic_title="Практика",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    control = derived.assessment_method.casefold()
+    assert control.startswith("педагогическое наблюдение:")
+    assert "лазан" in control
+    assert "офп" in control
+    assert "приседан" in control
+    assert "3 раза" not in control
+    assert "2 круга" not in control
+    assert "40 раз" not in control
+    assert all(status == "COVERED" for _, status in derived.clause_coverage)
+
+
+def test_control_uses_game_skill_category_without_repeating_named_examples() -> None:
+    source = (
+        "Игры на развитие внимания: «Повторюшки», «Земля, вода, лава». "
+        "Игры на быстроту реакции: «Выше ноги от земли», «Твистер»."
+    )
+    derived = derive_fields_v2(
+        topic_title="Игры",
+        theory_text="",
+        practice_text=source,
+        program_content=source,
+        theory_hours=0,
+        practice_hours=2,
+    )
+
+    result = derived.planned_result.casefold()
+    control = derived.assessment_method.casefold()
+    assert "повторюшки" in result and "твистер" in result
+    assert "внимани" in control and "реакц" in control
+    assert "повторюшки" not in control and "твистер" not in control
+    assert all(status == "COVERED" for _, status in derived.clause_coverage)
+
+
 @pytest.mark.parametrize(
     "source",
     (

@@ -129,12 +129,13 @@ def test_theory_and_practice_topics_keep_both_triads() -> None:
     assert "тестирован" in low or "выполняет" in low
     assert merged.planned_result.casefold().count("характеризует") == 1
     chunks = [item.strip() for item in merged.assessment_method.split(";")]
-    assert any(item.startswith("устный опрос по") for item in chunks)
+    assert any(item.startswith("устный опрос:") for item in chunks)
     assert any(
-        item.startswith("педагогическое наблюдение") or item.startswith("проверка")
+        item.casefold().startswith("педагогическое наблюдение")
+        or item.casefold().startswith("проверка")
         for item in chunks
     )
-    oral = next(item for item in chunks if item.startswith("устный опрос по"))
+    oral = next(item for item in chunks if item.startswith("устный опрос:"))
     assert "рол" in oral.casefold()
     assert "сборк" not in oral.casefold()
 
@@ -204,7 +205,7 @@ def test_same_topic_objects_still_join_with_and() -> None:
     for clause, status in derived.clause_coverage:
         if status == "NEEDS_REVIEW":
             assert any(clause in warning for warning in derived.warnings), clause
-    assert derived.assessment_method.startswith("устный опрос по роли туризма")
+    assert derived.assessment_method.startswith("устный опрос: роль туризма")
     assert derived.assessment_method.count("устный опрос") == 1
     folded = _merge_part_results(
         [
@@ -233,7 +234,7 @@ def test_tp_w01_keeps_two_topic_triads() -> None:
     assert parts[0].topic_number != parts[1].topic_number
 
 
-def test_independent_characterize_role_uses_reveal_not_and() -> None:
+def test_independent_characterize_objects_share_one_predicate() -> None:
     folded = _merge_independent_part_results(
         [
             "Характеризует историю прибора в городе.",
@@ -241,26 +242,21 @@ def test_independent_characterize_role_uses_reveal_not_and() -> None:
         ]
     )
     assert folded == (
-        "Характеризует историю прибора в городе. "
-        "Раскрывает роль прибора в обучении."
+        "Характеризует историю прибора в городе и роль прибора в обучении."
     )
-    assert " и " not in folded
 
 
-def test_independent_characterize_keeps_unsafe_second_object() -> None:
+def test_independent_characterize_folds_safe_second_object() -> None:
     folded = _merge_independent_part_results(
         [
             "Характеризует историю прибора в городе.",
             "Характеризует строение прибора.",
         ]
     )
-    assert folded == (
-        "Характеризует историю прибора в городе. "
-        "Характеризует строение прибора."
-    )
+    assert folded == "Характеризует историю прибора в городе и строение прибора."
 
 
-def test_independent_characterize_reveal_only_for_safe_objects() -> None:
+def test_independent_characterize_folds_safe_objects() -> None:
     for obj in ("значение леса.", "назначение прибора.", "особенности маршрута."):
         folded = _merge_independent_part_results(
             [
@@ -268,9 +264,7 @@ def test_independent_characterize_reveal_only_for_safe_objects() -> None:
                 f"Характеризует {obj}",
             ]
         )
-        assert folded == (
-            f"Характеризует историю темы. Раскрывает {obj}"
-        )
+        assert folded == f"Характеризует историю темы и {obj}"
 
 
 def test_single_characterize_role_is_not_rewritten() -> None:

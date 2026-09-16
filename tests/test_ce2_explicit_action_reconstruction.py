@@ -132,9 +132,11 @@ def test_clothing_neighbor_not_glued_to_unrelated_technique_topic() -> None:
         theory_hours=2,
         practice_hours=0,
     )
-    # Independent knowledge clauses stay separate sentences after fold.
-    assert "постановки ног и одежд" not in derived.planned_result.casefold()
-    assert "одежд" in derived.planned_result.casefold()
+    # Independent objects keep their full meaning under one shared predicate.
+    low = derived.planned_result.casefold()
+    assert "основы техники постановки ног" in low
+    assert "одежду и обувь для занятия скалолазанием" in low
+    assert derived.planned_result.count("Характеризует") == 1
 
 
 def test_action_object_list_reconstructs_head() -> None:
