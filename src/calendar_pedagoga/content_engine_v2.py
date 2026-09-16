@@ -2911,6 +2911,14 @@ def _knowledge_head_span(tokens: list[str], index: int) -> list[str] | None:
     if expanded is None:
         return None
     start, heads, leftover = expanded
+    leading = tokens[:start]
+    safe_leading_modifiers = bool(leading) and all(
+        _is_adjective(token)
+        or _strip_punct_word(token)[1].casefold() in {"и", "или"}
+        for token in leading
+    )
+    if safe_leading_modifiers:
+        heads = [*(_decap_lexical(token) for token in leading), *heads]
     if _possessive_before(tokens, start):
         antecedent = _unique_possessive_antecedent(tokens, start)
         if not antecedent:
@@ -2926,6 +2934,23 @@ def _knowledge_head_span(tokens: list[str], index: int) -> list[str] | None:
         rest = [*heads, *leftover]
         return rest if _theory_object_span_ok(rest) else None
     return None
+
+
+def _knowledge_head_has_only_leading_modifiers(text: str) -> bool:
+    """A knowledge head preceded only by its agreeing modifier series."""
+
+    tokens = _normalize_spaces(text).strip(" .").split()
+    index = next(
+        (position for position, token in enumerate(tokens) if _is_theory_knowledge_token(token)),
+        None,
+    )
+    if index is None or index == 0:
+        return False
+    return all(
+        _is_adjective(token)
+        or _strip_punct_word(token)[1].casefold() in {"и", "или"}
+        for token in tokens[:index]
+    )
 
 
 def _knowledge_object_missing_owner(obj_text: str) -> bool:
@@ -3062,6 +3087,138 @@ def _characterize(text: str) -> tuple[str, str, str, str]:
         return "", "", "", ""
     phrase = _normalize_spaces("характеризует " + " ".join(part for part in (obj, cond) if part))
     return phrase, "характеризует", obj, cond
+
+
+def _nominal_knowledge_subject_number(text: str) -> str:
+    """Return a proven agreement number for a copied theory subject.
+
+    The reconstruction deliberately keeps the SOURCE NP in the nominative and
+    proves only the copular number.  Unknown plural heads are accepted only in
+    the structural ``plural head + genitive owner`` shape; otherwise CE2
+    abstains instead of guessing case, animacy, or agreement.
+    """
+
+    subject = _normalize_spaces(text).strip(" .")
+    if (
+        not subject
+        or any(mark in subject for mark in ":;?!")
+        or not _balanced_fold_object(subject)
+        or _r13_must_abstain_action_reconstruction(subject)
+    ):
+        return ""
+    tokens = subject.split()
+    if not tokens or any(_is_proven_finite_token(token) for token in tokens):
+        return ""
+
+    knowledge_index = next(
+        (index for index, token in enumerate(tokens) if _is_theory_knowledge_token(token)),
+        None,
+    )
+    if knowledge_index is not None:
+        head = _strip_punct_word(tokens[knowledge_index])[1].casefold()
+        modifiers = tokens[:knowledge_index]
+        if modifiers and not all(
+            _is_adjective(token)
+            or _strip_punct_word(token)[1].casefold() in {"и", "или"}
+            for token in modifiers
+        ):
+            return ""
+        agreeing = [
+            _strip_punct_word(token)[1].casefold()
+            for token in modifiers
+            if _is_adjective(token)
+        ]
+        if agreeing:
+            last = agreeing[-1]
+            if last.endswith(("ые", "ие")):
+                return "plural"
+            if last.endswith(("ое", "ее", "ая", "яя")):
+                return "singular"
+        if _neuter_plural_nom_a(head) or head.endswith("ы"):
+            return "plural"
+        if head.endswith(("ющие", "щие")):
+            return "plural"
+        if head.endswith(("а", "я", "и")):
+            # Without an agreeing modifier these forms can be plural
+            # nominative or singular genitive; do not guess the copular number.
+            return ""
+        return "singular"
+
+    # Generic nominal knowledge shape, e.g. a plural abstract heading with a
+    # genitive dependent.  Requiring the dependent keeps bare labels and
+    # arbitrary noun lists outside the reconstruction.
+    head = _strip_punct_word(tokens[0])[1].casefold()
+    owner = _strip_punct_word(tokens[1])[1].casefold() if len(tokens) > 1 else ""
+    plural_head = bool(head) and head.endswith(("ы", "и")) and not head.endswith(
+        ("ие", "ии")
+    )
+    genitive_owner = bool(
+        re.search(
+            r"(?i)(?:ов|ев|ёв|ей|ий|ствий|ений|аний|яний|ок)$",
+            owner,
+        )
+    )
+    if plural_head and genitive_owner and not _looks_like_verbal_noun(head):
+        return "plural"
+    return ""
+
+
+def _theory_knowledge_reconstruction(
+    text: str,
+) -> tuple[str, str, str, str] | None:
+    """Build a finite theory RESULT without changing the SOURCE object's case."""
+
+    source = _normalize_spaces(text).strip()
+    question = re.fullmatch(r"(?i)что\s+такое\s+([^?!:;]+?)\s*\?", source)
+    if question is not None:
+        subject = _normalize_spaces(question.group(1)).strip(" .")
+        if (
+            subject
+            and _balanced_fold_object(subject)
+            and not _r13_must_abstain_action_reconstruction(subject)
+            and not any(_is_proven_finite_token(token) for token in subject.split())
+        ):
+            subject = _decap_lexical(subject)
+            phrase = _normalize_spaces(f"объясняет, что такое {subject}")
+            return phrase, "объясняет", subject, ""
+        return None
+
+    tokens = source.strip(" .").split()
+    if any(_is_theory_knowledge_token(token) for token in tokens):
+        # Existing closed knowledge heads keep their established characterize
+        # path.  This constructor is only for the interrogative frame above and
+        # for nominal subjects that have no proven direct-object realization.
+        return None
+
+    existing, _action, _obj, _conditions = _characterize(source)
+    if existing and not _result_grammar_issue(_cap_sentence(existing)):
+        return None
+
+    subject = source.strip(" .")
+    number = _nominal_knowledge_subject_number(subject)
+    if not number:
+        return None
+    subject = _decap_lexical(subject)
+    copula = "состоят" if number == "plural" else "состоит"
+    phrase = _normalize_spaces(f"объясняет, в чём {copula} {subject}")
+    return phrase, "объясняет", subject, ""
+
+
+def _explained_knowledge_subject(text: str) -> str:
+    """Extract the SOURCE NP copied by the supported ``объясняет`` frames."""
+
+    normalized = _normalize_spaces(text).strip().rstrip(".")
+    normalized = re.sub(r"(?i)^объясняет\s*,?\s*", "", normalized, count=1)
+    question = re.fullmatch(r"(?i)что\s+такое\s+(.+)", normalized)
+    if question is not None:
+        return _normalize_spaces(question.group(1)).strip(" .")
+    nominal = re.fullmatch(r"(?i)в\s+ч[её]м\s+(состоит|состоят)\s+(.+)", normalized)
+    if nominal is None:
+        return ""
+    subject = _normalize_spaces(nominal.group(2)).strip(" .")
+    number = _nominal_knowledge_subject_number(subject)
+    expected = "состоят" if number == "plural" else "состоит" if number == "singular" else ""
+    return subject if expected and nominal.group(1).casefold() == expected else ""
 
 
 def _transform_inner(text: str, *, theory_only: bool, full_source: str) -> str:
@@ -3626,6 +3783,16 @@ def transform_clause_to_result(
         _normalize_spaces(clause),
         count=1,
     )
+    if theory_only:
+        reconstructed = _theory_knowledge_reconstruction(normalized)
+        if reconstructed is not None:
+            phrase, action, obj, conditions = reconstructed
+            return _cap_sentence(phrase), ActionFrame(
+                normalized,
+                action,
+                obj,
+                conditions,
+            )
     try:
         return _transform_clause_candidate(
             normalized, theory_only=theory_only, full_source=full_source, topic_title=topic_title,
@@ -4110,7 +4277,7 @@ def _drop_leading_verb(text: str) -> str:
     )
 
 
-_KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет"})
+_KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет", "объясняет"})
 _PROVEN_FINITE_VERBS = frozenset(_VERBAL_NOUN_TO_VERB.values()) | _KNOWLEDGE_RESULT_VERBS | frozenset(
     _FINITE_TO_NOUN
 ) | {
@@ -4220,6 +4387,12 @@ def _oral_object_for_control(obj: str) -> str:
     phrase = _normalize_spaces(obj).strip(" ,.;")
     if not phrase or _starts_with_action_finite(phrase):
         return ""
+    explained = _explained_knowledge_subject(phrase)
+    if explained:
+        # The subordinate RESULT deliberately preserves SOURCE nominative.
+        # Keep that exact accepted object under a fixed grammatical control
+        # frame instead of guessing dative government inside its dependants.
+        return f"вопросу «{explained}»"
     topic = re.match(r"(?i)^материал по теме\s+[„\"«](.+?)[“\"»]$", phrase)
     if topic:
         return f"теме „{topic.group(1)}“"
@@ -4228,6 +4401,24 @@ def _oral_object_for_control(obj: str) -> str:
         phrase = _normalize_spaces(phrase[len(first) :]).strip(" ,.;")
         if not phrase or _starts_with_action_finite(phrase):
             return ""
+    phrase_tokens = phrase.split()
+    knowledge_index = next(
+        (
+            index
+            for index, token in enumerate(phrase_tokens)
+            if _is_theory_knowledge_token(token)
+        ),
+        None,
+    )
+    if (
+        knowledge_index is not None
+        and _knowledge_head_has_only_leading_modifiers(phrase)
+        and _knowledge_owner_tokens(phrase_tokens[knowledge_index + 1 :])
+    ):
+        # The conjunction belongs to a genitive owner (``значение A и B``),
+        # not to two parallel direct objects.  Keep the accepted NP verbatim
+        # under a fixed grammatical frame instead of re-inflecting its owner.
+        return f"вопросу «{phrase}»"
     return _phrase_to_dative(phrase)
 
 
@@ -7993,7 +8184,17 @@ def _derive_week_fields_v2(
                 practice_hours=practice_hours,
             )
             phrase = proof.planned_result
+            reconstructed_knowledge = (
+                _theory_knowledge_reconstruction(clause)
+                if not practice_hours
+                else None
+            )
             exact = _nonempty_result_in(phrase, original.planned_result)
+            if reconstructed_knowledge is not None:
+                exact = any(
+                    _knowledge_result_cites_clause(sentence, clause)
+                    for sentence in _result_sentences(original.planned_result)
+                )
             catalogue = _homogeneous_exercise_catalogue(clause)
             compact_catalogue_covered = _catalogue_label_dosage_preserved(
                 clause, phrase
@@ -8007,7 +8208,11 @@ def _derive_week_fields_v2(
                     else _list_member_uncovered(clause, original.planned_result)
                 )
             )
-            absent = _selected_proof_absent_from_result(phrase, original.planned_result)
+            absent = (
+                not exact
+                if reconstructed_knowledge is not None
+                else _selected_proof_absent_from_result(phrase, original.planned_result)
+            )
             # TYPE may keep this frame while RESULT still came from another
             # unit: restore only when the activity itself is missing.
             if absent and not exact:
@@ -8046,8 +8251,23 @@ def _derive_week_fields_v2(
             elif incomplete:
                 uncovered.append(clause)
             continue
-        if (_prohibition_only_source(clause) or _bare_list_without_action(clause)
-                or re.search(r"(?i)\b(?:педагог|учитель|инструктор|тренер)\b", clause)):
+        reconstructed_knowledge = (
+            _theory_knowledge_reconstruction(clause)
+            if not practice_hours
+            else None
+        )
+        if (
+            _prohibition_only_source(clause)
+            or (
+                _bare_list_without_action(clause)
+                and reconstructed_knowledge is None
+                and not (
+                    not practice_hours
+                    and _knowledge_head_has_only_leading_modifiers(clause)
+                )
+            )
+            or re.search(r"(?i)\b(?:педагог|учитель|инструктор|тренер)\b", clause)
+        ):
             uncovered.append(clause)
             continue
         local = _derive_selected_fields_v2(
@@ -8059,7 +8279,16 @@ def _derive_week_fields_v2(
             practice_hours=practice_hours,
         )
         if retained and _nonempty_result_in(local.planned_result, original.planned_result):
-            continue
+            reconstructed_knowledge = (
+                _theory_knowledge_reconstruction(clause)
+                if not practice_hours
+                else None
+            )
+            if reconstructed_knowledge is None or any(
+                _knowledge_result_cites_clause(sentence, clause)
+                for sentence in _result_sentences(original.planned_result)
+            ):
+                continue
         # Topic fallback and its warnings cannot certify the clause.
         if (not local.planned_result or not local.assessment_method
                 or local.warnings
@@ -8072,7 +8301,11 @@ def _derive_week_fields_v2(
         # New additions have not passed the protected, contextual path.
         # Abstain on unsupported object grammar rather than exposing raw
         # genitives or nominal fragments as completed pupil actions.
-        if not practice_hours and not _proven_theory_object(clause):
+        if (
+            not practice_hours
+            and not _proven_theory_object(clause)
+            and _theory_knowledge_reconstruction(clause) is None
+        ):
             uncovered.append(clause)
             continue
         if re.match(r"(?i)^(?:измеряет|строит|ремонтирует|оценивает|изготавливает)\s+"
@@ -8203,15 +8436,24 @@ def _proven_characterize_object(sentence: str) -> bool:
 
     tokens = _normalize_spaces(sentence).split()[1:]
     index = 0
-    while (
-        index < len(tokens)
-        and _is_adjective(tokens[index])
-        and not _proven_accusative_noun(tokens[index])
-    ):
-        # A nominative feminine modifier cannot agree with an accusative head.
-        if _NOMINATIVE_FEMININE_ADJ_RE.search(_strip_punct_word(tokens[index])[1]):
-            return False
-        index += 1
+    seen_modifier = False
+    while index < len(tokens):
+        if _is_adjective(tokens[index]) and not _proven_accusative_noun(tokens[index]):
+            # A nominative feminine modifier cannot agree with an accusative head.
+            if _NOMINATIVE_FEMININE_ADJ_RE.search(_strip_punct_word(tokens[index])[1]):
+                return False
+            seen_modifier = True
+            index += 1
+            continue
+        if (
+            seen_modifier
+            and _strip_punct_word(tokens[index])[1].casefold() in {"и", "или"}
+            and index + 1 < len(tokens)
+            and _is_adjective(tokens[index + 1])
+        ):
+            index += 1
+            continue
+        break
     if index >= len(tokens):
         return False
     if not _proven_accusative_noun(tokens[index]) and not _knowledge_coordinated_head(
@@ -8286,6 +8528,9 @@ def _result_grammar_issue(sentence: str) -> str:
     words = re.findall(r"[а-яё-]+", sentence.casefold())
     if not words:
         return ""
+    if words[0] == "объясняет":
+        if not _explained_knowledge_subject(sentence):
+            return "unproven_knowledge_explanation"
     if words[0] in {"характеризует", "раскрывает"}:
         # A nominal topic is not proof of accusative case or animacy, but a
         # morphologically proven object form does not need a lemma list.
@@ -8312,6 +8557,9 @@ def _result_grammar_issue(sentence: str) -> str:
 
 def _knowledge_result_object(sentence: str) -> str:
     text = _normalize_spaces(sentence).strip()
+    explained = _explained_knowledge_subject(text)
+    if explained:
+        return explained
     return re.sub(r"(?i)^(?:характеризует|раскрывает)\s+", "", text).rstrip(".")
 
 
@@ -8353,6 +8601,12 @@ def _knowledge_result_cites_clause(sentence: str, clause: str) -> bool:
 
     if re.search(r"(?i)по теме", sentence):
         return False
+    explained = _explained_knowledge_subject(sentence)
+    if explained:
+        source = _normalize_spaces(clause).strip(" .?")
+        question = re.fullmatch(r"(?i)что\s+такое\s+(.+)", source)
+        expected = question.group(1) if question is not None else source
+        return _knowledge_cite_key(explained) == _knowledge_cite_key(expected)
     obj = _knowledge_cite_key(_knowledge_result_object(sentence))
     if len(obj) < 4:
         return False
@@ -8785,7 +9039,12 @@ def _try_recover_clause_result(
             )
         ):
             continue
-        if not practice_hours and theory_only and not _proven_theory_object(clause):
+        if (
+            not practice_hours
+            and theory_only
+            and not _proven_theory_object(clause)
+            and _theory_knowledge_reconstruction(clause) is None
+        ):
             continue
         return local
     return None
