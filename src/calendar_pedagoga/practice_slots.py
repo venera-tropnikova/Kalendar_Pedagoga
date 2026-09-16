@@ -130,6 +130,18 @@ _CATALOG_HEAD_RE = re.compile(
     r"прогулки(?:\s+и\s+экскурсии)?|посещения"
     r")(?P<sep>\s*:)?\s+(?P<body>.+)$"
 )
+_COLON_OBJECT_HEAD_RE = re.compile(
+    r"(?i)^(?:практика\.\s*)?(?P<head>[^:]{3,80}?)\s*:\s+(?P<body>.+)$"
+)
+_COLON_ACTION_HEAD_RE = re.compile(
+    r"(?i)^[а-яё-]+(?:ение|ание|яние|тие|ировка|овка|ка)\b"
+)
+_OBJECT_ITEM_RE = re.compile(
+    r"(?i)^[\wёЁ«\"„\-]+(?:\s+[\wёЁ«\"„\-]+){0,4}$"
+)
+_EVENT_ROSTER_HEAD_RE = re.compile(
+    r"(?i)\b(?:участи|мероприяти|праздник|фестивал|соревнован|конкурс|сл[её]т)"
+)
 _PLACE_PREP_RE = re.compile(
     r"(?i)^(по|к|ко|в|во|на|у|около|через|от|до|из|с|со)\s+"
 )
@@ -205,6 +217,34 @@ def _item_is_place_or_name(item: str, *, allow_names: bool) -> bool:
     return allow_names and bool(_NAME_ITEM_RE.match(text))
 
 
+def _item_is_catalog_object(item: str) -> bool:
+    """A short source NP that can be assigned without inventing an action."""
+
+    text = item.strip()
+    if _item_is_place_or_name(text, allow_names=True):
+        return True
+    if not text or _FINITE_IN_ITEM_RE.search(text) or _PURPOSE_AFTER_NA_RE.match(text):
+        return False
+    if re.search(r"[.;!?()]", text):
+        return False
+    return bool(_OBJECT_ITEM_RE.fullmatch(text))
+
+
+def _colon_object_candidate(text: str) -> re.Match[str] | None:
+    source = _normalize_catalog_spaces(text).rstrip(" .")
+    match = _COLON_OBJECT_HEAD_RE.match(source)
+    if not match:
+        return None
+    head = _normalize_catalog_spaces(match.group("head"))
+    if (
+        not _COLON_ACTION_HEAD_RE.match(head)
+        or _FINITE_IN_ITEM_RE.search(head)
+        or _EVENT_ROSTER_HEAD_RE.search(head)
+    ):
+        return None
+    return match
+
+
 def parse_splittable_catalog(text: str) -> tuple[str, str, tuple[str, ...]] | None:
     """Activity head + catalog items, or None if the list is not safely splittable."""
 
@@ -212,17 +252,32 @@ def parse_splittable_catalog(text: str) -> tuple[str, str, tuple[str, ...]] | No
     if not source:
         return None
     match = _CATALOG_HEAD_RE.match(source)
-    if not match:
+    if match:
+        head = _normalize_catalog_spaces(match.group("head"))
+        separator = ": " if match.group("sep") else " "
+        items = _parse_catalog_items(match.group("body"))
+        allow_names = bool(match.group("sep"))
+        if len(items) >= 2 and all(
+            _item_is_place_or_name(item, allow_names=allow_names) for item in items
+        ):
+            return head, separator, tuple(items)
+
+    colon = _colon_object_candidate(source)
+    if not colon:
         return None
-    head = _normalize_catalog_spaces(match.group("head"))
-    separator = ": " if match.group("sep") else " "
-    items = _parse_catalog_items(match.group("body"))
-    if len(items) < 2:
+    head = _normalize_catalog_spaces(colon.group("head"))
+    items = _parse_catalog_items(colon.group("body"))
+    if len(items) < 2 or not all(_item_is_catalog_object(item) for item in items):
         return None
-    allow_names = bool(match.group("sep"))
-    if not all(_item_is_place_or_name(item, allow_names=allow_names) for item in items):
-        return None
-    return head, separator, tuple(items)
+    return head, ": ", tuple(items)
+
+
+def ambiguous_colon_object_catalog(text: str, weeks: int) -> bool:
+    """True when an action/object colon list exists but cannot be proven splittable."""
+
+    if weeks <= 1 or _colon_object_candidate(text) is None:
+        return False
+    return split_catalog_across_weeks(text, weeks) is None
 
 
 def _collapse_shared_prefix(items: tuple[str, ...]) -> str:

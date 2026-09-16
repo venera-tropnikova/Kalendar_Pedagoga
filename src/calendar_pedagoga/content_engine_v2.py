@@ -29,6 +29,7 @@ from calendar_pedagoga.lesson_content import (
 from calendar_pedagoga.practice_slots import (
     SLOT_CONTINUE_WARNING,
     SLOT_PACK_WARNING,
+    ambiguous_colon_object_catalog,
     assign_distributed_practice_slots,
     practice_units_from_text,
 )
@@ -129,6 +130,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "расчёт": "рассчитывает",
     "решение": "решает",
     "рисование": "рисует",
+    "сборка": "собирает",
     "свертывание": "свертывает",
     "смешивание": "смешивает",
     "соблюдение": "соблюдает",
@@ -659,10 +661,21 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
                 has_post_head = True
                 continue
             acc_core = _noun_gen_to_acc(core)
+            pending_adjs = pending_cores()
+            # A singular genitive feminine adjective proves that an ambiguous
+            # -и head is gen.sg, not nom.pl: «учебной модели» → «учебную модель».
+            singular_feminine = bool(
+                pending_adjs
+                and re.search(r"(?i)(?:ой|ей)$", pending_adjs[-1][2])
+            )
+            if singular_feminine and core.casefold().endswith("и"):
+                if core.casefold().endswith("ии"):
+                    acc_core = core[:-2] + "ию"
+                elif re.search(r"(?i)[бвгджзйклмнпрстфхцчшщ]и$", core):
+                    acc_core = core[:-1] + "ь"
             # Zero-ending gen.pl heads are ambiguous in isolation. A preceding
             # gen.pl adjective proves the plural object frame:
             # «голосовых команд» -> «голосовые команды».
-            pending_adjs = pending_cores()
             if (
                 acc_core == core
                 and pending_adjs
@@ -671,6 +684,8 @@ def _inflect_object_phrase(phrase: str, *, case: str) -> str:
             ):
                 acc_core = core + ("и" if core[-1].casefold() in "гкхжчшщ" else "ы")
             plural, gender = _noun_acc_features(core, acc_core)
+            if singular_feminine:
+                plural, gender = False, "f"
             apply_pending(plural, gender)
             core = acc_core
             if not prefix.startswith("("):
@@ -4068,6 +4083,8 @@ _FINITE_TO_NOUN = {
     "ведёт": "ведения",
     "ведет": "ведения",
     "рисует": "рисования",
+    "разрабатывает": "разработки",
+    "собирает": "сборки",
     "строит": "построения",
     "подготавливает": "подготовки",
     "заслушивает": "заслушивания",
@@ -5100,6 +5117,16 @@ def _practice_activity_type(result: str, clause: str) -> str:
         return "измерительный практикум"
     if "масштаб" in result_low:
         return "практикум по работе с картой"
+    if (
+        re.search(r"(?i)\b(?:составля|разрабатыва)", result_low)
+        and re.search(r"(?i)\bалгоритм", selected)
+    ):
+        return "практикум по разработке алгоритма"
+    if (
+        re.search(r"(?i)\b(?:составля|разрабатыва|программиру)", result_low)
+        and re.search(r"(?i)\bпрограмм", selected)
+    ):
+        return "практикум программирования"
     if (
         result_low.startswith("ориентирует")
         or "стороны горизонта" in result_low
@@ -6316,6 +6343,7 @@ _TASK_VERBS = {
     "применяет": "применить", "формирует": "сформировать",
     "оказывает": "оказать", "изготавливает": "изготовить",
     "разучивает": "разучить", "ведёт": "вести",
+    "разрабатывает": "разработать", "собирает": "собрать",
     "рисует": "нарисовать", "сравнивает": "сравнить",
     "решает": "решить", "исследует": "исследовать",
     "ухаживает": "ухаживать", "ремонтирует": "ремонтировать",
@@ -9604,6 +9632,26 @@ def _finalize_content_fields(
         occurrence_index=occurrence_index,
         practice_appearance_count=practice_appearance_count,
     )
+    if (
+        practice_hours
+        and practice_appearance_count > 1
+        and any(
+            ambiguous_colon_object_catalog(unit, practice_appearance_count)
+            for unit in practice_units_from_text(practice_text)
+        )
+    ):
+        clauses = tuple(
+            unit for unit in practice_units_from_text(practice_text)
+            if unit.casefold().strip(" .:") not in {"теория", "практика"}
+        )
+        after_semantic = replace(
+            after_semantic,
+            clause_coverage=tuple((clause, "NEEDS_REVIEW") for clause in clauses),
+            warnings=tuple(dict.fromkeys((
+                *after_semantic.warnings,
+                "NEEDS_REVIEW: неоднозначный каталог объектов не распределён по неделям.",
+            ))),
+        )
 
     # Semantic recovery can reintroduce a pre-factoring clause form. Normalize
     # that accepted RESULT once more, then rebuild CONTROL from the exact final
