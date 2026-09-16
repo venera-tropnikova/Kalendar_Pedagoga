@@ -174,3 +174,31 @@ def test_control_must_cover_every_result_item() -> None:
     assert not _control_covers_all_result_items(
         derived.planned_result, "проверка дневника"
     )
+
+
+def test_knowledge_control_uses_exact_oral_object_grounding_before_stems() -> None:
+    assert _control_covers_all_result_items(
+        "Характеризует итоговое занятие.",
+        "устный опрос по итоговому занятию",
+    )
+
+
+def test_existing_knowledge_stem_coverage_remains_valid() -> None:
+    assert _control_covers_all_result_items(
+        "Характеризует плетение.",
+        "устный опрос по плетению",
+    )
+
+
+def test_oral_control_with_different_knowledge_object_remains_blocked() -> None:
+    assert not _control_covers_all_result_items(
+        "Характеризует итоговое занятие.",
+        "устный опрос по плетению",
+    )
+
+
+def test_control_without_grounded_knowledge_object_remains_blocked() -> None:
+    assert not _control_covers_all_result_items(
+        "Характеризует итоговое занятие.",
+        "проверка дневника",
+    )

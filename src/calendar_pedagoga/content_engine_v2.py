@@ -8664,6 +8664,8 @@ def _control_covers_all_result_items(result: str, control: str) -> bool:
         return True
     for verb, obj in obligations:
         if verb.casefold() in _KNOWLEDGE_RESULT_VERBS:
+            if _oral_object_grounded_in_result(control, result):
+                continue
             stems = _meaning_stems(obj)
             if stems and any(stem[:4] in control_low for stem in stems):
                 continue
