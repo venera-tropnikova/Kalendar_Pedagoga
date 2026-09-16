@@ -420,6 +420,14 @@ _ROMAN_STUDY_YEARS = {
     "vii": 7,
     "viii": 8,
 }
+_HEADING_YEARLY_HOURS = re.compile(
+    r"(\d+)\s*час\w*\s+в\s+год\w*",
+    re.IGNORECASE,
+)
+_HEADING_WEEKLY_HOURS = re.compile(
+    r"(\d+)\s*час\w*\s+в\s+недел\w*",
+    re.IGNORECASE,
+)
 
 
 def _is_utp_plan_heading(text: str) -> bool:
@@ -453,6 +461,19 @@ def heading_study_year(text: str) -> int | None:
     return None
 
 
+def heading_workload(text: str) -> tuple[int | None, int | None]:
+    """Hours/year and hours/week stated together in an embedded UTP heading."""
+
+    cleaned = _clean(text)
+    if not cleaned or not _is_utp_plan_heading(cleaned):
+        return None, None
+    yearly = _HEADING_YEARLY_HOURS.search(cleaned)
+    weekly = _HEADING_WEEKLY_HOURS.search(cleaned)
+    if yearly is None or weekly is None:
+        return None, None
+    return int(yearly.group(1)), int(weekly.group(1))
+
+
 def _iter_document_blocks(document):
     from docx.oxml.ns import qn
     from docx.table import Table
@@ -476,6 +497,8 @@ class UtpTableCandidate:
     sections: tuple[Section, ...]
     topics: tuple[Topic, ...]
     table_totals: Hours | None
+    hours_per_year: int | None
+    hours_per_week: int | None
 
 
 def collect_utp_table_candidates(source) -> tuple[UtpTableCandidate, ...]:
@@ -487,12 +510,17 @@ def collect_utp_table_candidates(source) -> tuple[UtpTableCandidate, ...]:
         else _open_utp_document(source)
     )
     last_year: int | None = None
+    last_hours_per_year: int | None = None
+    last_hours_per_week: int | None = None
     found: list[UtpTableCandidate] = []
     for kind, block in _iter_document_blocks(document):
         if kind == "p":
             year = heading_study_year(block.text)
             if year is not None:
                 last_year = year
+                last_hours_per_year, last_hours_per_week = heading_workload(
+                    block.text
+                )
             continue
         if _utp_table_score(block) < 0:
             continue
@@ -508,6 +536,8 @@ def collect_utp_table_candidates(source) -> tuple[UtpTableCandidate, ...]:
                 tuple(sections),
                 tuple(topics),
                 table_totals,
+                last_hours_per_year,
+                last_hours_per_week,
             )
         )
     return tuple(found)
@@ -566,6 +596,8 @@ def _finalize_utp_parse(
     table_totals: Hours | None,
     *,
     study_year: int | None = None,
+    hours_per_year: int | None = None,
+    hours_per_week: int | None = None,
 ) -> UtpParseResult:
     section_list = list(sections)
     topic_list = list(topics)
@@ -580,8 +612,15 @@ def _finalize_utp_parse(
                     is_standalone_section=True,
                 )
             )
+    metadata = _metadata([paragraph.text for paragraph in document.paragraphs])
+    if hours_per_year is not None and hours_per_week is not None:
+        metadata = replace(
+            metadata,
+            hours_per_year=hours_per_year,
+            hours_per_week=hours_per_week,
+        )
     result = UtpParseResult(
-        metadata=_metadata([paragraph.text for paragraph in document.paragraphs]),
+        metadata=metadata,
         sections=tuple(section_list),
         topics=tuple(topic_list),
         table_totals=table_totals,
@@ -638,6 +677,8 @@ def parse_utp(
             selected.topics,
             selected.table_totals,
             study_year=chosen_year,
+            hours_per_year=selected.hours_per_year,
+            hours_per_week=selected.hours_per_week,
         )
     last_error: Exception | None = None
     compact_error: CompactTableParseError | None = None

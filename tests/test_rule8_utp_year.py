@@ -32,12 +32,13 @@ def _add_year_table(
     topic_title: str = "Введение в тему",
     topic_titles: tuple[str, str, str] | None = None,
     extra_paragraph: str | None = None,
+    heading: str | None = None,
 ) -> None:
     if year is None:
         document.add_paragraph("Учебно-тематический план")
     else:
         document.add_paragraph(
-            f"Учебно-тематический план {year}-го года обучения"
+            heading or f"Учебно-тематический план {year}-го года обучения"
         )
     if extra_paragraph:
         document.add_paragraph(extra_paragraph)
@@ -70,6 +71,27 @@ def _multi_year_program(*tables: tuple[int | None, Hours, str]) -> bytes:
     document.add_paragraph("Дополнительная общеобразовательная программа «ТЕСТ»")
     for year, totals, topic_title in tables:
         _add_year_table(document, year, totals, topic_title=topic_title)
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def _multi_year_program_with_heading_workload(
+    *tables: tuple[int, Hours, int],
+) -> bytes:
+    document = Document()
+    document.add_paragraph("Дополнительная общеобразовательная программа «ТЕСТ»")
+    for year, totals, weekly in tables:
+        _add_year_table(
+            document,
+            year,
+            totals,
+            topic_title=f"Тема {year}-го года",
+            heading=(
+                f"Учебно-тематический план {year}-го года обучения "
+                f"{totals.total} часов в год ({weekly} часа в неделю)"
+            ),
+        )
     stream = BytesIO()
     document.save(stream)
     return stream.getvalue()
@@ -192,6 +214,59 @@ def test_separate_utp_remains_source_after_program_year_selection() -> None:
     assert result.topics == separate.parsed.topics
     assert any(topic.title == "Тема отдельного УТП" for topic in result.topics)
     assert all(topic.title != "Тема программы второго года" for topic in result.topics)
+
+
+@pytest.mark.parametrize(
+    ("year", "totals", "weekly"),
+    (
+        (1, Hours(96, 21, 75), 3),
+        (2, Hours(128, 37, 91), 4),
+        (3, Hours(128, 32, 96), 4),
+    ),
+)
+def test_embedded_heading_workload_is_parsed_without_inventing_weeks(
+    year: int,
+    totals: Hours,
+    weekly: int,
+) -> None:
+    data = _multi_year_program_with_heading_workload((year, totals, weekly))
+
+    result = parse_utp(data, study_year=year)
+
+    assert result.table_totals == totals
+    assert result.metadata.hours_per_year == totals.total
+    assert result.metadata.hours_per_week == weekly
+    assert result.metadata.study_weeks is None
+
+
+def test_selected_year_gets_only_its_heading_workload() -> None:
+    data = _multi_year_program_with_heading_workload(
+        (1, Hours(96, 21, 75), 3),
+        (2, Hours(128, 37, 91), 4),
+        (3, Hours(160, 40, 120), 5),
+    )
+
+    first = parse_utp(data, study_year=1)
+    second = parse_utp(data, study_year=2)
+    third = parse_utp(data, study_year=3)
+
+    assert (first.metadata.hours_per_year, first.metadata.hours_per_week) == (96, 3)
+    assert (second.metadata.hours_per_year, second.metadata.hours_per_week) == (128, 4)
+    assert (third.metadata.hours_per_year, third.metadata.hours_per_week) == (160, 5)
+    assert all(
+        result.metadata.study_weeks is None for result in (first, second, third)
+    )
+
+
+def test_embedded_heading_workload_does_not_derive_missing_weeks() -> None:
+    program = _program_upload(
+        _multi_year_program_with_heading_workload(
+            (1, Hours(96, 21, 75), 3),
+        )
+    )
+
+    with pytest.raises(UtpResolutionError, match="число учебных недель"):
+        resolve_utp(None, program, program_study_year=1)
 
 
 def test_resolve_same_year_identical_structure_is_pass() -> None:

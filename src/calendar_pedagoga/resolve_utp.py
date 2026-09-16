@@ -133,22 +133,6 @@ def apply_workload_from_document(result: UtpParseResult) -> UtpParseResult:
             tuple(extra),
         )
 
-    if yearly and weekly and weeks is None and weekly > 0 and yearly % weekly == 0:
-        weeks = yearly // weekly
-        extra.append(
-            f"Недельная нагрузка определена автоматически: {weeks} недель × {weekly} часа."
-        )
-        return _with_metadata(
-            result,
-            replace(
-                metadata,
-                study_weeks=weeks,
-                hours_per_year=yearly,
-                workload_provenance="derived",
-            ),
-            tuple(extra),
-        )
-
     if yearly == 72 and weeks in {None, 36} and weekly in {None, 2}:
         extra.append(AUTO_WORKLOAD_WARNING)
         return _with_metadata(
