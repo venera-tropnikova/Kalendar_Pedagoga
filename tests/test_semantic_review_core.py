@@ -147,6 +147,41 @@ def test_r13_prohibition_cannot_be_confirmed_as_positive_action() -> None:
     assert "R13" in " ".join(dict(applied.errors)[cases[0].review_id])
 
 
+def test_prohibition_label_can_be_confirmed_as_a_knowledge_object() -> None:
+    clauses = (
+        "Животные и птицы в рисунках детей",
+        "Запрещающие знаки «Берегите природу»",
+    )
+    row = replace(
+        _review_row(text=". ".join(clauses) + "."),
+        clause_coverage=tuple((clause, "NEEDS_REVIEW") for clause in clauses),
+        clause_roles=tuple((clause, REQUIRED_ACTION) for clause in clauses),
+    )
+    case = build_semantic_review_cases(
+        (row,), context_fingerprint="context"
+    )[0]
+    confirmation = ManualSemanticConfirmation(
+        review_id=case.review_id,
+        source_fingerprint=case.source_fingerprint,
+        planned_result=(
+            "Характеризует животных и птиц в рисунках детей и запрещающие "
+            "знаки «Берегите природу»."
+        ),
+        assessment_method=(
+            "Устный опрос по животным и птицам в рисунках детей и "
+            "запрещающим знакам «Берегите природу»."
+        ),
+    )
+
+    applied = apply_manual_semantic_confirmations(
+        (row,), (case,), {case.review_id: confirmation}
+    )
+
+    assert applied.pending_cases == ()
+    assert applied.accepted_review_ids == (case.review_id,)
+    assert applied.errors == ()
+
+
 def test_valid_confirmation_is_revalidated_and_covered() -> None:
     row = _review_row()
     cases = build_semantic_review_cases((row,), context_fingerprint="context")

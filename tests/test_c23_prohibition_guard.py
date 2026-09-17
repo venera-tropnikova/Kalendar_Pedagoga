@@ -4,7 +4,34 @@ import re
 
 import pytest
 
-from calendar_pedagoga.content_engine_v2 import derive_fields_v2, _prohibition_only_source
+from calendar_pedagoga.content_engine_v2 import (
+    _prohibition_only_source,
+    _r13_must_abstain_action_reconstruction,
+    derive_fields_v2,
+)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Запрещающие знаки «Берегите природу».",
+        "Запрещающий знак у входа.",
+    ],
+)
+def test_attributive_prohibition_label_is_not_an_r13_action_prohibition(source):
+    assert not _r13_must_abstain_action_reconstruction(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Выполнение упражнения без страховки запрещено.",
+        "Запрещено выполнять упражнение без страховки.",
+        "Опасные действия запрещены.",
+    ],
+)
+def test_predicative_action_prohibition_stays_r13_blocked(source):
+    assert _r13_must_abstain_action_reconstruction(source)
 
 
 @pytest.mark.parametrize("source", [

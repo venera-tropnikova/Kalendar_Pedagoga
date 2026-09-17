@@ -1894,7 +1894,14 @@ def _r13_must_abstain_action_reconstruction(text: str) -> bool:
     if _prohibition_only_source(cleaned):
         return True
     low = cleaned.casefold()
-    if re.search(r"(?i)\b(?:запрещ\w*|нельзя|не\s+допускается|не\s+разрешается)\b", low):
+    # Predicate/modal forms prohibit an action.  Attributive participles such
+    # as «запрещающий знак» merely name an object/category and must not trigger
+    # the R13 abstention guard.
+    if re.search(
+        r"(?i)\b(?:запрещ(?:ается|[её]н(?:а|о|ы)?)|нельзя|"
+        r"не\s+допускается|не\s+разрешается)\b",
+        low,
+    ):
         return True
     if re.search(
         r"(?i)\bне\s+(?:выполнять|выполняет|проводить|использовать|применять|"
