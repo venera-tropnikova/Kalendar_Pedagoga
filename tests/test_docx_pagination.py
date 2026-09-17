@@ -746,6 +746,72 @@ def test_libreoffice_measurement_removes_vertical_direction_only_from_copy(monke
     ]
 
 
+def test_final_merged_span_render_uses_exact_docx_with_vertical_cells(monkeypatch):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    table = doc.add_table(rows=3, cols=8)
+    table.rows[2].cells[0].text = 'Month'
+    table.rows[2].cells[1].text = '19'
+    table.rows[2].cells[2].text = '01–07.03'
+    for cell in table.rows[2].cells[:3]:
+        marker = OxmlElement('w:textDirection')
+        marker.set(qn('w:val'), 'btLr')
+        cell._tc.get_or_add_tcPr().append(marker)
+    source = BytesIO()
+    doc.save(source)
+    original = source.getvalue()
+
+    captured = []
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', lambda content: None)
+
+    def libreoffice(content):
+        captured.append(content)
+        return b'pdf'
+
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', libreoffice)
+    monkeypatch.setattr(
+        qa,
+        '_data_row_page_spans_pdf',
+        lambda content, pdf, total_rows: (qa.DataRowPageSpan(1, 1, True),),
+    )
+
+    assert qa.detect_data_row_page_spans(
+        original,
+        total_rows=1,
+        render_exact=True,
+    ) == (qa.DataRowPageSpan(1, 1, True),)
+    assert captured == [original]
+
+
+def test_exact_final_span_render_does_not_fallback_to_measurement_copy(monkeypatch):
+    calls = []
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_word', lambda content: None)
+
+    def libreoffice(content):
+        calls.append(content)
+        return b'pdf'
+
+    monkeypatch.setattr(qa, '_docx_to_pdf_bytes_libreoffice', libreoffice)
+
+    def clipped(content, pdf, total_rows):
+        qa._record_segmentation_diag(
+            result='clipped_by_cantsplit', clipped_rows=(0,)
+        )
+        return None
+
+    monkeypatch.setattr(qa, '_data_row_page_spans_pdf', clipped)
+    monkeypatch.setattr(qa, '_run_with_word_document', lambda *args: None)
+
+    assert qa.detect_data_row_page_spans(
+        b'exact-final-docx',
+        total_rows=1,
+        render_exact=True,
+    ) is None
+    assert calls == [b'exact-final-docx']
+
+
 def test_measurement_copy_keeps_cantsplit_except_allowed_rows():
     doc = Document()
     table = doc.add_table(rows=4, cols=8)

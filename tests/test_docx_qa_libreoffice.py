@@ -202,10 +202,21 @@ def test_visual_qa_reuses_cached_final_layout_pdf(
         return subprocess.CompletedProcess([str(soffice), *arguments], 0, "", "")
 
     monkeypatch.setattr(docx_qa, "_run_soffice", fake_soffice)
+    monkeypatch.setattr(
+        docx_qa,
+        "_data_row_page_spans_pdf",
+        lambda content, rendered_pdf, total_rows: (
+            docx_qa.DataRowPageSpan(1, 1, True),
+        ),
+    )
 
     final_docx = b"byte-exact final layout"
     with docx_qa.libreoffice_pdf_render_cache():
-        assert docx_qa._docx_to_pdf_bytes_libreoffice(final_docx) == pdf
+        assert docx_qa.detect_data_row_page_spans(
+            final_docx,
+            total_rows=1,
+            render_exact=True,
+        ) == (docx_qa.DataRowPageSpan(1, 1, True),)
         rendered = render_docx_pages(final_docx, tmp_path / "rendered")
 
     assert calls == [final_docx]

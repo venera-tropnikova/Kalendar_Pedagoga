@@ -1663,9 +1663,19 @@ def detect_data_row_page_layout(
 
 
 def detect_data_row_page_spans(
-    content: bytes, *, total_rows: int,
+    content: bytes,
+    *,
+    total_rows: int,
+    render_exact: bool = False,
 ) -> tuple[DataRowPageSpan, ...] | None:
-    """Measure every data row, including both ends of rows crossing a page."""
+    """Measure every data row, including both ends of rows crossing a page.
+
+    ``render_exact`` is reserved for the final merged document: LibreOffice
+    receives the exact production DOCX, including its vertical identifier
+    cells. The resulting PDF can then be reused by visual QA under the same
+    byte-exact request cache key. Preview and unmerged checks retain their
+    established measurement-copy behavior.
+    """
     if total_rows == 0:
         return ()
 
@@ -1677,7 +1687,10 @@ def detect_data_row_page_spans(
     pdf = _docx_to_pdf_bytes_word(content)
     if pdf is None:
         renderer = "LibreOffice"
-        pdf = _docx_to_pdf_bytes_libreoffice(_pagination_measurement_copy(content))
+        libreoffice_content = (
+            content if render_exact else _pagination_measurement_copy(content)
+        )
+        pdf = _docx_to_pdf_bytes_libreoffice(libreoffice_content)
     if pdf is None:
         _record_segmentation_diag(
             result="pdf_unavailable",
@@ -1691,7 +1704,7 @@ def detect_data_row_page_spans(
             if spans is not None:
                 return spans
             clipped = _clipped_row_indices()
-            if clipped and renderer == "LibreOffice":
+            if clipped and renderer == "LibreOffice" and not render_exact:
                 retry_pdf = _docx_to_pdf_bytes_libreoffice(
                     _pagination_measurement_copy(
                         content, allow_split_rows=frozenset(clipped)

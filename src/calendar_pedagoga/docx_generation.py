@@ -1657,7 +1657,11 @@ def _build_segmented_document(
     )
     _merge_month_cells_by_page_segments(table, columns, months, rows_by_page)
     output = _save_document(document)
-    final_spans = detect_data_row_page_spans(output, total_rows=len(months))
+    final_spans = detect_data_row_page_spans(
+        output,
+        total_rows=len(months),
+        render_exact=True,
+    )
     if final_spans is None or any(
         span.start_page != span.end_page
         or (index in continuation_rows and not span.split_safe)
