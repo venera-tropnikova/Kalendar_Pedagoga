@@ -1,0 +1,411 @@
+"""HTTP client: Streamlit → calendar generation API → async worker."""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import time
+from collections.abc import Callable, Mapping
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urljoin
+from urllib.request import Request, urlopen
+
+from calendar_pedagoga.confirmed_study_plan import (
+    ConfirmedStudyPlan,
+    confirmed_plan_from_external_utp,
+)
+from calendar_pedagoga.generation_contract import (
+    PIPELINE_CONTRACT,
+    ConfirmedStudyPlanDTO,
+    ManualSemanticConfirmationDTO,
+    SemanticReviewCaseDTO,
+    current_generator_revision,
+)
+from calendar_pedagoga.organization_template import (
+    CalendarTemplateSelection,
+    CalendarTemplateSource,
+)
+from calendar_pedagoga.parsing import UtpParseResult
+from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineError, PipelineResult
+from calendar_pedagoga.program_parsing import ProgramData
+from calendar_pedagoga.semantic_review import ManualSemanticConfirmation
+
+
+DEFAULT_GENERATION_API_URL = "http://127.0.0.1:8000"
+GENERATION_API_URL_ENV = "CALENDAR_GENERATION_API_URL"
+DEFAULT_POLL_INTERVAL_SECONDS = 0.4
+DEFAULT_WAIT_TIMEOUT_SECONDS = 12 * 60.0
+_HTTP_TIMEOUT_SECONDS = 60.0
+
+_PHASE_LABELS = {
+    "VALIDATION": "Формируем календарный план…",
+    "SCHEDULE": "Формируем календарный план…",
+    "SEMANTIC": "Формируем календарный план…",
+    "DOCX": "Формируем календарный план…",
+    "LIBREOFFICE_QA": "Проверяем готовый документ…",
+}
+
+HttpRequest = Callable[..., tuple[int, Mapping[str, str], bytes]]
+
+
+def generation_api_url(explicit: str | None = None) -> str:
+    raw = explicit if explicit is not None else os.environ.get(GENERATION_API_URL_ENV)
+    value = (raw or DEFAULT_GENERATION_API_URL).strip()
+    return value.rstrip("/") or DEFAULT_GENERATION_API_URL
+
+
+def _json_dumps(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def default_http_request(
+    method: str,
+    url: str,
+    *,
+    json_body: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
+    timeout: float = _HTTP_TIMEOUT_SECONDS,
+) -> tuple[int, Mapping[str, str], bytes]:
+    request_headers = {"Accept": "*/*"}
+    if headers:
+        request_headers.update(dict(headers))
+    data = None
+    if json_body is not None:
+        data = _json_dumps(json_body)
+        request_headers["Content-Type"] = "application/json; charset=utf-8"
+    request = Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return int(response.status), dict(response.headers.items()), response.read()
+    except HTTPError as error:
+        return int(error.code), dict(error.headers.items()), error.read()
+    except URLError as error:
+        reason = getattr(error, "reason", error)
+        raise PipelineError(f"Generation API недоступен: {reason}") from error
+
+
+def _decode_json(body: bytes) -> Any:
+    if not body:
+        return None
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _api_error_message(status: int, body: bytes, *, fallback: str) -> str:
+    payload = _decode_json(body)
+    if isinstance(payload, Mapping):
+        detail = payload.get("detail")
+        if isinstance(detail, Mapping):
+            message = str(detail.get("message") or "").strip()
+            if message:
+                return message
+            code = str(detail.get("code") or "").strip()
+            if code:
+                return code
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    text = body.decode("utf-8", errors="replace").strip()
+    if text:
+        return text
+    return f"{fallback} (HTTP {status})"
+
+
+def _wire_file(filename: str, content: bytes) -> dict[str, str]:
+    return {
+        "filename": filename,
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
+def _wire_match_reviews(reviews: Mapping | None) -> dict[str, Any]:
+    if not reviews:
+        return {}
+    encoded: dict[str, Any] = {}
+    for key, value in reviews.items():
+        if isinstance(key, tuple):
+            wire_key = json.dumps(list(key), ensure_ascii=False)
+        else:
+            wire_key = str(key)
+        encoded[wire_key] = value
+    return encoded
+
+
+def _wire_confirmations(
+    confirmations: Mapping[str, ManualSemanticConfirmation] | None,
+) -> dict[str, Any]:
+    if not confirmations:
+        return {}
+    encoded: dict[str, Any] = {}
+    for review_id, value in confirmations.items():
+        if isinstance(value, ManualSemanticConfirmation):
+            encoded[str(review_id)] = ManualSemanticConfirmationDTO.from_model(
+                value
+            ).to_dict()
+        elif isinstance(value, Mapping):
+            encoded[str(review_id)] = dict(value)
+        else:
+            raise PipelineError("Поле confirmations передано неверно.")
+    return encoded
+
+
+def _confirmed_plan(
+    plan: ConfirmedStudyPlan | UtpParseResult,
+    *,
+    source_plan_name: str,
+) -> ConfirmedStudyPlan:
+    if isinstance(plan, ConfirmedStudyPlan):
+        return plan
+    return confirmed_plan_from_external_utp(plan, source_name=source_plan_name)
+
+
+def build_generation_payload(
+    plan: ConfirmedStudyPlan | UtpParseResult,
+    *,
+    academic_year: str,
+    source_plan_name: str,
+    program_filename: str,
+    program_content: bytes,
+    template: CalendarTemplateSelection | None = None,
+    group_number: str | None = None,
+    class_name: str | None = None,
+    teacher_name: str | None = None,
+    match_reviews: Mapping | None = None,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    generator_revision: str | None = None,
+) -> dict[str, Any]:
+    if not program_filename.strip() or not program_content:
+        raise PipelineError("Для удалённой генерации нужна образовательная программа.")
+    payload: dict[str, Any] = {
+        "pipeline_contract": PIPELINE_CONTRACT,
+        "generator_revision": generator_revision or current_generator_revision(),
+        "plan": ConfirmedStudyPlanDTO.from_model(
+            _confirmed_plan(plan, source_plan_name=source_plan_name)
+        ).to_dict(),
+        "program": _wire_file(program_filename, program_content),
+        "academic_year": academic_year,
+        "source_plan_name": source_plan_name,
+        "confirmations": _wire_confirmations(manual_confirmations),
+        "match_reviews": _wire_match_reviews(match_reviews),
+    }
+    if group_number:
+        payload["group_number"] = group_number
+    if class_name:
+        payload["class_name"] = class_name
+    if teacher_name:
+        payload["teacher_name"] = teacher_name
+    if (
+        template is not None
+        and template.source is CalendarTemplateSource.ORGANIZATION
+        and template.filename
+        and template.content
+    ):
+        payload["template"] = _wire_file(template.filename, template.content)
+    return payload
+
+
+def _confirmation_errors(
+    raw: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(raw, list):
+        return ()
+    errors: list[tuple[str, tuple[str, ...]]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        review_id = str(item.get("review_id") or "")
+        issues = item.get("issues") or ()
+        if not review_id:
+            continue
+        errors.append((review_id, tuple(str(issue) for issue in issues)))
+    return tuple(errors)
+
+
+def _review_cases(raw: object):
+    if not isinstance(raw, list):
+        return ()
+    return tuple(SemanticReviewCaseDTO.from_dict(item).to_model() for item in raw)
+
+
+def _poll_job(
+    *,
+    base_url: str,
+    job_id: str,
+    http_request: HttpRequest,
+    on_progress: Callable[[str], None] | None,
+    poll_interval: float,
+    timeout: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_phase: str | None = None
+    while time.monotonic() < deadline:
+        status, _headers, body = http_request(
+            "GET",
+            urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+        if status != 200:
+            raise PipelineError(
+                _api_error_message(status, body, fallback="Не удалось получить статус job")
+            )
+        payload = _decode_json(body)
+        if not isinstance(payload, Mapping):
+            raise PipelineError("Generation API вернул неверный статус job.")
+        phase = payload.get("phase")
+        if isinstance(phase, str) and phase and phase != last_phase:
+            if on_progress is not None:
+                on_progress(_PHASE_LABELS.get(phase, "Формируем календарный план…"))
+            last_phase = phase
+        state = payload.get("job_state")
+        if state in {"SUCCEEDED", "FAILED", "EXPIRED"}:
+            return dict(payload)
+        time.sleep(poll_interval)
+    raise PipelineError("Превышено время ожидания генерации документа.")
+
+
+def _download_document(
+    *,
+    base_url: str,
+    job_id: str,
+    http_request: HttpRequest,
+    fallback_name: str | None,
+) -> tuple[str, bytes]:
+    status, headers, body = http_request(
+        "GET",
+        urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}/document"),
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
+    if status != 200:
+        raise PipelineError(
+            _api_error_message(status, body, fallback="DOCX недоступен")
+        )
+    filename = fallback_name or "Календарный_план.docx"
+    disposition = str(headers.get("Content-Disposition") or headers.get("content-disposition") or "")
+    marker = "filename*=UTF-8''"
+    if marker in disposition:
+        filename = unquote(disposition.split(marker, 1)[1].split(";", 1)[0].strip()) or filename
+    return filename, body
+
+
+def run_remote_calendar_generation(
+    plan: ConfirmedStudyPlan | UtpParseResult,
+    program: ProgramData | None = None,
+    *,
+    academic_year: str,
+    template: CalendarTemplateSelection,
+    source_utp_name: str,
+    use_ai: bool = False,
+    ai_provider: object | None = None,
+    program_filename: str | None = None,
+    program_content: bytes | None = None,
+    group_number: str | None = None,
+    class_name: str | None = None,
+    teacher_name: str | None = None,
+    match_reviews: Mapping | None = None,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    semantic_revision: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    api_url: str | None = None,
+    http_request: HttpRequest | None = None,
+    poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    timeout: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
+) -> PipelineResult:
+    """Submit a generation job and wait for the remote worker DOCX."""
+
+    del program, ai_provider
+    if use_ai:
+        raise PipelineError("Удалённая генерация работает только в режиме CE2 без AI.")
+    if on_progress is not None:
+        on_progress("Формируем календарный план…")
+    payload = build_generation_payload(
+        plan,
+        academic_year=academic_year,
+        source_plan_name=source_utp_name,
+        program_filename=str(program_filename or ""),
+        program_content=program_content or b"",
+        template=template,
+        group_number=group_number,
+        class_name=class_name,
+        teacher_name=teacher_name,
+        match_reviews=match_reviews,
+        manual_confirmations=manual_confirmations,
+        generator_revision=semantic_revision,
+    )
+    request = http_request or default_http_request
+    base_url = generation_api_url(api_url)
+    status, _headers, body = request(
+        "POST",
+        urljoin(base_url + "/", "v1/calendar-jobs"),
+        json_body=payload,
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
+    if status != 202:
+        raise PipelineError(
+            _api_error_message(status, body, fallback="Не удалось поставить job в очередь")
+        )
+    created = _decode_json(body)
+    if not isinstance(created, Mapping) or not created.get("job_id"):
+        raise PipelineError("Generation API не вернул job_id.")
+    job_id = str(created["job_id"])
+    job = created
+    if job.get("job_state") not in {"SUCCEEDED", "FAILED", "EXPIRED"}:
+        job = _poll_job(
+            base_url=base_url,
+            job_id=job_id,
+            http_request=request,
+            on_progress=on_progress,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+    state = job.get("job_state")
+    if state == "FAILED":
+        error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
+        raise PipelineError(str(error.get("message") or "Генерация документа не удалась."))
+    if state == "EXPIRED":
+        raise PipelineError("Срок хранения результата job истёк.")
+    pipeline_status_value = job.get("pipeline_status")
+    if pipeline_status_value == CalendarDocumentStatus.HARD_BLOCK.value:
+        error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
+        raise PipelineError(str(error.get("message") or "Формирование календарного плана заблокировано."))
+    if pipeline_status_value not in {
+        CalendarDocumentStatus.FINAL_READY.value,
+        CalendarDocumentStatus.DRAFT_READY.value,
+    }:
+        raise PipelineError("Generation API вернул неизвестный статус документа.")
+    if not job.get("docx_available"):
+        raise PipelineError("DOCX недоступен.")
+    filename, document = _download_document(
+        base_url=base_url,
+        job_id=job_id,
+        http_request=request,
+        fallback_name=job.get("filename"),
+    )
+    try:
+        request(
+            "DELETE",
+            urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+    except PipelineError:
+        pass
+    return PipelineResult(
+        filename=filename,
+        content=document,
+        warnings=tuple(job.get("warnings") or ()),
+        resolved_lessons=(),
+        status=CalendarDocumentStatus(pipeline_status_value),
+        review_cases=_review_cases(job.get("review_cases")),
+        confirmation_errors=_confirmation_errors(job.get("confirmation_errors")),
+    )
+
+
+__all__ = [
+    "DEFAULT_GENERATION_API_URL",
+    "GENERATION_API_URL_ENV",
+    "build_generation_payload",
+    "generation_api_url",
+    "run_remote_calendar_generation",
+]

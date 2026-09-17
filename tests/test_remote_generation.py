@@ -1,0 +1,247 @@
+import base64
+from urllib.parse import urlparse
+
+from fastapi.testclient import TestClient
+import pytest
+
+from calendar_pedagoga.confirmed_study_plan import confirmed_plan_from_external_utp
+from calendar_pedagoga.generation_api import create_app
+from calendar_pedagoga.generation_contract import PIPELINE_CONTRACT
+from calendar_pedagoga.generation_service import GenerationService
+from calendar_pedagoga.organization_template import (
+    CalendarTemplateSelection,
+    CalendarTemplateSource,
+)
+from calendar_pedagoga.parsing import parse_utp
+from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineError, PipelineResult
+from calendar_pedagoga.remote_generation import (
+    DEFAULT_GENERATION_API_URL,
+    GENERATION_API_URL_ENV,
+    build_generation_payload,
+    generation_api_url,
+    run_remote_calendar_generation,
+)
+from calendar_pedagoga.semantic_review import SemanticReviewCase
+from pathlib import Path
+
+
+REFERENCES = Path(__file__).resolve().parents[1] / "references"
+REVISION = "test-revision"
+UTP_PATH = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
+PROGRAM_PATH = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+
+
+def _plan():
+    return confirmed_plan_from_external_utp(
+        parse_utp(UTP_PATH), study_year=2, source_name=UTP_PATH.name
+    )
+
+
+def _template() -> CalendarTemplateSelection:
+    return CalendarTemplateSelection(CalendarTemplateSource.STANDARD)
+
+
+def _result(status: CalendarDocumentStatus, *, review_cases=()) -> PipelineResult:
+    return PipelineResult(
+        filename="Черновик.docx" if review_cases else "План.docx",
+        content=b"PK\x03\x04docx",
+        warnings=("ok",),
+        resolved_lessons=(),
+        status=status,
+        review_cases=review_cases,
+    )
+
+
+def _final_runner(*_args, **_kwargs) -> PipelineResult:
+    return _result(CalendarDocumentStatus.FINAL_READY)
+
+
+def _draft_runner(*_args, **_kwargs) -> PipelineResult:
+    return _result(
+        CalendarDocumentStatus.DRAFT_READY,
+        review_cases=(
+            SemanticReviewCase(
+                review_id="r1",
+                source_fingerprint="s1",
+                week_number=2,
+                topic_title="Тема",
+                program_source="SOURCE",
+                required_clauses=("A",),
+                proposed_result="Результат.",
+                proposed_control="Контроль.",
+                reasons=("Причина",),
+            ),
+        ),
+    )
+
+
+def _blocked_runner(*_args, **_kwargs):
+    raise PipelineError("Повреждённый план")
+
+
+def _service(runner=_final_runner, **kwargs) -> GenerationService:
+    return GenerationService(
+        runner=runner,
+        revision_provider=lambda: REVISION,
+        job_timeout_seconds=kwargs.pop("job_timeout_seconds", 20),
+        ttl_seconds=kwargs.pop("ttl_seconds", 60),
+        **kwargs,
+    )
+
+
+def _http_via_client(client: TestClient):
+    def http_request(
+        method: str,
+        url: str,
+        *,
+        json_body=None,
+        headers=None,
+        timeout=60,
+    ):
+        parsed = urlparse(url)
+        response = client.request(
+            method,
+            parsed.path,
+            json=json_body,
+            headers=dict(headers or {}),
+        )
+        return response.status_code, response.headers, response.content
+
+    return http_request
+
+
+def _run(client: TestClient, **kwargs) -> tuple[PipelineResult, list[str]]:
+    phases: list[str] = []
+    result = run_remote_calendar_generation(
+        _plan(),
+        academic_year="2026–2027",
+        template=_template(),
+        source_utp_name=UTP_PATH.name,
+        program_filename=PROGRAM_PATH.name,
+        program_content=PROGRAM_PATH.read_bytes(),
+        semantic_revision=REVISION,
+        on_progress=phases.append,
+        api_url="http://generation.test",
+        http_request=_http_via_client(client),
+        poll_interval=0.01,
+        timeout=kwargs.pop("timeout", 10),
+        **kwargs,
+    )
+    return result, phases
+
+
+def test_generation_api_url_defaults_and_env(monkeypatch) -> None:
+    monkeypatch.delenv(GENERATION_API_URL_ENV, raising=False)
+    assert generation_api_url() == DEFAULT_GENERATION_API_URL
+    monkeypatch.setenv(GENERATION_API_URL_ENV, "http://127.0.0.1:8000/")
+    assert generation_api_url() == "http://127.0.0.1:8000"
+
+
+def test_build_payload_uses_contract_and_json_safe_reviews() -> None:
+    payload = build_generation_payload(
+        _plan(),
+        academic_year="2026–2027",
+        source_plan_name=UTP_PATH.name,
+        program_filename=PROGRAM_PATH.name,
+        program_content=PROGRAM_PATH.read_bytes(),
+        template=_template(),
+        match_reviews={("1", "Тема", None): {"decision": "USER_CONFIRMED"}},
+        generator_revision=REVISION,
+    )
+    assert payload["pipeline_contract"] == PIPELINE_CONTRACT
+    assert payload["generator_revision"] == REVISION
+    assert "template" not in payload
+    assert list(payload["match_reviews"]) == ['["1", "Тема", null]']
+    encoded = payload["program"]["content_base64"]
+    assert base64.b64decode(encoded) == PROGRAM_PATH.read_bytes()
+
+
+def test_remote_client_polls_until_final_ready_and_downloads_docx() -> None:
+    with TestClient(create_app(service=_service())) as client:
+        result, phases = _run(client)
+        assert result.status is CalendarDocumentStatus.FINAL_READY
+        assert result.content.startswith(b"PK\x03\x04")
+        assert result.filename
+        assert "Формируем календарный план…" in phases
+
+
+def test_remote_client_returns_draft_review_cases() -> None:
+    with TestClient(create_app(service=_service(_draft_runner))) as client:
+        result, _phases = _run(client)
+        assert result.status is CalendarDocumentStatus.DRAFT_READY
+        assert [case.week_number for case in result.review_cases] == [2]
+        assert result.content.startswith(b"PK\x03\x04")
+
+
+def test_remote_client_maps_hard_block_to_pipeline_error() -> None:
+    with TestClient(create_app(service=_service(_blocked_runner))) as client:
+        with pytest.raises(PipelineError, match="Повреждённый план"):
+            _run(client)
+
+
+def test_remote_client_maps_revision_mismatch() -> None:
+    with TestClient(create_app(service=_service())) as client:
+        with pytest.raises(PipelineError, match="не совпадает"):
+            run_remote_calendar_generation(
+                _plan(),
+                academic_year="2026–2027",
+                template=_template(),
+                source_utp_name=UTP_PATH.name,
+                program_filename=PROGRAM_PATH.name,
+                program_content=PROGRAM_PATH.read_bytes(),
+                semantic_revision="stale",
+                api_url="http://generation.test",
+                http_request=_http_via_client(client),
+            )
+
+
+def test_remote_client_reports_failed_job() -> None:
+    calls = {"status": 0}
+
+    def http_request(method, url, *, json_body=None, headers=None, timeout=60):
+        if method == "POST":
+            body = (
+                b'{"job_id":"abc","job_state":"QUEUED","phase":null,'
+                b'"pipeline_status":null,"review_cases":[],'
+                b'"confirmation_errors":[],"warnings":[],"docx_available":false,'
+                b'"filename":null,"error":null}'
+            )
+            return 202, {}, body
+        calls["status"] += 1
+        body = (
+            b'{"job_id":"abc","job_state":"FAILED","phase":"DOCX",'
+            b'"pipeline_status":null,"review_cases":[],'
+            b'"confirmation_errors":[],"warnings":[],"docx_available":false,'
+            b'"filename":null,"error":{"code":"JOB_TIMEOUT","message":"timeout"}}'
+        )
+        return 200, {}, body
+
+    with pytest.raises(PipelineError, match="timeout"):
+        run_remote_calendar_generation(
+            _plan(),
+            academic_year="2026–2027",
+            template=_template(),
+            source_utp_name=UTP_PATH.name,
+            program_filename=PROGRAM_PATH.name,
+            program_content=PROGRAM_PATH.read_bytes(),
+            semantic_revision=REVISION,
+            api_url="http://generation.test",
+            http_request=http_request,
+            poll_interval=0.01,
+        )
+    assert calls["status"] == 1
+
+
+def test_remote_client_rejects_ai_mode() -> None:
+    with pytest.raises(PipelineError, match="без AI"):
+        run_remote_calendar_generation(
+            _plan(),
+            academic_year="2026–2027",
+            template=_template(),
+            source_utp_name=UTP_PATH.name,
+            program_filename=PROGRAM_PATH.name,
+            program_content=PROGRAM_PATH.read_bytes(),
+            use_ai=True,
+            semantic_revision=REVISION,
+            http_request=lambda *_args, **_kwargs: (500, {}, b"{}"),
+        )

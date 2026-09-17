@@ -6,6 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from calendar_pedagoga import ui
+from calendar_pedagoga.pipeline import CalendarDocumentStatus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,16 +22,52 @@ def _generated_app(with_utp=False, with_template=False):
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
     assert not any(b.label == "Сформировать календарный план" for b in app.button)
     app.get("file_uploader")[0].set_value((PROGRAM.name, PROGRAM.read_bytes(), MIME))
-    if with_utp:
-        app.get("file_uploader")[1].set_value(
-            (SAME_YEAR_UTP_NAME, SAME_YEAR_UTP.read_bytes(), MIME)
-        )
+    app.get("file_uploader")[1].set_value(
+        (SAME_YEAR_UTP_NAME, SAME_YEAR_UTP.read_bytes(), MIME)
+    )
     if with_template:
         template = ROOT / "references" / "Календарный план.docx"
         app.get("file_uploader")[2].set_value((template.name, template.read_bytes(), MIME))
     app.run()
-    generated = SimpleNamespace(filename="calendar.docx", content=b"test-docx", warnings=())
-    with patch.object(ui, "run_calendar_pipeline", return_value=generated) as pipeline:
+    year_input = next(
+        item for item in app.number_input if item.label == "Год обучения по программе"
+    )
+    if year_input.value is None:
+        year_input.set_value(1).run()
+    weeks_input = next(
+        (
+            item
+            for item in app.number_input
+            if item.label == "Количество учебных недель" and item.value is None
+        ),
+        None,
+    )
+    if weeks_input is not None:
+        weeks_input.set_value(36).run()
+    hours_input = next(
+        (
+            item
+            for item in app.text_input
+            if item.label == "Количество часов в неделю" and not item.disabled
+            and not (item.value or "").strip()
+        ),
+        None,
+    )
+    if hours_input is not None:
+        hours_input.set_value("2").run()
+    generated = SimpleNamespace(
+        filename="calendar.docx",
+        content=b"test-docx",
+        warnings=(),
+        status=CalendarDocumentStatus.FINAL_READY,
+        review_cases=(),
+        confirmation_errors=(),
+        resolved_lessons=(),
+    )
+    with patch(
+        "calendar_pedagoga.ui.run_remote_calendar_generation",
+        return_value=generated,
+    ) as pipeline:
         next(b for b in app.button if b.label == "Проверить документы").click().run()
         for _ in range(40):
             confirms = [
@@ -67,7 +104,7 @@ def test_existing_fingerprint_keeps_download_without_regeneration():
     with patch.object(ui, "_generator_revision", return_value="CE2-old"), patch.object(ui, "_LOADED_GENERATOR_REVISION", "CE2-old"):
         app = _generated_app()
         original = app.session_state["calendar_generation_fingerprint"]
-        with patch.object(ui, "run_calendar_pipeline") as pipeline:
+        with patch.object(ui, "run_remote_calendar_generation") as pipeline:
             app.run()
             app.run()
             pipeline.assert_not_called()
@@ -81,7 +118,7 @@ def test_ce2_revision_change_invalidates_download():
     with patch.object(ui, "_generator_revision", return_value="CE2-old") as revision, patch.object(ui, "_LOADED_GENERATOR_REVISION", "CE2-old"):
         app = _generated_app()
         revision.return_value = "CE2-new"
-        with patch.object(ui, "run_calendar_pipeline") as pipeline:
+        with patch.object(ui, "run_remote_calendar_generation") as pipeline:
             app.run()
             pipeline.assert_not_called()
         _assert_invalidated(app)
@@ -91,7 +128,7 @@ def test_ce2_revision_change_invalidates_download():
 def test_same_filename_changed_bytes_invalidates_download():
     app = _generated_app()
     app.get("file_uploader")[0].set_value((PROGRAM.name, PROGRAM.read_bytes() + b"changed", MIME))
-    with patch.object(ui, "run_calendar_pipeline") as pipeline:
+    with patch.object(ui, "run_remote_calendar_generation") as pipeline:
         app.run()
         pipeline.assert_not_called()
     _assert_invalidated(app)
@@ -100,18 +137,18 @@ def test_same_filename_changed_bytes_invalidates_download():
 
 def test_academic_year_change_invalidates_analysis_and_download():
     app = _generated_app()
-    with patch.object(ui, "run_calendar_pipeline") as pipeline:
+    with patch.object(ui, "run_remote_calendar_generation") as pipeline:
         app.number_input[0].set_value(2027).run()
         pipeline.assert_not_called()
     _assert_invalidated(app)
     assert "analysis_ready" not in app.session_state or not app.session_state["analysis_ready"]
 
 
-@pytest.mark.parametrize("field", [0, 1])
-def test_group_or_class_change_invalidates_but_keeps_analysis(field):
+@pytest.mark.parametrize("label", ["Группа №", "Класс"])
+def test_group_or_class_change_invalidates_but_keeps_analysis(label):
     app = _generated_app()
-    with patch.object(ui, "run_calendar_pipeline") as pipeline:
-        app.text_input[field].set_value("2").run()
+    with patch.object(ui, "run_remote_calendar_generation") as pipeline:
+        next(item for item in app.text_input if item.label == label).set_value("2").run()
         pipeline.assert_not_called()
     _assert_invalidated(app)
     assert app.session_state["analysis_ready"]
@@ -137,7 +174,7 @@ def test_timer_guard_invalidates_code_change_without_generating():
         "calendar_context": object(),
         "analysis_ready": True,
     }
-    with patch.object(ui.st, "session_state", state), patch.object(ui, "_generator_revision", return_value="new"), patch.object(ui.st, "info") as info, patch.object(ui.st, "download_button") as download, patch.object(ui, "run_calendar_pipeline") as pipeline:
+    with patch.object(ui.st, "session_state", state), patch.object(ui, "_generator_revision", return_value="new"), patch.object(ui.st, "info") as info, patch.object(ui.st, "download_button") as download, patch.object(ui, "run_remote_calendar_generation") as pipeline:
         ui._show_generation_result.__wrapped__()
         download.assert_not_called()
         pipeline.assert_not_called()
@@ -172,7 +209,7 @@ def test_changed_code_cannot_regenerate_with_old_imports(with_utp, with_template
         app = _generated_app(with_utp, with_template)
         revision.return_value = "new"
         app.run()
-        with patch.object(ui, "run_calendar_pipeline") as pipeline:
+        with patch.object(ui, "run_remote_calendar_generation") as pipeline:
             next(b for b in app.button if b.label == "Проверить документы").click().run()
             pipeline.assert_not_called()
         assert not app.exception
@@ -185,9 +222,20 @@ def test_changed_code_cannot_regenerate_with_old_imports(with_utp, with_template
         assert mismatch_logs
         assert set(mismatch_logs) == {'Generator revision mismatch: loaded=old current=new'}
         # Simulate a fresh process with current imports; auto-generation returns.
-        generated = SimpleNamespace(filename="calendar.docx", content=b"test-docx", warnings=())
+        generated = SimpleNamespace(
+            filename="calendar.docx",
+            content=b"test-docx",
+            warnings=(),
+            status=CalendarDocumentStatus.FINAL_READY,
+            review_cases=(),
+            confirmation_errors=(),
+            resolved_lessons=(),
+        )
         with patch.object(ui, '_LOADED_GENERATOR_REVISION', 'new'):
-            with patch.object(ui, "run_calendar_pipeline", return_value=generated) as pipeline:
+            with patch(
+                "calendar_pedagoga.ui.run_remote_calendar_generation",
+                return_value=generated,
+            ) as pipeline:
                 app.run()
                 for _ in range(40):
                     confirms = [

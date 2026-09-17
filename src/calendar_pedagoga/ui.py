@@ -71,13 +71,13 @@ from calendar_pedagoga.pipeline import (
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
     _lesson_rows_from_v2,
-    run_calendar_pipeline,
 )
 from calendar_pedagoga.content_engine_v2 import (
     LessonContentV2Row,
     build_lesson_content_v2,
     validate_manual_lesson_content,
 )
+from calendar_pedagoga.remote_generation import run_remote_calendar_generation
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -4242,7 +4242,7 @@ def _execute_calendar_generation(
         with _work_status_block(status_slot, _STATUS_BUILD_PLAN) as status_widget:
             _set_work_status(_STATUS_BUILD_PLAN)
             with TransientDocumentSession() as operation:
-                result = run_calendar_pipeline(
+                result = run_remote_calendar_generation(
                     utp,
                     program,
                     academic_year=academic_year,
@@ -4254,11 +4254,17 @@ def _execute_calendar_generation(
                         if validated_program is not None
                         else None
                     ),
+                    program_content=(
+                        validated_program.content
+                        if validated_program is not None
+                        else None
+                    ),
                     group_number=group_number,
                     class_name=class_name,
                     teacher_name=teacher_name,
                     match_reviews=reviews,
                     manual_confirmations=manual_confirmations,
+                    semantic_revision=_generator_revision(),
                     on_progress=_progress,
                 )
                 operation.publish_result(result.filename, result.content)

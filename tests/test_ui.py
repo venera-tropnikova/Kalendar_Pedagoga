@@ -11,6 +11,7 @@ from streamlit.testing.v1 import AppTest
 
 from calendar_pedagoga import ui
 from calendar_pedagoga.academic_year import default_academic_year_start, format_academic_year
+from calendar_pedagoga.pipeline import CalendarDocumentStatus
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.ui import _teacher_generation_warnings
 
@@ -230,6 +231,9 @@ def _fake_generated(**overrides: object) -> SimpleNamespace:
         "warnings": (),
         "ai_usage": None,
         "resolved_lessons": (),
+        "status": CalendarDocumentStatus.FINAL_READY,
+        "review_cases": (),
+        "confirmation_errors": (),
     }
     payload.update(overrides)
     return SimpleNamespace(**payload)
@@ -244,7 +248,7 @@ def _check_and_resolve(
     result = generated if generated is not None else _fake_generated()
     _prepare_required_plan_inputs(app)
     with patch(
-        "calendar_pedagoga.ui.run_calendar_pipeline", return_value=result
+        "calendar_pedagoga.ui.run_remote_calendar_generation", return_value=result
     ) as pipeline:
         _check_button(app).click().run()
         _resolve_disputed_matches(app, prefer_confirm=prefer_confirm)
@@ -873,6 +877,10 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
             "Безопасный шаблон CE2: unproven_object_case.",
         ),
         ai_usage=None,
+        status=CalendarDocumentStatus.FINAL_READY,
+        review_cases=(),
+        confirmation_errors=(),
+        resolved_lessons=(),
     )
     assert [item.label for item in app.text_input][-3:] == [
         "Группа №",
@@ -926,7 +934,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert SLOT_CONTINUE_WARNING in stored
     assert SLOT_PACK_WARNING in stored
 
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as rerun_pipeline:
+    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as rerun_pipeline:
         app.run()
         rerun_pipeline.assert_not_called()
     assert app.session_state["calendar_download"].content == b"generated-docx"
@@ -979,6 +987,9 @@ def test_generated_plan_survives_calendar_and_week_click_reruns() -> None:
         warnings=(),
         ai_usage=None,
         resolved_lessons=(october_resolved, resolved),
+        status=CalendarDocumentStatus.FINAL_READY,
+        review_cases=(),
+        confirmation_errors=(),
     )
     _check_and_resolve(app, generated)
 
@@ -1178,7 +1189,8 @@ def test_second_click_while_busy_does_not_start_another_generation() -> None:
     _upload(app, 0, _program_file())
     app.run()
     generated = _fake_generated()
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline", return_value=generated) as pipeline:
+    _prepare_required_plan_inputs(app)
+    with patch("calendar_pedagoga.ui.run_remote_calendar_generation", return_value=generated) as pipeline:
         _check_button(app).click().run()
         app.session_state["calendar_busy"] = True
         _check_button(app).click().run()
@@ -1192,7 +1204,7 @@ def test_unresolved_disputed_matches_block_generation() -> None:
     _upload_disputed(app, template=True)
     app.run()
     _prepare_required_plan_inputs(app)
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
+    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
 
@@ -1330,7 +1342,7 @@ def test_year_conflict_block_does_not_generate() -> None:
     next(
         item for item in app.number_input if item.label == "Год обучения по программе"
     ).set_value(1).run()
-    with patch("calendar_pedagoga.ui.run_calendar_pipeline") as pipeline:
+    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
 
@@ -1352,7 +1364,7 @@ def test_generation_failure_hides_download() -> None:
     app.run()
     _prepare_required_plan_inputs(app)
     with patch(
-        "calendar_pedagoga.ui.run_calendar_pipeline",
+        "calendar_pedagoga.ui.run_remote_calendar_generation",
         side_effect=PipelineError("DOCX не прошёл QA: overflow"),
     ) as pipeline:
         _check_button(app).click().run()
