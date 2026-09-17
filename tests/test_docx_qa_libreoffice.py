@@ -119,6 +119,99 @@ def test_libreoffice_converts_only_docx_to_pdf_and_pymupdf_renders_all_pages(
     assert not qa_temp.exists()
 
 
+def test_request_cache_reuses_only_byte_identical_docx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bytes] = []
+    monkeypatch.setattr(docx_qa, "find_libreoffice", lambda: Path("/usr/bin/soffice"))
+
+    def fake_soffice(
+        soffice: Path,
+        arguments: list[str],
+        temp_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        source = Path(arguments[-1]).read_bytes()
+        calls.append(source)
+        output = Path(arguments[arguments.index("--outdir") + 1]) / "calendar.pdf"
+        output.write_bytes(b"pdf:" + source)
+        return subprocess.CompletedProcess([str(soffice), *arguments], 0, "", "")
+
+    monkeypatch.setattr(docx_qa, "_run_soffice", fake_soffice)
+
+    with docx_qa.libreoffice_pdf_render_cache():
+        first = docx_qa._docx_to_pdf_bytes_libreoffice(b"same docx")
+        repeated = docx_qa._docx_to_pdf_bytes_libreoffice(b"same docx")
+        changed = docx_qa._docx_to_pdf_bytes_libreoffice(b"changed docx")
+
+    assert first == repeated == b"pdf:same docx"
+    assert changed == b"pdf:changed docx"
+    assert calls == [b"same docx", b"changed docx"]
+
+
+def test_render_cache_is_request_scoped_and_keys_layout_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bytes] = []
+    soffice = Path("/usr/bin/soffice")
+    monkeypatch.setattr(docx_qa, "find_libreoffice", lambda: soffice)
+
+    def fake_soffice(
+        executable: Path,
+        arguments: list[str],
+        temp_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        source = Path(arguments[-1]).read_bytes()
+        calls.append(source)
+        output = Path(arguments[arguments.index("--outdir") + 1]) / "calendar.pdf"
+        output.write_bytes(b"pdf")
+        return subprocess.CompletedProcess([str(executable), *arguments], 0, "", "")
+
+    monkeypatch.setattr(docx_qa, "_run_soffice", fake_soffice)
+
+    with docx_qa.libreoffice_pdf_render_cache():
+        docx_qa._docx_to_pdf_bytes_libreoffice(b"docx")
+    with docx_qa.libreoffice_pdf_render_cache():
+        docx_qa._docx_to_pdf_bytes_libreoffice(b"docx")
+
+    assert calls == [b"docx", b"docx"]
+    default = docx_qa._libreoffice_pdf_cache_key(b"docx", soffice)
+    split = docx_qa._libreoffice_pdf_cache_key(
+        b"docx", soffice, layout_options=("allow-split:1",)
+    )
+    assert default != split
+
+
+def test_visual_qa_reuses_cached_final_layout_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[bytes] = []
+    pdf = _pdf_bytes(2)
+    monkeypatch.setattr(docx_qa, "_docx_to_pdf_bytes_word", lambda _: None)
+    monkeypatch.setattr(docx_qa, "find_libreoffice", lambda: Path("/usr/bin/soffice"))
+
+    def fake_soffice(
+        soffice: Path,
+        arguments: list[str],
+        temp_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        source = Path(arguments[-1]).read_bytes()
+        calls.append(source)
+        output = Path(arguments[arguments.index("--outdir") + 1]) / "calendar.pdf"
+        output.write_bytes(pdf)
+        return subprocess.CompletedProcess([str(soffice), *arguments], 0, "", "")
+
+    monkeypatch.setattr(docx_qa, "_run_soffice", fake_soffice)
+
+    final_docx = b"byte-exact final layout"
+    with docx_qa.libreoffice_pdf_render_cache():
+        assert docx_qa._docx_to_pdf_bytes_libreoffice(final_docx) == pdf
+        rendered = render_docx_pages(final_docx, tmp_path / "rendered")
+
+    assert calls == [final_docx]
+    assert [path.name for path in rendered] == ["page_01.png", "page_02.png"]
+
+
 def test_pymupdf_failure_is_logged_and_temp_directory_is_removed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

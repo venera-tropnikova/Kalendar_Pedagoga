@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
 from io import BytesIO
 import json
 import logging
@@ -16,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -30,9 +34,48 @@ logger = logging.getLogger(__name__)
 _SEGMENTATION_DIAG: dict[str, object] = {}
 _DOCX_QA_LOGGED_ATTR = "_docx_qa_diagnostics_logged"
 
+# DOCX-to-PDF rendering is deliberately cached only inside one pipeline
+# request. A byte-exact digest and all conversion options are part of the key,
+# so a pagination mutation can never reuse an older render.
+_LIBREOFFICE_PDF_OPTIONS = ("--convert-to", "pdf")
+_LIBREOFFICE_PDF_CACHE: ContextVar[dict[tuple[str, ...], bytes] | None] = (
+    ContextVar("calendar_pedagoga_libreoffice_pdf_cache", default=None)
+)
+
 _WD_ACTIVE_END_PAGE_NUMBER = 3
 _WD_EXPORT_FORMAT_PDF = 17
 _WD_ALERTS_NONE = 0
+
+
+def _libreoffice_pdf_cache_key(
+    content: bytes,
+    soffice: Path,
+    *,
+    conversion_options: tuple[str, ...] = _LIBREOFFICE_PDF_OPTIONS,
+    layout_options: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return the exact request-local fingerprint for one PDF render."""
+
+    return (
+        "libreoffice-pdf-v1",
+        str(soffice),
+        *conversion_options,
+        "layout",
+        *layout_options,
+        "sha256",
+        hashlib.sha256(content).hexdigest(),
+    )
+
+
+@contextmanager
+def libreoffice_pdf_render_cache():
+    """Share successful LibreOffice renders within one pipeline request."""
+
+    token = _LIBREOFFICE_PDF_CACHE.set({})
+    try:
+        yield
+    finally:
+        _LIBREOFFICE_PDF_CACHE.reset(token)
 
 
 def find_microsoft_word() -> bool:
@@ -826,6 +869,11 @@ def _docx_to_pdf_bytes_libreoffice(content: bytes) -> bytes | None:
     if soffice is None:
         return None
 
+    cache = _LIBREOFFICE_PDF_CACHE.get()
+    cache_key = _libreoffice_pdf_cache_key(content, soffice)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
     temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_pdf_"))
     try:
         docx_path = temp_path / "calendar.docx"
@@ -846,7 +894,10 @@ def _docx_to_pdf_bytes_libreoffice(content: bytes) -> bytes | None:
         pdfs = sorted(pdf_dir.glob("*.pdf"))
         if not pdfs:
             return None
-        return pdfs[0].read_bytes()
+        pdf = pdfs[0].read_bytes()
+        if cache is not None:
+            cache[cache_key] = pdf
+        return pdf
     finally:
         shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -891,7 +942,38 @@ def _pagination_measurement_copy(
                 direction.getparent().remove(direction)
     buffer = BytesIO()
     document.save(buffer)
-    return buffer.getvalue()
+    return _stable_measurement_archive(buffer.getvalue())
+
+
+def _stable_measurement_archive(content: bytes) -> bytes:
+    """Remove volatile ZIP timestamps from a render-only DOCX copy."""
+
+    source = BytesIO(content)
+    target = BytesIO()
+    with ZipFile(source, "r") as zin, ZipFile(
+        target, "w", compression=ZIP_DEFLATED
+    ) as zout:
+        for original in zin.infolist():
+            stable = ZipInfo(original.filename, date_time=(1980, 1, 1, 0, 0, 0))
+            stable.compress_type = original.compress_type
+            stable.comment = original.comment
+            stable.extra = original.extra
+            stable.create_system = original.create_system
+            stable.external_attr = original.external_attr
+            stable.internal_attr = original.internal_attr
+            stable.flag_bits = original.flag_bits
+            data = zin.read(original.filename)
+            if original.filename == "docProps/custom.xml":
+                text = data.decode("utf-8")
+                text = re.sub(
+                    r'(<property[^>]+name="GeneratedAt"[^>]*><vt:lpwstr>)[^<]*'
+                    r'(</vt:lpwstr>)',
+                    r"\1RENDER_MEASUREMENT\2",
+                    text,
+                )
+                data = text.encode("utf-8")
+            zout.writestr(stable, data)
+    return target.getvalue()
 
 
 _CLIP_TAIL_CONTEXT = 32
@@ -1926,6 +2008,44 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
     if soffice is None:
         raise RuntimeError("Ни Microsoft Word, ни LibreOffice недоступны для visual QA.")
 
+    cache = _LIBREOFFICE_PDF_CACHE.get()
+    cache_key = _libreoffice_pdf_cache_key(content, soffice)
+    cached_pdf = cache.get(cache_key) if cache is not None else None
+    if cached_pdf is not None:
+        document = None
+        try:
+            import pymupdf
+
+            document = pymupdf.open(stream=cached_pdf, filetype="pdf")
+            if document.page_count <= 0:
+                raise RuntimeError("PDF не содержит страниц.")
+            copied: list[Path] = []
+            for page_number, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                target = output_dir / f"page_{page_number:02d}.png"
+                pixmap.save(str(target))
+                copied.append(target)
+            return tuple(copied)
+        except Exception as error:
+            logger.error(
+                "Cached LibreOffice visual QA PDF render failure: %s",
+                json.dumps(
+                    {
+                        "pdf_size": len(cached_pdf),
+                        "pymupdf_exception_type": type(error).__name__,
+                        "pymupdf_exception_message": str(error),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            raise RuntimeError(
+                "PyMuPDF не отрендерил cached PDF; diagnostics logged."
+            ) from error
+        finally:
+            if document is not None:
+                document.close()
+
     temp_path = Path(tempfile.mkdtemp(prefix="calendar_pedagoga_qa_"))
     try:
         docx_path = temp_path / "calendar.docx"
@@ -1958,7 +2078,10 @@ def render_docx_pages(content: bytes, output_dir: Path) -> tuple[Path, ...]:
         try:
             import pymupdf
 
-            document = pymupdf.open(stream=pdf_path.read_bytes(), filetype="pdf")
+            pdf_bytes = pdf_path.read_bytes()
+            if cache is not None:
+                cache[cache_key] = pdf_bytes
+            document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             page_count = document.page_count
             if page_count <= 0:
                 raise RuntimeError("PDF не содержит страниц.")

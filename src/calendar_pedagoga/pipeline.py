@@ -16,6 +16,7 @@ from calendar_pedagoga.confirmed_study_plan import (
 from calendar_pedagoga.docx_generation import build_output_filename, generate_calendar_docx
 from calendar_pedagoga.docx_qa import (
     has_blocking_qa_issues,
+    libreoffice_pdf_render_cache,
     log_docx_qa_failure,
     validate_calendar_docx,
     validate_calendar_docx_visual,
@@ -352,54 +353,55 @@ def run_calendar_pipeline(
         if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
         else resolved
     )
-    try:
-        docx_bytes = generate_calendar_docx(
-            utp,
-            rows_for_docx,
-            template,
-            academic_year,
-            program_title=program.title if program else None,
-            study_year_hints=_study_year_hints(
-                source_utp_name=source_utp_name,
-                program_filename=program_filename,
-            ),
-            group_number=group_number,
-            class_name=class_name,
-            teacher_name=teacher_name,
-            draft_review_weeks=tuple(
-                case.week_number for case in lesson_build.review_cases
-            ),
-        )
-    except Exception as error:
-        log_docx_qa_failure(
-            "generate_calendar_docx",
-            error,
-            logical_rows=len(rows_for_docx),
-        )
-        raise
-    if on_progress is not None:
-        on_progress("Проверяем готовый документ…")
-    try:
-        qa_issues = validate_calendar_docx(
-            docx_bytes,
-            expected_weeks=len(schedule.weeks),
-        )
-        visual_issues = validate_calendar_docx_visual(docx_bytes)
-        if has_blocking_qa_issues(qa_issues + visual_issues):
-            messages = "; ".join(
-                issue.message
-                for issue in (*qa_issues, *visual_issues)
-                if issue.severity.value == "error"
+    with libreoffice_pdf_render_cache():
+        try:
+            docx_bytes = generate_calendar_docx(
+                utp,
+                rows_for_docx,
+                template,
+                academic_year,
+                program_title=program.title if program else None,
+                study_year_hints=_study_year_hints(
+                    source_utp_name=source_utp_name,
+                    program_filename=program_filename,
+                ),
+                group_number=group_number,
+                class_name=class_name,
+                teacher_name=teacher_name,
+                draft_review_weeks=tuple(
+                    case.week_number for case in lesson_build.review_cases
+                ),
             )
-            raise PipelineError(f"DOCX не прошёл QA: {messages}")
-    except Exception as error:
-        log_docx_qa_failure(
-            "validate_calendar_docx",
-            error,
-            content=docx_bytes,
-            logical_rows=len(rows_for_docx),
-        )
-        raise
+        except Exception as error:
+            log_docx_qa_failure(
+                "generate_calendar_docx",
+                error,
+                logical_rows=len(rows_for_docx),
+            )
+            raise
+        if on_progress is not None:
+            on_progress("Проверяем готовый документ…")
+        try:
+            qa_issues = validate_calendar_docx(
+                docx_bytes,
+                expected_weeks=len(schedule.weeks),
+            )
+            visual_issues = validate_calendar_docx_visual(docx_bytes)
+            if has_blocking_qa_issues(qa_issues + visual_issues):
+                messages = "; ".join(
+                    issue.message
+                    for issue in (*qa_issues, *visual_issues)
+                    if issue.severity.value == "error"
+                )
+                raise PipelineError(f"DOCX не прошёл QA: {messages}")
+        except Exception as error:
+            log_docx_qa_failure(
+                "validate_calendar_docx",
+                error,
+                content=docx_bytes,
+                logical_rows=len(rows_for_docx),
+            )
+            raise
 
     warnings = sorted(
         {
