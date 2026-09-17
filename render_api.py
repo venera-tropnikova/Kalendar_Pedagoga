@@ -16,6 +16,9 @@ from calendar_pedagoga.generation_api import app
 
 
 if __name__ == "__main__":
+    if not (os.environ.get("CALENDAR_GENERATION_API_TOKEN") or "").strip():
+        raise SystemExit("CALENDAR_GENERATION_API_TOKEN is required for APP_ROLE=api.")
+
     import uvicorn
 
     uvicorn.run(

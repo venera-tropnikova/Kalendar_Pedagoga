@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import hmac
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from calendar_pedagoga.generation_contract import (
     PIPELINE_CONTRACT,
@@ -24,6 +27,41 @@ from calendar_pedagoga.generation_service import (
 from calendar_pedagoga.generator_revision import generator_git_commit
 
 
+GENERATION_API_TOKEN_ENV = "CALENDAR_GENERATION_API_TOKEN"
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def configured_generation_api_token() -> str:
+    token = (os.environ.get(GENERATION_API_TOKEN_ENV) or "").strip()
+    if not token:
+        raise RuntimeError(
+            f"{GENERATION_API_TOKEN_ENV} is required for the generation API."
+        )
+    return token
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "code": "UNAUTHORIZED",
+            "message": "Требуется действительный Bearer-токен.",
+        },
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_bearer_api_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> None:
+    expected = configured_generation_api_token()
+    provided = ""
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        provided = credentials.credentials or ""
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise _unauthorized()
+
+
 def create_app(*, service: GenerationService | None = None, store=None) -> FastAPI:
     """Build the API; ``store`` remains accepted for stage-1 callers."""
 
@@ -34,6 +72,11 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
     @asynccontextmanager
     async def lifespan(active_app: FastAPI):
         jobs = provided_jobs or GenerationService()
+        try:
+            configured_generation_api_token()
+        except Exception:
+            jobs.close()
+            raise
         active_app.state.generation_jobs = jobs
         try:
             yield
@@ -67,6 +110,7 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
     def create_job(
         payload: dict[str, Any],
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        _: None = Depends(require_bearer_api_token),
     ) -> dict[str, Any]:
         try:
             submission = jobs().submit(payload, idempotency_key=idempotency_key)
@@ -101,7 +145,10 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
         return response
 
     @app.get("/v1/calendar-jobs/{job_id}")
-    def get_job(job_id: str) -> dict[str, Any]:
+    def get_job(
+        job_id: str,
+        _: None = Depends(require_bearer_api_token),
+    ) -> dict[str, Any]:
         active = jobs()
         job_status = active.status(job_id)
         if job_status is None:
@@ -109,7 +156,10 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
         return job_status
 
     @app.get("/v1/calendar-jobs/{job_id}/document")
-    def get_document(job_id: str) -> Response:
+    def get_document(
+        job_id: str,
+        _: None = Depends(require_bearer_api_token),
+    ) -> Response:
         active = jobs()
         snapshot = active.document_snapshot(job_id)
         if snapshot is None:
@@ -143,7 +193,10 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
         )
 
     @app.delete("/v1/calendar-jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-    def delete_job(job_id: str) -> Response:
+    def delete_job(
+        job_id: str,
+        _: None = Depends(require_bearer_api_token),
+    ) -> Response:
         if not jobs().delete(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -154,4 +207,11 @@ def create_app(*, service: GenerationService | None = None, store=None) -> FastA
 app = create_app()
 
 
-__all__ = ["GenerationJobStore", "GenerationService", "app", "create_app"]
+__all__ = [
+    "GENERATION_API_TOKEN_ENV",
+    "GenerationJobStore",
+    "GenerationService",
+    "app",
+    "configured_generation_api_token",
+    "create_app",
+]

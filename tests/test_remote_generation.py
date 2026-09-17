@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from calendar_pedagoga.confirmed_study_plan import confirmed_plan_from_external_utp
-from calendar_pedagoga.generation_api import create_app
+from calendar_pedagoga.generation_api import GENERATION_API_TOKEN_ENV, create_app
 from calendar_pedagoga.generation_contract import PIPELINE_CONTRACT
 from calendar_pedagoga.generation_service import GenerationService
 from calendar_pedagoga.organization_template import (
@@ -16,6 +16,7 @@ from calendar_pedagoga.parsing import parse_utp
 from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineError, PipelineResult
 from calendar_pedagoga.remote_generation import (
     DEFAULT_GENERATION_API_URL,
+    GENERATION_API_TOKEN_ENV as REMOTE_TOKEN_ENV,
     GENERATION_API_URL_ENV,
     build_generation_payload,
     generation_api_url,
@@ -27,8 +28,16 @@ from pathlib import Path
 
 REFERENCES = Path(__file__).resolve().parents[1] / "references"
 REVISION = "test-revision"
+TEST_API_TOKEN = "kp-test-generation-token"
 UTP_PATH = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
 PROGRAM_PATH = REFERENCES / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+
+
+@pytest.fixture(autouse=True)
+def _generation_api_token(monkeypatch) -> None:
+    monkeypatch.setenv(GENERATION_API_TOKEN_ENV, TEST_API_TOKEN)
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("CALENDAR_GENERATION_REMOTE", raising=False)
 
 
 def _plan():
@@ -132,9 +141,74 @@ def _run(client: TestClient, **kwargs) -> tuple[PipelineResult, list[str]]:
 
 def test_generation_api_url_defaults_and_env(monkeypatch) -> None:
     monkeypatch.delenv(GENERATION_API_URL_ENV, raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("CALENDAR_GENERATION_REMOTE", raising=False)
     assert generation_api_url() == DEFAULT_GENERATION_API_URL
     monkeypatch.setenv(GENERATION_API_URL_ENV, "http://127.0.0.1:8000/")
     assert generation_api_url() == "http://127.0.0.1:8000"
+
+
+def test_remote_client_sends_bearer_token(monkeypatch) -> None:
+    monkeypatch.setenv(REMOTE_TOKEN_ENV, TEST_API_TOKEN)
+    seen: list[dict[str, str]] = []
+
+    def http_request(method, url, *, json_body=None, headers=None, timeout=60):
+        seen.append(dict(headers or {}))
+        succeeded = (
+            '{"job_id":"abc","job_state":"SUCCEEDED","phase":"DOCX",'
+            '"pipeline_status":"FINAL_READY","review_cases":[],'
+            '"confirmation_errors":[],"warnings":[],"docx_available":true,'
+            '"filename":"Plan.docx","error":null}'
+        ).encode("utf-8")
+        if method == "POST":
+            return 202, {}, succeeded
+        if method == "GET" and url.endswith("/document"):
+            return 200, {"Content-Disposition": "attachment; filename*=UTF-8''Plan.docx"}, b"PK\x03\x04docx"
+        if method == "DELETE":
+            return 204, {}, b""
+        return 200, {}, succeeded
+
+    result = run_remote_calendar_generation(
+        _plan(),
+        academic_year="2026–2027",
+        template=_template(),
+        source_utp_name=UTP_PATH.name,
+        program_filename=PROGRAM_PATH.name,
+        program_content=PROGRAM_PATH.read_bytes(),
+        semantic_revision=REVISION,
+        api_url="http://generation.test",
+        http_request=http_request,
+        poll_interval=0.01,
+    )
+    assert result.status is CalendarDocumentStatus.FINAL_READY
+    assert seen
+    assert all(item.get("Authorization") == f"Bearer {TEST_API_TOKEN}" for item in seen)
+
+
+def test_public_remote_mode_without_url_or_token_is_fail_closed(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv(GENERATION_API_URL_ENV, raising=False)
+    monkeypatch.delenv(REMOTE_TOKEN_ENV, raising=False)
+    calls: list[tuple] = []
+
+    def http_request(*_args, **_kwargs):
+        calls.append((_args, _kwargs))
+        return 500, {}, b"{}"
+
+    with pytest.raises(PipelineError, match="CALENDAR_GENERATION_API_URL"):
+        generation_api_url()
+    with pytest.raises(PipelineError, match="CALENDAR_GENERATION_API_TOKEN"):
+        run_remote_calendar_generation(
+            _plan(),
+            academic_year="2026–2027",
+            template=_template(),
+            source_utp_name=UTP_PATH.name,
+            program_filename=PROGRAM_PATH.name,
+            program_content=PROGRAM_PATH.read_bytes(),
+            semantic_revision=REVISION,
+            http_request=http_request,
+        )
+    assert calls == []
 
 
 def test_build_payload_uses_contract_and_json_safe_reviews() -> None:

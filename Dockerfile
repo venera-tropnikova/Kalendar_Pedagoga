@@ -14,7 +14,7 @@ RUN apt-get update \
         fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md requirements.txt app.py ./
+COPY pyproject.toml README.md requirements.txt app.py render_api.py ./
 COPY src ./src
 COPY references ./references
 
@@ -23,4 +23,4 @@ RUN python -m pip install --upgrade pip \
 
 EXPOSE 8501
 
-CMD streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8501}
+CMD if [ "$APP_ROLE" = "api" ]; then python render_api.py; else streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8501}; fi

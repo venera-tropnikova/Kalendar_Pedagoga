@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from calendar_pedagoga.confirmed_study_plan import (
@@ -35,9 +35,15 @@ from calendar_pedagoga.semantic_review import ManualSemanticConfirmation
 
 DEFAULT_GENERATION_API_URL = "http://127.0.0.1:8000"
 GENERATION_API_URL_ENV = "CALENDAR_GENERATION_API_URL"
+GENERATION_API_TOKEN_ENV = "CALENDAR_GENERATION_API_TOKEN"
 DEFAULT_POLL_INTERVAL_SECONDS = 0.4
 DEFAULT_WAIT_TIMEOUT_SECONDS = 12 * 60.0
 _HTTP_TIMEOUT_SECONDS = 60.0
+_PUBLIC_REMOTE_FLAGS = {"1", "true", "yes", "on"}
+_PUBLIC_REMOTE_BLOCK = (
+    "Удалённая генерация недоступна: задайте "
+    "CALENDAR_GENERATION_API_URL и CALENDAR_GENERATION_API_TOKEN."
+)
 
 _PHASE_LABELS = {
     "VALIDATION": "Формируем календарный план…",
@@ -50,10 +56,54 @@ _PHASE_LABELS = {
 HttpRequest = Callable[..., tuple[int, Mapping[str, str], bytes]]
 
 
+def public_remote_mode() -> bool:
+    if (os.environ.get("RENDER") or "").strip():
+        return True
+    return (os.environ.get("CALENDAR_GENERATION_REMOTE") or "").strip().casefold() in (
+        _PUBLIC_REMOTE_FLAGS
+    )
+
+
+def generation_api_token() -> str:
+    return (os.environ.get(GENERATION_API_TOKEN_ENV) or "").strip()
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").casefold()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def generation_api_url(explicit: str | None = None) -> str:
     raw = explicit if explicit is not None else os.environ.get(GENERATION_API_URL_ENV)
-    value = (raw or DEFAULT_GENERATION_API_URL).strip()
-    return value.rstrip("/") or DEFAULT_GENERATION_API_URL
+    value = (raw or "").strip().rstrip("/")
+    if public_remote_mode():
+        if not value or _is_loopback_url(value):
+            raise PipelineError(_PUBLIC_REMOTE_BLOCK)
+        return value
+    return value or DEFAULT_GENERATION_API_URL
+
+
+def _with_bearer_token(request: HttpRequest, token: str) -> HttpRequest:
+    def wrapped(
+        method: str,
+        url: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+    ) -> tuple[int, Mapping[str, str], bytes]:
+        merged = dict(headers or {})
+        if token:
+            merged["Authorization"] = f"Bearer {token}"
+        return request(
+            method,
+            url,
+            json_body=json_body,
+            headers=merged,
+            timeout=timeout,
+        )
+
+    return wrapped
 
 
 def _json_dumps(payload: Mapping[str, Any]) -> bytes:
@@ -320,6 +370,9 @@ def run_remote_calendar_generation(
         raise PipelineError("Удалённая генерация работает только в режиме CE2 без AI.")
     if on_progress is not None:
         on_progress("Формируем календарный план…")
+    token = generation_api_token()
+    if public_remote_mode() and not token:
+        raise PipelineError(_PUBLIC_REMOTE_BLOCK)
     payload = build_generation_payload(
         plan,
         academic_year=academic_year,
@@ -334,7 +387,7 @@ def run_remote_calendar_generation(
         manual_confirmations=manual_confirmations,
         generator_revision=semantic_revision,
     )
-    request = http_request or default_http_request
+    request = _with_bearer_token(http_request or default_http_request, token)
     base_url = generation_api_url(api_url)
     status, _headers, body = request(
         "POST",
@@ -404,8 +457,11 @@ def run_remote_calendar_generation(
 
 __all__ = [
     "DEFAULT_GENERATION_API_URL",
+    "GENERATION_API_TOKEN_ENV",
     "GENERATION_API_URL_ENV",
     "build_generation_payload",
+    "generation_api_token",
     "generation_api_url",
+    "public_remote_mode",
     "run_remote_calendar_generation",
 ]
