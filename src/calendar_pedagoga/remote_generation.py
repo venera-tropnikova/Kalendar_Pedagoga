@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse
@@ -52,6 +53,10 @@ _PHASE_LABELS = {
     "DOCX": "Формируем календарный план…",
     "LIBREOFFICE_QA": "Проверяем готовый документ…",
 }
+REMOTE_JOB_TIMEOUT_MESSAGE = "Превышено время ожидания генерации документа."
+REMOTE_JOB_EXPIRED_MESSAGE = "Срок хранения результата job истёк."
+REMOTE_JOB_LOST_MESSAGE = "Job не найден после перезапуска или очистки worker."
+QUEUED_PROGRESS_LABEL = "Очередь генерации…"
 
 HttpRequest = Callable[..., tuple[int, Mapping[str, str], bytes]]
 
@@ -280,6 +285,46 @@ def _review_cases(raw: object):
     return tuple(SemanticReviewCaseDTO.from_dict(item).to_model() for item in raw)
 
 
+def _authorized_request(
+    http_request: HttpRequest | None,
+    api_url: str | None,
+) -> tuple[str, HttpRequest]:
+    token = generation_api_token()
+    if public_remote_mode() and not token:
+        raise PipelineError(_PUBLIC_REMOTE_BLOCK)
+    return generation_api_url(api_url), _with_bearer_token(
+        http_request or default_http_request, token
+    )
+
+
+def _read_job_payload(status: int, body: bytes, *, fallback: str) -> dict[str, Any]:
+    if status != 200:
+        raise PipelineError(_api_error_message(status, body, fallback=fallback))
+    payload = _decode_json(body)
+    if not isinstance(payload, Mapping):
+        raise PipelineError("Generation API вернул неверный статус job.")
+    return dict(payload)
+
+
+def remote_job_progress_label(job_state: object, phase: object) -> str:
+    if job_state == "QUEUED":
+        return QUEUED_PROGRESS_LABEL
+    if isinstance(phase, str) and phase:
+        return _PHASE_LABELS.get(phase, "Формируем календарный план…")
+    return "Формируем календарный план…"
+
+
+def remote_job_error_message(job: Mapping[str, Any]) -> str:
+    error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
+    code = str(error.get("code") or "").strip()
+    message = str(error.get("message") or "").strip()
+    if code == "JOB_LOST":
+        return message or REMOTE_JOB_LOST_MESSAGE
+    if job.get("job_state") == "EXPIRED":
+        return message or REMOTE_JOB_EXPIRED_MESSAGE
+    return message or "Генерация документа не удалась."
+
+
 def _poll_job(
     *,
     base_url: str,
@@ -297,23 +342,19 @@ def _poll_job(
             urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
             timeout=_HTTP_TIMEOUT_SECONDS,
         )
-        if status != 200:
-            raise PipelineError(
-                _api_error_message(status, body, fallback="Не удалось получить статус job")
-            )
-        payload = _decode_json(body)
-        if not isinstance(payload, Mapping):
-            raise PipelineError("Generation API вернул неверный статус job.")
+        payload = _read_job_payload(
+            status, body, fallback="Не удалось получить статус job"
+        )
         phase = payload.get("phase")
         if isinstance(phase, str) and phase and phase != last_phase:
             if on_progress is not None:
-                on_progress(_PHASE_LABELS.get(phase, "Формируем календарный план…"))
+                on_progress(remote_job_progress_label(payload.get("job_state"), phase))
             last_phase = phase
         state = payload.get("job_state")
         if state in {"SUCCEEDED", "FAILED", "EXPIRED"}:
-            return dict(payload)
+            return payload
         time.sleep(poll_interval)
-    raise PipelineError("Превышено время ожидания генерации документа.")
+    raise PipelineError(REMOTE_JOB_TIMEOUT_MESSAGE)
 
 
 def _download_document(
@@ -338,6 +379,243 @@ def _download_document(
     if marker in disposition:
         filename = unquote(disposition.split(marker, 1)[1].split(";", 1)[0].strip()) or filename
     return filename, body
+
+
+def submit_remote_calendar_job(
+    plan: ConfirmedStudyPlan | UtpParseResult,
+    program: ProgramData | None = None,
+    *,
+    academic_year: str,
+    template: CalendarTemplateSelection,
+    source_utp_name: str,
+    use_ai: bool = False,
+    ai_provider: object | None = None,
+    program_filename: str | None = None,
+    program_content: bytes | None = None,
+    group_number: str | None = None,
+    class_name: str | None = None,
+    teacher_name: str | None = None,
+    match_reviews: Mapping | None = None,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    semantic_revision: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    api_url: str | None = None,
+    http_request: HttpRequest | None = None,
+) -> dict[str, Any]:
+    """POST /v1/calendar-jobs and return the created job. Does not poll."""
+
+    del program, ai_provider
+    if use_ai:
+        raise PipelineError("Удалённая генерация работает только в режиме CE2 без AI.")
+    if on_progress is not None:
+        on_progress("Формируем календарный план…")
+    payload = build_generation_payload(
+        plan,
+        academic_year=academic_year,
+        source_plan_name=source_utp_name,
+        program_filename=str(program_filename or ""),
+        program_content=program_content or b"",
+        template=template,
+        group_number=group_number,
+        class_name=class_name,
+        teacher_name=teacher_name,
+        match_reviews=match_reviews,
+        manual_confirmations=manual_confirmations,
+        generator_revision=semantic_revision,
+    )
+    base_url, request = _authorized_request(http_request, api_url)
+    status, _headers, body = request(
+        "POST",
+        urljoin(base_url + "/", "v1/calendar-jobs"),
+        json_body=payload,
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
+    if status != 202:
+        raise PipelineError(
+            _api_error_message(status, body, fallback="Не удалось поставить job в очередь")
+        )
+    created = _decode_json(body)
+    if not isinstance(created, Mapping) or not created.get("job_id"):
+        raise PipelineError("Generation API не вернул job_id.")
+    if on_progress is not None:
+        on_progress(remote_job_progress_label(created.get("job_state"), created.get("phase")))
+    return dict(created)
+
+
+def fetch_remote_calendar_job(
+    job_id: str,
+    *,
+    api_url: str | None = None,
+    http_request: HttpRequest | None = None,
+) -> dict[str, Any]:
+    base_url, request = _authorized_request(http_request, api_url)
+    status, _headers, body = request(
+        "GET",
+        urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
+    return _read_job_payload(status, body, fallback="Не удалось получить статус job")
+
+
+def download_remote_calendar_document(
+    job_id: str,
+    *,
+    fallback_name: str | None = None,
+    api_url: str | None = None,
+    http_request: HttpRequest | None = None,
+) -> tuple[str, bytes]:
+    base_url, request = _authorized_request(http_request, api_url)
+    return _download_document(
+        base_url=base_url,
+        job_id=job_id,
+        http_request=request,
+        fallback_name=fallback_name,
+    )
+
+
+def delete_remote_calendar_job(
+    job_id: str,
+    *,
+    api_url: str | None = None,
+    http_request: HttpRequest | None = None,
+) -> None:
+    base_url, request = _authorized_request(http_request, api_url)
+    try:
+        request(
+            "DELETE",
+            urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+    except PipelineError:
+        pass
+
+
+def _pipeline_result_from_job(
+    job: Mapping[str, Any],
+    *,
+    filename: str,
+    document: bytes,
+) -> PipelineResult:
+    pipeline_status_value = job.get("pipeline_status")
+    if pipeline_status_value == CalendarDocumentStatus.HARD_BLOCK.value:
+        raise PipelineError(remote_job_error_message(job) or "Формирование календарного плана заблокировано.")
+    if pipeline_status_value not in {
+        CalendarDocumentStatus.FINAL_READY.value,
+        CalendarDocumentStatus.DRAFT_READY.value,
+    }:
+        raise PipelineError("Generation API вернул неизвестный статус документа.")
+    return PipelineResult(
+        filename=filename,
+        content=document,
+        warnings=tuple(job.get("warnings") or ()),
+        resolved_lessons=(),
+        status=CalendarDocumentStatus(pipeline_status_value),
+        review_cases=_review_cases(job.get("review_cases")),
+        confirmation_errors=_confirmation_errors(job.get("confirmation_errors")),
+    )
+
+
+@dataclass(frozen=True)
+class RemoteJobAdvance:
+    action: str
+    job_state: str | None = None
+    phase: str | None = None
+    label: str = ""
+    error: str | None = None
+    result: PipelineResult | None = None
+
+
+def advance_remote_generation_job(
+    handle: Mapping[str, Any],
+    *,
+    current_fingerprint: object,
+    now: float,
+    fetch_job: Callable[[str], Mapping[str, Any]],
+    download_document: Callable[..., tuple[str, bytes]],
+    delete_job: Callable[[str], None],
+    timeout: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
+) -> RemoteJobAdvance:
+    """One non-blocking poll step. Never submits a new job."""
+
+    if handle.get("fingerprint") != current_fingerprint:
+        return RemoteJobAdvance(action="stale")
+    started_at = float(handle.get("started_at") or 0.0)
+    if now - started_at >= timeout:
+        return RemoteJobAdvance(action="timeout", error=REMOTE_JOB_TIMEOUT_MESSAGE)
+    job_id = str(handle.get("job_id") or "").strip()
+    if not job_id:
+        return RemoteJobAdvance(action="failed", error="Generation API не вернул job_id.")
+    job = dict(fetch_job(job_id))
+    state = job.get("job_state")
+    phase = job.get("phase") if isinstance(job.get("phase"), str) else None
+    error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
+    if state == "EXPIRED" or (isinstance(error, Mapping) and error.get("code") == "JOB_LOST"):
+        return RemoteJobAdvance(
+            action="failed",
+            job_state=str(state) if isinstance(state, str) else None,
+            phase=phase,
+            error=remote_job_error_message(job),
+        )
+    if state == "FAILED":
+        return RemoteJobAdvance(
+            action="failed",
+            job_state="FAILED",
+            phase=phase,
+            error=remote_job_error_message(job),
+        )
+    if state != "SUCCEEDED":
+        return RemoteJobAdvance(
+            action="pending",
+            job_state=str(state or "QUEUED"),
+            phase=phase,
+            label=remote_job_progress_label(state, phase),
+        )
+    pipeline_status_value = job.get("pipeline_status")
+    if pipeline_status_value == CalendarDocumentStatus.HARD_BLOCK.value:
+        return RemoteJobAdvance(
+            action="failed",
+            job_state="SUCCEEDED",
+            phase=phase,
+            error=str(
+                (error or {}).get("message")
+                or "Формирование календарного плана заблокировано."
+            ),
+        )
+    if pipeline_status_value not in {
+        CalendarDocumentStatus.FINAL_READY.value,
+        CalendarDocumentStatus.DRAFT_READY.value,
+    }:
+        return RemoteJobAdvance(
+            action="failed",
+            job_state="SUCCEEDED",
+            phase=phase,
+            error="Generation API вернул неизвестный статус документа.",
+        )
+    if not job.get("docx_available"):
+        return RemoteJobAdvance(
+            action="failed",
+            job_state="SUCCEEDED",
+            phase=phase,
+            error="DOCX недоступен.",
+        )
+    filename, document = download_document(job_id, fallback_name=job.get("filename"))
+    try:
+        delete_job(job_id)
+    except PipelineError:
+        pass
+    result = _pipeline_result_from_job(job, filename=filename, document=document)
+    ready_label = (
+        "Черновой календарный план готов"
+        if result.status is CalendarDocumentStatus.DRAFT_READY
+        else "Календарный план готов"
+    )
+    return RemoteJobAdvance(
+        action="succeeded",
+        job_state="SUCCEEDED",
+        phase=phase,
+        label=ready_label,
+        result=result,
+    )
 
 
 def run_remote_calendar_generation(
@@ -365,46 +643,30 @@ def run_remote_calendar_generation(
 ) -> PipelineResult:
     """Submit a generation job and wait for the remote worker DOCX."""
 
-    del program, ai_provider
-    if use_ai:
-        raise PipelineError("Удалённая генерация работает только в режиме CE2 без AI.")
-    if on_progress is not None:
-        on_progress("Формируем календарный план…")
-    token = generation_api_token()
-    if public_remote_mode() and not token:
-        raise PipelineError(_PUBLIC_REMOTE_BLOCK)
-    payload = build_generation_payload(
+    created = submit_remote_calendar_job(
         plan,
+        program,
         academic_year=academic_year,
-        source_plan_name=source_utp_name,
-        program_filename=str(program_filename or ""),
-        program_content=program_content or b"",
         template=template,
+        source_utp_name=source_utp_name,
+        use_ai=use_ai,
+        ai_provider=ai_provider,
+        program_filename=program_filename,
+        program_content=program_content,
         group_number=group_number,
         class_name=class_name,
         teacher_name=teacher_name,
         match_reviews=match_reviews,
         manual_confirmations=manual_confirmations,
-        generator_revision=semantic_revision,
+        semantic_revision=semantic_revision,
+        on_progress=on_progress,
+        api_url=api_url,
+        http_request=http_request,
     )
-    request = _with_bearer_token(http_request or default_http_request, token)
-    base_url = generation_api_url(api_url)
-    status, _headers, body = request(
-        "POST",
-        urljoin(base_url + "/", "v1/calendar-jobs"),
-        json_body=payload,
-        timeout=_HTTP_TIMEOUT_SECONDS,
-    )
-    if status != 202:
-        raise PipelineError(
-            _api_error_message(status, body, fallback="Не удалось поставить job в очередь")
-        )
-    created = _decode_json(body)
-    if not isinstance(created, Mapping) or not created.get("job_id"):
-        raise PipelineError("Generation API не вернул job_id.")
     job_id = str(created["job_id"])
     job = created
     if job.get("job_state") not in {"SUCCEEDED", "FAILED", "EXPIRED"}:
+        base_url, request = _authorized_request(http_request, api_url)
         job = _poll_job(
             base_url=base_url,
             job_id=job_id,
@@ -414,54 +676,46 @@ def run_remote_calendar_generation(
             timeout=timeout,
         )
     state = job.get("job_state")
-    if state == "FAILED":
-        error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
-        raise PipelineError(str(error.get("message") or "Генерация документа не удалась."))
+    error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
+    if state == "FAILED" or (isinstance(error, Mapping) and error.get("code") == "JOB_LOST"):
+        raise PipelineError(remote_job_error_message(job))
     if state == "EXPIRED":
-        raise PipelineError("Срок хранения результата job истёк.")
-    pipeline_status_value = job.get("pipeline_status")
-    if pipeline_status_value == CalendarDocumentStatus.HARD_BLOCK.value:
-        error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
-        raise PipelineError(str(error.get("message") or "Формирование календарного плана заблокировано."))
-    if pipeline_status_value not in {
-        CalendarDocumentStatus.FINAL_READY.value,
-        CalendarDocumentStatus.DRAFT_READY.value,
-    }:
-        raise PipelineError("Generation API вернул неизвестный статус документа.")
+        raise PipelineError(REMOTE_JOB_EXPIRED_MESSAGE)
     if not job.get("docx_available"):
+        pipeline_status_value = job.get("pipeline_status")
+        if pipeline_status_value == CalendarDocumentStatus.HARD_BLOCK.value:
+            raise PipelineError(
+                str(error.get("message") or "Формирование календарного плана заблокировано.")
+            )
         raise PipelineError("DOCX недоступен.")
-    filename, document = _download_document(
-        base_url=base_url,
-        job_id=job_id,
-        http_request=request,
+    filename, document = download_remote_calendar_document(
+        job_id,
         fallback_name=job.get("filename"),
+        api_url=api_url,
+        http_request=http_request,
     )
-    try:
-        request(
-            "DELETE",
-            urljoin(base_url + "/", f"v1/calendar-jobs/{job_id}"),
-            timeout=_HTTP_TIMEOUT_SECONDS,
-        )
-    except PipelineError:
-        pass
-    return PipelineResult(
-        filename=filename,
-        content=document,
-        warnings=tuple(job.get("warnings") or ()),
-        resolved_lessons=(),
-        status=CalendarDocumentStatus(pipeline_status_value),
-        review_cases=_review_cases(job.get("review_cases")),
-        confirmation_errors=_confirmation_errors(job.get("confirmation_errors")),
-    )
+    delete_remote_calendar_job(job_id, api_url=api_url, http_request=http_request)
+    return _pipeline_result_from_job(job, filename=filename, document=document)
 
 
 __all__ = [
     "DEFAULT_GENERATION_API_URL",
+    "DEFAULT_WAIT_TIMEOUT_SECONDS",
     "GENERATION_API_TOKEN_ENV",
     "GENERATION_API_URL_ENV",
+    "REMOTE_JOB_EXPIRED_MESSAGE",
+    "REMOTE_JOB_LOST_MESSAGE",
+    "REMOTE_JOB_TIMEOUT_MESSAGE",
+    "RemoteJobAdvance",
+    "advance_remote_generation_job",
     "build_generation_payload",
+    "delete_remote_calendar_job",
+    "download_remote_calendar_document",
+    "fetch_remote_calendar_job",
     "generation_api_token",
     "generation_api_url",
     "public_remote_mode",
+    "remote_job_progress_label",
     "run_remote_calendar_generation",
+    "submit_remote_calendar_job",
 ]

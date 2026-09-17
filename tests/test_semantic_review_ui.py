@@ -257,6 +257,7 @@ def test_all_confirmed_allows_generation_and_passes_mapping() -> None:
         patch.object(ui, "_generator_revision", return_value="revision"),
         patch.object(ui, "_LOADED_GENERATOR_REVISION", "revision"),
         patch.object(ui, "_execute_calendar_generation") as execute,
+        patch.object(ui, "_render_generation_result"),
         patch.object(ui, "_show_generation_result"),
         patch.object(ui.st, "rerun"),
     ):
@@ -286,7 +287,9 @@ def test_pending_review_allows_draft_docx_generation() -> None:
         patch.object(ui, "_generator_revision", return_value="revision"),
         patch.object(ui, "_LOADED_GENERATOR_REVISION", "revision"),
         patch.object(ui, "_execute_calendar_generation") as execute,
+        patch.object(ui, "_render_generation_result"),
         patch.object(ui, "_show_generation_result"),
+        patch.object(ui.st, "rerun"),
     ):
         ui._show_generation_controls(
             validated_utp=object(),

@@ -1,4 +1,5 @@
 from datetime import date
+from contextlib import contextmanager
 import hashlib
 import inspect
 from io import BytesIO
@@ -11,7 +12,8 @@ from streamlit.testing.v1 import AppTest
 
 from calendar_pedagoga import ui
 from calendar_pedagoga.academic_year import default_academic_year_start, format_academic_year
-from calendar_pedagoga.pipeline import CalendarDocumentStatus
+from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineResult
+from calendar_pedagoga.remote_generation import RemoteJobAdvance
 from calendar_pedagoga.practice_slots import SLOT_CONTINUE_WARNING, SLOT_PACK_WARNING
 from calendar_pedagoga.ui import _teacher_generation_warnings
 
@@ -239,6 +241,76 @@ def _fake_generated(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**payload)
 
 
+def _remote_job_status(result, *, job_id: str = "job-ui", job_state: str = "SUCCEEDED") -> dict:
+    status = result.status
+    value = status.value if hasattr(status, "value") else status
+    return {
+        "job_id": job_id,
+        "job_state": job_state,
+        "phase": "DOCX",
+        "pipeline_status": value,
+        "review_cases": [],
+        "confirmation_errors": [],
+        "warnings": list(getattr(result, "warnings", ()) or ()),
+        "docx_available": True,
+        "filename": result.filename,
+        "error": None,
+    }
+
+
+@contextmanager
+def patch_instant_remote_generation(result, *, target: str = "calendar_pedagoga.ui"):
+    job_id = "job-ui"
+    pipeline_result = result if isinstance(result, PipelineResult) else PipelineResult(
+        filename=result.filename,
+        content=result.content,
+        warnings=tuple(getattr(result, "warnings", ()) or ()),
+        resolved_lessons=tuple(getattr(result, "resolved_lessons", ()) or ()),
+        status=result.status,
+        review_cases=tuple(getattr(result, "review_cases", ()) or ()),
+        confirmation_errors=tuple(getattr(result, "confirmation_errors", ()) or ()),
+    )
+
+    def submit(*_args, **_kwargs):
+        return {
+            "job_id": job_id,
+            "job_state": "QUEUED",
+            "phase": None,
+            "pipeline_status": None,
+            "review_cases": [],
+            "confirmation_errors": [],
+            "warnings": [],
+            "docx_available": False,
+            "filename": None,
+            "error": None,
+        }
+
+    def advance(handle, **_kwargs):
+        if handle.get("fingerprint") != _kwargs.get("current_fingerprint"):
+            return RemoteJobAdvance(action="stale")
+        return RemoteJobAdvance(
+            action="succeeded",
+            job_state="SUCCEEDED",
+            result=pipeline_result,
+            label="Календарный план готов",
+        )
+
+    with (
+        patch(f"{target}.submit_remote_calendar_job", side_effect=submit) as submit_mock,
+        patch(f"{target}.advance_remote_generation_job", side_effect=advance),
+        patch(
+            f"{target}.fetch_remote_calendar_job",
+            return_value=_remote_job_status(result, job_id=job_id),
+        ),
+        patch(
+            f"{target}.download_remote_calendar_document",
+            return_value=(result.filename, result.content),
+        ),
+        patch(f"{target}.delete_remote_calendar_job", return_value=None),
+    ):
+        yield submit_mock
+
+
 def _check_and_resolve(
     app: AppTest,
     generated: SimpleNamespace | None = None,
@@ -247,9 +319,7 @@ def _check_and_resolve(
 ):
     result = generated if generated is not None else _fake_generated()
     _prepare_required_plan_inputs(app)
-    with patch(
-        "calendar_pedagoga.ui.run_remote_calendar_generation", return_value=result
-    ) as pipeline:
+    with patch_instant_remote_generation(result) as pipeline:
         _check_button(app).click().run()
         _resolve_disputed_matches(app, prefer_confirm=prefer_confirm)
     return pipeline
@@ -934,7 +1004,7 @@ def test_generation_click_runs_pipeline_and_exposes_download() -> None:
     assert SLOT_CONTINUE_WARNING in stored
     assert SLOT_PACK_WARNING in stored
 
-    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as rerun_pipeline:
+    with patch("calendar_pedagoga.ui.submit_remote_calendar_job") as rerun_pipeline:
         app.run()
         rerun_pipeline.assert_not_called()
     assert app.session_state["calendar_download"].content == b"generated-docx"
@@ -1190,7 +1260,7 @@ def test_second_click_while_busy_does_not_start_another_generation() -> None:
     app.run()
     generated = _fake_generated()
     _prepare_required_plan_inputs(app)
-    with patch("calendar_pedagoga.ui.run_remote_calendar_generation", return_value=generated) as pipeline:
+    with patch_instant_remote_generation(generated) as pipeline:
         _check_button(app).click().run()
         app.session_state["calendar_busy"] = True
         _check_button(app).click().run()
@@ -1204,7 +1274,7 @@ def test_unresolved_disputed_matches_block_generation() -> None:
     _upload_disputed(app, template=True)
     app.run()
     _prepare_required_plan_inputs(app)
-    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as pipeline:
+    with patch("calendar_pedagoga.ui.submit_remote_calendar_job") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
 
@@ -1342,7 +1412,7 @@ def test_year_conflict_block_does_not_generate() -> None:
     next(
         item for item in app.number_input if item.label == "Год обучения по программе"
     ).set_value(1).run()
-    with patch("calendar_pedagoga.ui.run_remote_calendar_generation") as pipeline:
+    with patch("calendar_pedagoga.ui.submit_remote_calendar_job") as pipeline:
         _check_button(app).click().run()
         pipeline.assert_not_called()
 
@@ -1364,7 +1434,7 @@ def test_generation_failure_hides_download() -> None:
     app.run()
     _prepare_required_plan_inputs(app)
     with patch(
-        "calendar_pedagoga.ui.run_remote_calendar_generation",
+        "calendar_pedagoga.ui.submit_remote_calendar_job",
         side_effect=PipelineError("DOCX не прошёл QA: overflow"),
     ) as pipeline:
         _check_button(app).click().run()

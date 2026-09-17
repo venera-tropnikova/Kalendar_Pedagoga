@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import sys
+import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -77,7 +78,16 @@ from calendar_pedagoga.content_engine_v2 import (
     build_lesson_content_v2,
     validate_manual_lesson_content,
 )
-from calendar_pedagoga.remote_generation import run_remote_calendar_generation
+from calendar_pedagoga.remote_generation import (
+    DEFAULT_WAIT_TIMEOUT_SECONDS,
+    REMOTE_JOB_TIMEOUT_MESSAGE,
+    advance_remote_generation_job,
+    delete_remote_calendar_job,
+    download_remote_calendar_document,
+    fetch_remote_calendar_job,
+    remote_job_progress_label,
+    submit_remote_calendar_job,
+)
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -173,7 +183,7 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
         "calendar_download", "calendar_warnings", "calendar_ai_usage",
         "calendar_generation_pending", "calendar_generation_error",
         "calendar_generation_succeeded", "calendar_resolved_lessons",
-        "calendar_plan_snapshot",
+        "calendar_plan_snapshot", "calendar_remote_job",
     )
     if any(st.session_state.get(key) for key in keys):
         st.session_state["calendar_generation_invalidated"] = True
@@ -232,6 +242,7 @@ def _reset_analysis_state() -> None:
         "calendar_check_error",
         "calendar_busy",
         "calendar_work_status",
+        "calendar_remote_job",
         "semantic_review_scope",
         "semantic_review_confirmations",
         "semantic_review_issues",
@@ -3353,6 +3364,7 @@ def _work_is_in_flight() -> bool:
     return bool(
         st.session_state.get("calendar_check_pending")
         or st.session_state.get("calendar_generate_after_check")
+        or st.session_state.get("calendar_remote_job")
     )
 
 
@@ -3586,6 +3598,7 @@ def _invalidate_generated_plan() -> None:
         "calendar_generation_succeeded",
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
+        "calendar_remote_job",
     ):
         st.session_state.pop(key, None)
     if had_result:
@@ -4212,175 +4225,94 @@ def _emit_generation_error_to_stderr(error: BaseException) -> None:
         traceback.print_exception(type(error), error, error.__traceback__, file=stream)
 
 
-def _execute_calendar_generation(
-    *,
-    validated_utp: ValidatedUpload,
-    validated_program: ValidatedUpload | None,
-    template_selection: CalendarTemplateSelection,
-    academic_year: str,
-    group_number: str,
-    class_name: str,
-    teacher_name: str,
-    reviews: dict,
-    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
-    status_slot=None,
-) -> None:
-    utp = validated_utp.parsed
-    assert isinstance(utp, (ConfirmedStudyPlan, UtpParseResult))
-    program = None
-    if validated_program is not None:
-        program = validated_program.parsed
-        assert isinstance(program, ProgramData)
-
-    try:
-        def _progress(label: str) -> None:
-            _set_work_status(label)
-            if status_widget is not None:
-                status_widget.update(label=label, state="running")
-
-        status_widget = None
-        with _work_status_block(status_slot, _STATUS_BUILD_PLAN) as status_widget:
-            _set_work_status(_STATUS_BUILD_PLAN)
-            with TransientDocumentSession() as operation:
-                result = run_remote_calendar_generation(
-                    utp,
-                    program,
-                    academic_year=academic_year,
-                    template=template_selection,
-                    source_utp_name=validated_utp.filename,
-                    use_ai=False,
-                    program_filename=(
-                        validated_program.filename
-                        if validated_program is not None
-                        else None
-                    ),
-                    program_content=(
-                        validated_program.content
-                        if validated_program is not None
-                        else None
-                    ),
-                    group_number=group_number,
-                    class_name=class_name,
-                    teacher_name=teacher_name,
-                    match_reviews=reviews,
-                    manual_confirmations=manual_confirmations,
-                    semantic_revision=_generator_revision(),
-                    on_progress=_progress,
-                )
-                operation.publish_result(result.filename, result.content)
-                st.session_state["calendar_download"] = operation.take_result_for_download()
-                st.session_state["calendar_warnings"] = result.warnings
-                st.session_state["calendar_document_status"] = result.status.value
-                st.session_state["semantic_review_pipeline_cases"] = result.review_cases
-                st.session_state.setdefault("semantic_review_issues", {}).update(
-                    dict(result.confirmation_errors)
-                )
-                resolved_lessons = tuple(getattr(result, "resolved_lessons", ()))
-                st.session_state["calendar_resolved_lessons"] = resolved_lessons
-                st.session_state["calendar_plan_snapshot"] = (
-                    _calendar_plan_snapshot(resolved_lessons, result.content)
-                )
-            ready_label = (
-                "Черновой календарный план готов"
-                if result.status is CalendarDocumentStatus.DRAFT_READY
-                else _STATUS_READY
-            )
-            status_widget.update(label=ready_label, state="complete")
-            _set_work_status(ready_label)
-    except SemanticReviewRequired as error:
-        stored_issues = st.session_state.setdefault("semantic_review_issues", {})
-        stored_issues.update(dict(error.confirmation_errors))
-        st.session_state["semantic_review_pipeline_cases"] = error.review_cases
-        _set_work_status("")
-    except (PipelineError, ScheduleValidationError, ValueError) as error:
-        _emit_generation_error_to_stderr(error)
-        st.session_state["calendar_generation_error"] = str(error)
-        _set_work_status("")
-    else:
-        st.session_state["calendar_generation_succeeded"] = True
-
-
-def _show_generation_controls(
-    *,
-    validated_utp: ValidatedUpload,
-    validated_program: ValidatedUpload | None,
-    template_selection: CalendarTemplateSelection,
-    academic_year: str,
-    group_number: str,
-    class_name: str,
-    teacher_name: str,
-    matches: tuple[ContentMatch, ...] = (),
-    review_scope_id: str | None = None,
-    semantic_review_blocked: bool = False,
-    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
-    status_slot=None,
-) -> None:
-    current_revision = _generator_revision()
-    if current_revision != _LOADED_GENERATOR_REVISION:
-        logging.getLogger(__name__).warning(
-            "Generator revision mismatch: loaded=%s current=%s",
-            _LOADED_GENERATOR_REVISION, current_revision,
+def _store_generation_result(result) -> None:
+    with TransientDocumentSession() as operation:
+        operation.publish_result(result.filename, result.content)
+        st.session_state["calendar_download"] = operation.take_result_for_download()
+        st.session_state["calendar_warnings"] = result.warnings
+        st.session_state["calendar_document_status"] = result.status.value
+        st.session_state["semantic_review_pipeline_cases"] = result.review_cases
+        st.session_state.setdefault("semantic_review_issues", {}).update(
+            dict(result.confirmation_errors)
         )
-        st.info("Приложение обновилось. Обновите страницу, чтобы продолжить.")
-        _show_generation_result()
+        resolved_lessons = tuple(getattr(result, "resolved_lessons", ()))
+        st.session_state["calendar_resolved_lessons"] = resolved_lessons
+        st.session_state["calendar_plan_snapshot"] = (
+            _calendar_plan_snapshot(resolved_lessons, result.content)
+        )
+    ready_label = (
+        "Черновой календарный план готов"
+        if result.status is CalendarDocumentStatus.DRAFT_READY
+        else _STATUS_READY
+    )
+    _set_work_status(ready_label)
+    st.session_state["calendar_generation_succeeded"] = True
+
+
+def _fail_remote_generation(message: str, error: BaseException | None = None) -> None:
+    if error is not None:
+        _emit_generation_error_to_stderr(error)
+    st.session_state["calendar_generation_error"] = message
+    st.session_state.pop("calendar_remote_job", None)
+    _clear_work_busy()
+
+
+def _generation_fingerprint() -> object:
+    return st.session_state.get("calendar_generation_fingerprint")
+
+
+def _poll_active_remote_job(*, show_status: bool = False) -> None:
+    handle = st.session_state.get("calendar_remote_job")
+    if not isinstance(handle, dict) or not handle.get("job_id"):
         return
-
-    generated = bool(
-        st.session_state.get("calendar_generation_succeeded")
-        and st.session_state.get("calendar_download")
-    )
-    reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
-    # Semantic review no longer blocks a clearly marked draft. Match disputes
-    # still block because they can change which SOURCE belongs to a week.
-    generate_blocked = bool(unresolved_disputed(matches, reviews))
-    has_error = bool(st.session_state.get("calendar_generation_error"))
-    should_generate = (
-        bool(st.session_state.get("calendar_generate_after_check"))
-        and not generate_blocked
-        and not generated
-        and not has_error
-    )
-    if generate_blocked or has_error or generated:
-        if not should_generate:
-            _clear_work_busy()
-    if should_generate:
-        st.session_state["calendar_generate_after_check"] = False
-        st.session_state["calendar_busy"] = True
-        st.session_state.pop("calendar_generation_invalidated", None)
-        st.session_state.pop("calendar_generation_error", None)
-        st.session_state.pop("calendar_generation_succeeded", None)
-        st.session_state.pop("calendar_resolved_lessons", None)
-        st.session_state.pop("calendar_plan_snapshot", None)
-        st.session_state.pop("calendar_download", None)
-        st.session_state.pop("calendar_warnings", None)
-        st.session_state.pop("calendar_ai_usage", None)
-        st.session_state.pop("calendar_document_status", None)
-        st.session_state.pop("semantic_review_pipeline_cases", None)
-        try:
-            _execute_calendar_generation(
-                validated_utp=validated_utp,
-                validated_program=validated_program,
-                template_selection=template_selection,
-                academic_year=academic_year,
-                group_number=group_number,
-                class_name=class_name,
-                teacher_name=teacher_name,
-                reviews=reviews,
-                manual_confirmations=manual_confirmations,
-                status_slot=status_slot,
-            )
-        finally:
-            _clear_work_busy()
-        st.rerun()
-
-    _show_generation_result()
+    try:
+        outcome = advance_remote_generation_job(
+            handle,
+            current_fingerprint=_generation_fingerprint(),
+            now=time.time(),
+            fetch_job=fetch_remote_calendar_job,
+            download_document=lambda job_id, fallback_name=None: (
+                download_remote_calendar_document(job_id, fallback_name=fallback_name)
+            ),
+            delete_job=delete_remote_calendar_job,
+            timeout=DEFAULT_WAIT_TIMEOUT_SECONDS,
+        )
+    except (PipelineError, ScheduleValidationError, ValueError) as error:
+        _fail_remote_generation(str(error), error)
+        return
+    if outcome.action == "stale":
+        st.session_state.pop("calendar_remote_job", None)
+        _clear_work_busy()
+        return
+    if outcome.action in {"timeout", "failed"}:
+        message = outcome.error or REMOTE_JOB_TIMEOUT_MESSAGE
+        _fail_remote_generation(message)
+        return
+    if outcome.action == "pending":
+        st.session_state["calendar_remote_job"] = {
+            **handle,
+            "job_state": outcome.job_state,
+            "phase": outcome.phase,
+        }
+        if outcome.label:
+            _set_work_status(outcome.label)
+            if show_status:
+                st.markdown(
+                    _work_status_markup(outcome.label, state="running"),
+                    unsafe_allow_html=True,
+                )
+        return
+    if outcome.action == "succeeded" and outcome.result is not None:
+        _store_generation_result(outcome.result)
+        st.session_state.pop("calendar_remote_job", None)
+        _clear_work_busy()
 
 
-@st.fragment(run_every="2s")
-def _show_generation_result() -> None:
+def _render_generation_result(*, show_status: bool = True) -> None:
     inputs = st.session_state.get("calendar_generation_inputs", "")
     if _sync_generation_fingerprint((inputs, _generator_revision())):
         _reset_analysis_state()
+    _poll_active_remote_job(show_status=show_status)
     if st.session_state.get("calendar_generation_invalidated"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
     generation_error = st.session_state.get("calendar_generation_error")
@@ -4410,6 +4342,173 @@ def _show_generation_result() -> None:
             type="primary",
             use_container_width=True,
         )
+
+
+def _execute_calendar_generation(
+    *,
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    template_selection: CalendarTemplateSelection,
+    academic_year: str,
+    group_number: str,
+    class_name: str,
+    teacher_name: str,
+    reviews: dict,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    status_slot=None,
+) -> None:
+    utp = validated_utp.parsed
+    assert isinstance(utp, (ConfirmedStudyPlan, UtpParseResult))
+    program = None
+    if validated_program is not None:
+        program = validated_program.parsed
+        assert isinstance(program, ProgramData)
+
+    try:
+        def _progress(label: str) -> None:
+            _set_work_status(label)
+            if status_widget is not None:
+                status_widget.update(label=label, state="running")
+
+        status_widget = None
+        with _work_status_block(status_slot, _STATUS_BUILD_PLAN) as status_widget:
+            _set_work_status(_STATUS_BUILD_PLAN)
+            created = submit_remote_calendar_job(
+                utp,
+                program,
+                academic_year=academic_year,
+                template=template_selection,
+                source_utp_name=validated_utp.filename,
+                use_ai=False,
+                program_filename=(
+                    validated_program.filename
+                    if validated_program is not None
+                    else None
+                ),
+                program_content=(
+                    validated_program.content
+                    if validated_program is not None
+                    else None
+                ),
+                group_number=group_number,
+                class_name=class_name,
+                teacher_name=teacher_name,
+                match_reviews=reviews,
+                manual_confirmations=manual_confirmations,
+                semantic_revision=_generator_revision(),
+                on_progress=_progress,
+            )
+            job_id = str(created.get("job_id") or "")
+            if not job_id:
+                raise PipelineError("Generation API не вернул job_id.")
+            st.session_state["calendar_remote_job"] = {
+                "job_id": job_id,
+                "started_at": time.time(),
+                "fingerprint": _generation_fingerprint(),
+                "job_state": created.get("job_state") or "QUEUED",
+                "phase": created.get("phase"),
+            }
+            label = remote_job_progress_label(
+                created.get("job_state"), created.get("phase")
+            )
+            _set_work_status(label)
+            status_widget.update(label=label, state="running")
+    except SemanticReviewRequired as error:
+        stored_issues = st.session_state.setdefault("semantic_review_issues", {})
+        stored_issues.update(dict(error.confirmation_errors))
+        st.session_state["semantic_review_pipeline_cases"] = error.review_cases
+        st.session_state.pop("calendar_remote_job", None)
+        _set_work_status("")
+    except (PipelineError, ScheduleValidationError, ValueError) as error:
+        _fail_remote_generation(str(error), error)
+
+
+def _show_generation_controls(
+    *,
+    validated_utp: ValidatedUpload,
+    validated_program: ValidatedUpload | None,
+    template_selection: CalendarTemplateSelection,
+    academic_year: str,
+    group_number: str,
+    class_name: str,
+    teacher_name: str,
+    matches: tuple[ContentMatch, ...] = (),
+    review_scope_id: str | None = None,
+    semantic_review_blocked: bool = False,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    status_slot=None,
+) -> None:
+    current_revision = _generator_revision()
+    if current_revision != _LOADED_GENERATOR_REVISION:
+        logging.getLogger(__name__).warning(
+            "Generator revision mismatch: loaded=%s current=%s",
+            _LOADED_GENERATOR_REVISION, current_revision,
+        )
+        st.info("Приложение обновилось. Обновите страницу, чтобы продолжить.")
+        _render_generation_result(show_status=False)
+        return
+
+    generated = bool(
+        st.session_state.get("calendar_generation_succeeded")
+        and st.session_state.get("calendar_download")
+    )
+    reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
+    # Semantic review no longer blocks a clearly marked draft. Match disputes
+    # still block because they can change which SOURCE belongs to a week.
+    generate_blocked = bool(unresolved_disputed(matches, reviews))
+    has_error = bool(st.session_state.get("calendar_generation_error"))
+    active_job = bool(st.session_state.get("calendar_remote_job"))
+    should_generate = (
+        bool(st.session_state.get("calendar_generate_after_check"))
+        and not generate_blocked
+        and not generated
+        and not has_error
+        and not active_job
+    )
+    if generate_blocked or has_error or generated:
+        if not should_generate and not active_job:
+            _clear_work_busy()
+    submitted = False
+    if should_generate:
+        st.session_state["calendar_generate_after_check"] = False
+        st.session_state["calendar_busy"] = True
+        st.session_state.pop("calendar_generation_invalidated", None)
+        st.session_state.pop("calendar_generation_error", None)
+        st.session_state.pop("calendar_generation_succeeded", None)
+        st.session_state.pop("calendar_resolved_lessons", None)
+        st.session_state.pop("calendar_plan_snapshot", None)
+        st.session_state.pop("calendar_download", None)
+        st.session_state.pop("calendar_warnings", None)
+        st.session_state.pop("calendar_ai_usage", None)
+        st.session_state.pop("calendar_document_status", None)
+        st.session_state.pop("semantic_review_pipeline_cases", None)
+        _execute_calendar_generation(
+            validated_utp=validated_utp,
+            validated_program=validated_program,
+            template_selection=template_selection,
+            academic_year=academic_year,
+            group_number=group_number,
+            class_name=class_name,
+            teacher_name=teacher_name,
+            reviews=reviews,
+            manual_confirmations=manual_confirmations,
+            status_slot=status_slot,
+        )
+        submitted = True
+
+    _render_generation_result(show_status=False)
+    if submitted:
+        st.rerun()
+    if st.session_state.get("calendar_remote_job"):
+        _show_generation_result()
+
+
+@st.fragment(run_every="2s")
+def _show_generation_result() -> None:
+    had_job = bool(st.session_state.get("calendar_remote_job"))
+    _render_generation_result(show_status=True)
+    if had_job and not st.session_state.get("calendar_remote_job"):
+        st.rerun()
 
 
 def run_app() -> None:
@@ -4619,6 +4718,7 @@ def run_app() -> None:
             st.session_state.pop("calendar_plan_snapshot", None)
             st.session_state.pop("calendar_generation_invalidated", None)
             st.session_state.pop("calendar_check_error", None)
+            st.session_state.pop("calendar_remote_job", None)
             st.session_state["calendar_generate_after_check"] = True
             st.session_state["ui_edit_inputs"] = False
             check_status.update(label=_STATUS_BUILD_PLAN, state="running")

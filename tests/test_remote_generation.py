@@ -18,9 +18,14 @@ from calendar_pedagoga.remote_generation import (
     DEFAULT_GENERATION_API_URL,
     GENERATION_API_TOKEN_ENV as REMOTE_TOKEN_ENV,
     GENERATION_API_URL_ENV,
+    REMOTE_JOB_EXPIRED_MESSAGE,
+    REMOTE_JOB_LOST_MESSAGE,
+    REMOTE_JOB_TIMEOUT_MESSAGE,
+    advance_remote_generation_job,
     build_generation_payload,
     generation_api_url,
     run_remote_calendar_generation,
+    submit_remote_calendar_job,
 )
 from calendar_pedagoga.semantic_review import SemanticReviewCase
 from pathlib import Path
@@ -319,3 +324,189 @@ def test_remote_client_rejects_ai_mode() -> None:
             semantic_revision=REVISION,
             http_request=lambda *_args, **_kwargs: (500, {}, b"{}"),
         )
+
+
+def _queued_body(job_id: str = "abc") -> bytes:
+    return (
+        f'{{"job_id":"{job_id}","job_state":"QUEUED","phase":null,'
+        '"pipeline_status":null,"review_cases":[],'
+        '"confirmation_errors":[],"warnings":[],"docx_available":false,'
+        '"filename":null,"error":null}'
+    ).encode("utf-8")
+
+
+def test_submit_returns_immediately_after_post() -> None:
+    methods: list[str] = []
+
+    def http_request(method, url, *, json_body=None, headers=None, timeout=60):
+        methods.append(method)
+        if method == "POST" and url.endswith("/v1/calendar-jobs"):
+            return 202, {}, _queued_body()
+        raise AssertionError(f"submit must not {method} {url}")
+
+    created = submit_remote_calendar_job(
+        _plan(),
+        academic_year="2026–2027",
+        template=_template(),
+        source_utp_name=UTP_PATH.name,
+        program_filename=PROGRAM_PATH.name,
+        program_content=PROGRAM_PATH.read_bytes(),
+        semantic_revision=REVISION,
+        api_url="http://generation.test",
+        http_request=http_request,
+    )
+    assert created["job_id"] == "abc"
+    assert created["job_state"] == "QUEUED"
+    assert methods == ["POST"]
+
+
+def test_advance_polls_queued_running_succeeded_and_downloads_once() -> None:
+    fetches: list[str] = []
+    downloads: list[str] = []
+    deletes: list[str] = []
+    statuses = [
+        {
+            "job_id": "abc",
+            "job_state": "QUEUED",
+            "phase": None,
+            "pipeline_status": None,
+            "docx_available": False,
+            "filename": None,
+            "warnings": [],
+            "review_cases": [],
+            "confirmation_errors": [],
+            "error": None,
+        },
+        {
+            "job_id": "abc",
+            "job_state": "RUNNING",
+            "phase": "SEMANTIC",
+            "pipeline_status": None,
+            "docx_available": False,
+            "filename": None,
+            "warnings": [],
+            "review_cases": [],
+            "confirmation_errors": [],
+            "error": None,
+        },
+        {
+            "job_id": "abc",
+            "job_state": "SUCCEEDED",
+            "phase": "LIBREOFFICE_QA",
+            "pipeline_status": CalendarDocumentStatus.FINAL_READY.value,
+            "docx_available": True,
+            "filename": "Plan.docx",
+            "warnings": ["ok"],
+            "review_cases": [],
+            "confirmation_errors": [],
+            "error": None,
+        },
+    ]
+
+    def fetch_job(job_id: str):
+        fetches.append(job_id)
+        return statuses.pop(0)
+
+    def download_document(job_id: str, fallback_name=None):
+        downloads.append(job_id)
+        return fallback_name or "Plan.docx", b"PK\x03\x04docx"
+
+    def delete_job(job_id: str):
+        deletes.append(job_id)
+
+    handle = {"job_id": "abc", "started_at": 100.0, "fingerprint": "fp"}
+    first = advance_remote_generation_job(
+        handle, current_fingerprint="fp", now=101.0,
+        fetch_job=fetch_job, download_document=download_document, delete_job=delete_job,
+    )
+    assert first.action == "pending"
+    assert first.job_state == "QUEUED"
+    second = advance_remote_generation_job(
+        handle, current_fingerprint="fp", now=102.0,
+        fetch_job=fetch_job, download_document=download_document, delete_job=delete_job,
+    )
+    assert second.action == "pending"
+    assert second.job_state == "RUNNING"
+    assert second.phase == "SEMANTIC"
+    third = advance_remote_generation_job(
+        handle, current_fingerprint="fp", now=103.0,
+        fetch_job=fetch_job, download_document=download_document, delete_job=delete_job,
+    )
+    assert third.action == "succeeded"
+    assert third.result is not None
+    assert third.result.status is CalendarDocumentStatus.FINAL_READY
+    assert third.result.content.startswith(b"PK\x03\x04")
+    assert fetches == ["abc", "abc", "abc"]
+    assert downloads == ["abc"]
+    assert deletes == ["abc"]
+
+
+@pytest.mark.parametrize(
+    ("job", "expected"),
+    [
+        (
+            {
+                "job_id": "abc",
+                "job_state": "FAILED",
+                "phase": "DOCX",
+                "error": {"code": "JOB_TIMEOUT", "message": "worker timeout"},
+            },
+            "worker timeout",
+        ),
+        (
+            {
+                "job_id": "abc",
+                "job_state": "EXPIRED",
+                "phase": None,
+                "error": {"code": "JOB_EXPIRED", "message": REMOTE_JOB_EXPIRED_MESSAGE},
+            },
+            REMOTE_JOB_EXPIRED_MESSAGE,
+        ),
+        (
+            {
+                "job_id": "abc",
+                "job_state": "FAILED",
+                "phase": None,
+                "error": {"code": "JOB_LOST", "message": REMOTE_JOB_LOST_MESSAGE},
+            },
+            REMOTE_JOB_LOST_MESSAGE,
+        ),
+    ],
+)
+def test_advance_maps_terminal_failures(job, expected) -> None:
+    outcome = advance_remote_generation_job(
+        {"job_id": "abc", "started_at": 1.0, "fingerprint": "fp"},
+        current_fingerprint="fp",
+        now=2.0,
+        fetch_job=lambda _job_id: job,
+        download_document=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("download")),
+        delete_job=lambda _job_id: (_ for _ in ()).throw(AssertionError("delete")),
+    )
+    assert outcome.action == "failed"
+    assert outcome.error == expected
+
+
+def test_advance_timeout_uses_started_at_without_fetch() -> None:
+    outcome = advance_remote_generation_job(
+        {"job_id": "abc", "started_at": 0.0, "fingerprint": "fp"},
+        current_fingerprint="fp",
+        now=12 * 60,
+        fetch_job=lambda _job_id: (_ for _ in ()).throw(AssertionError("fetch")),
+        download_document=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("download")),
+        delete_job=lambda _job_id: None,
+    )
+    assert outcome.action == "timeout"
+    assert outcome.error == REMOTE_JOB_TIMEOUT_MESSAGE
+
+
+def test_advance_stale_fingerprint_does_not_apply_result() -> None:
+    outcome = advance_remote_generation_job(
+        {"job_id": "abc", "started_at": 1.0, "fingerprint": "old"},
+        current_fingerprint="new",
+        now=2.0,
+        fetch_job=lambda _job_id: (_ for _ in ()).throw(AssertionError("fetch")),
+        download_document=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("download")),
+        delete_job=lambda _job_id: None,
+    )
+    assert outcome.action == "stale"
+    assert outcome.result is None
