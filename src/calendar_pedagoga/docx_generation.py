@@ -1348,6 +1348,32 @@ def _write_document_header(
     _apply_standard_header_font(document)
 
 
+def _write_draft_notice(document, table, review_weeks: tuple[int, ...]) -> None:
+    """Place an explicit non-final marker immediately before the calendar."""
+
+    if not review_weeks:
+        return
+    texts = (
+        ("ЧЕРНОВИК — есть недели, требующие проверки", True),
+        (
+            "Недели, требующие проверки: "
+            + ", ".join(f"№{week}" for week in review_weeks),
+            False,
+        ),
+    )
+    for text, bold in texts:
+        paragraph = document.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.keep_with_next = True
+        paragraph.paragraph_format.space_after = Pt(2)
+        run = paragraph.add_run(text)
+        run.bold = bold
+        run.font.size = Pt(CALENDAR_BODY_FONT_SIZE_PT)
+        _set_run_font_family(run, STANDARD_TABLE_FONT_FAMILY)
+        _normalize_run_character_spacing(run)
+        table._tbl.addprevious(paragraph._p)
+
+
 def _populate_calendar_table(
     document,
     utp: UtpParseResult,
@@ -1360,6 +1386,7 @@ def _populate_calendar_table(
     class_name: str | None = None,
     teacher_name: str | None = None,
     uses_organization_template: bool = False,
+    draft_review_weeks: tuple[int, ...] = (),
 ) -> tuple:
     """Заполнить таблицу календаря строками данных (без объединения месяцев)."""
 
@@ -1381,6 +1408,7 @@ def _populate_calendar_table(
     )
 
     table = document.tables[0]
+    _write_draft_notice(document, table, draft_review_weeks)
     columns = _columns_for_table(table)
     display_numbers = _topic_display_numbers(utp)
     _ensure_data_rows(table, len(rows))
@@ -1661,6 +1689,7 @@ def _merge_month_cells_for_pages(
     class_name: str | None = None,
     teacher_name: str | None = None,
     uses_organization_template: bool = False,
+    draft_review_weeks: tuple[int, ...] = (),
 ) -> bytes:
     """Собрать DOCX с объединением месяцев по сегментам страниц."""
 
@@ -1675,6 +1704,7 @@ def _merge_month_cells_for_pages(
         class_name=class_name,
         teacher_name=teacher_name,
         uses_organization_template=uses_organization_template,
+        draft_review_weeks=draft_review_weeks,
     )
     for index in keep_together:
         _prevent_row_split(table.rows[index + 2])
@@ -2176,6 +2206,7 @@ def generate_calendar_docx(
     group_number: str | None = None,
     class_name: str | None = None,
     teacher_name: str | None = None,
+    draft_review_weeks: tuple[int, ...] = (),
 ) -> bytes:
     """Сформировать DOCX: месяц совпадает с датой и merge не пересекает страницы."""
 
@@ -2187,6 +2218,7 @@ def generate_calendar_docx(
         "class_name": class_name,
         "teacher_name": teacher_name,
         "uses_organization_template": template.uses_organization_template,
+        "draft_review_weeks": draft_review_weeks,
     }
 
     # Whole weeks by default. A week that does not fit in the remaining space

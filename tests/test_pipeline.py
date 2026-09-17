@@ -1,8 +1,13 @@
 from pathlib import Path
 from functools import lru_cache
+from unittest.mock import Mock
+
+import pytest
 
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.pipeline import (
+    CalendarDocumentStatus,
+    PipelineError,
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
     run_calendar_pipeline,
@@ -66,6 +71,34 @@ def test_tour_guides_pipeline_without_program_is_limited_qa_reference() -> None:
         for row in result.resolved_lessons
     )
     assert any("программа не загружена" in warning.casefold() for warning in result.warnings)
+
+
+def test_hard_block_prevents_docx_generation(monkeypatch) -> None:
+    utp_path = REFERENCES / "УТП КЛЮЧ 2 г. 2ч.docx"
+    utp = parse_utp(utp_path)
+    generate_docx = Mock()
+
+    def _raise_hard_block(*_args, **_kwargs):
+        raise PipelineError("Повреждённые данные расписания")
+
+    monkeypatch.setattr("calendar_pedagoga.pipeline.build_schedule", _raise_hard_block)
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.generate_calendar_docx",
+        generate_docx,
+    )
+
+    with pytest.raises(PipelineError, match="Повреждённые данные") as raised:
+        run_calendar_pipeline(
+            utp,
+            None,
+            academic_year="2026–2027",
+            template=select_calendar_template(),
+            source_utp_name=utp_path.name,
+            use_ai=False,
+        )
+
+    assert raised.value.status is CalendarDocumentStatus.HARD_BLOCK
+    generate_docx.assert_not_called()
 
 
 def test_content_engine_v2_flag_defaults_on() -> None:

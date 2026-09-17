@@ -393,6 +393,43 @@ def test_semantic_pass_generation_produces_36_data_rows() -> None:
     assert len(table.columns) >= 8
 
 
+def test_draft_docx_has_explicit_review_markers_and_final_has_none() -> None:
+    utp, _schedule, resolved = _semantic_pass_fixture()
+    first = resolved[0]
+    draft_rows = (
+        replace(
+            first,
+            planned_result=f"Требует проверки: {first.planned_result}",
+            assessment_method=f"Требует проверки: {first.assessment_method}",
+        ),
+        *resolved[1:],
+    )
+    draft = generate_calendar_docx(
+        utp,
+        draft_rows,
+        select_calendar_template(),
+        "2026–2027",
+        draft_review_weeks=(1,),
+    )
+    final = _semantic_pass_docx()
+    draft_document = Document(BytesIO(draft))
+    final_document = Document(BytesIO(final))
+
+    draft_header = "\n".join(paragraph.text for paragraph in draft_document.paragraphs)
+    final_header = "\n".join(paragraph.text for paragraph in final_document.paragraphs)
+    assert "ЧЕРНОВИК — есть недели, требующие проверки" in draft_header
+    assert "Недели, требующие проверки: №1" in draft_header
+    assert "ЧЕРНОВИК" not in final_header
+
+    draft_cells = _logical_cells(draft)
+    final_cells = _logical_cells(final)
+    normalized_draft = [
+        [value.replace("Требует проверки: ", "") for value in row]
+        for row in draft_cells
+    ]
+    assert normalized_draft == final_cells
+
+
 def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:
     year_2026 = _semantic_pass_docx("2026–2027")
     year_2027 = _semantic_pass_docx("2027–2028")

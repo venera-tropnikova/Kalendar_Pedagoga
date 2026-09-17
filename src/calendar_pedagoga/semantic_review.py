@@ -13,10 +13,16 @@ from typing import Any, Literal
 
 from calendar_pedagoga.confirmed_study_plan import ConfirmedStudyPlan
 from calendar_pedagoga.content_engine_v2 import (
+    ActionFrame,
+    ContentEngineV2Result,
     LessonContentV2Row,
     REQUIRED_ACTION,
+    _apply_result_grammar_gate,
+    _blocking_grammar_issues,
     _control_covers_all_result_items,
+    _normalize_spaces,
     _rc_verbosity_block_reasons,
+    _r13_must_abstain_action_reconstruction,
     _role_is_required,
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
@@ -60,6 +66,78 @@ class SemanticReviewApplication:
     pending_cases: tuple[SemanticReviewCase, ...]
     accepted_review_ids: tuple[str, ...]
     errors: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def draft_candidate_safety_issues(row: LessonContentV2Row) -> tuple[str, ...]:
+    """Return only existing grammar/R13 issues for a draft proposal.
+
+    Draft eligibility deliberately does not claim semantic coverage.  It only
+    decides whether the already-produced proposal may be shown with an
+    explicit review marker or must be replaced by a neutral placeholder.
+    """
+
+    result = row.planned_result.strip()
+    control = row.assessment_method.strip()
+    issues: list[str] = []
+    if not result or not control:
+        issues.append("RESULT/CONTROL не сформированы")
+
+    role_map = dict(row.clause_roles)
+    for clause, _status in row.clause_coverage:
+        if (
+            _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+            and _r13_must_abstain_action_reconstruction(clause)
+        ):
+            issues.append("R13: положительное действие небезопасно для черновика")
+
+    source_context = _normalize_spaces(
+        f"{row.theory_text} {row.practice_text} {row.source.program_content_full}"
+    )
+    issues.extend(_blocking_grammar_issues(result, control, source_context))
+
+    if result:
+        covered = tuple(
+            (
+                clause,
+                "COVERED"
+                if _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+                else status,
+            )
+            for clause, status in row.clause_coverage
+        )
+        candidate = ContentEngineV2Result(
+            frame=ActionFrame(
+                row.source.program_content_full,
+                row.action,
+                row.object,
+                row.conditions,
+            ),
+            lesson_type=row.lesson_type,
+            planned_result=result,
+            assessment_method=control,
+            theory_text=row.theory_text,
+            practice_text=row.practice_text,
+            warnings=(),
+            clause_coverage=covered,
+            clause_roles=row.clause_roles,
+        )
+        grammar_probe = _apply_result_grammar_gate(
+            candidate,
+            topic_title=row.source.topic_title,
+            theory_text=row.theory_text,
+            practice_text=row.practice_text,
+            program_content=row.source.program_content_full,
+            theory_hours=row.source.theory_hours,
+            practice_hours=row.source.practice_hours,
+        )
+        if grammar_probe.planned_result != result or any(
+            status == "NEEDS_REVIEW"
+            and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+            for clause, status in grammar_probe.clause_coverage
+        ):
+            issues.append("RESULT не прошёл существующий grammar gate")
+
+    return tuple(dict.fromkeys(issues))
 
 
 def _canonical(value: Any) -> Any:

@@ -65,6 +65,7 @@ from calendar_pedagoga.organization_template import (
     select_calendar_template,
 )
 from calendar_pedagoga.pipeline import (
+    CalendarDocumentStatus,
     PipelineError,
     SemanticReviewRequired,
     USE_CONTENT_ENGINE_V2,
@@ -220,6 +221,7 @@ def _reset_analysis_state() -> None:
         "calendar_generation_pending",
         "calendar_generation_error",
         "calendar_generation_succeeded",
+        "calendar_document_status",
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
         "calendar_context",
@@ -4262,13 +4264,23 @@ def _execute_calendar_generation(
                 operation.publish_result(result.filename, result.content)
                 st.session_state["calendar_download"] = operation.take_result_for_download()
                 st.session_state["calendar_warnings"] = result.warnings
+                st.session_state["calendar_document_status"] = result.status.value
+                st.session_state["semantic_review_pipeline_cases"] = result.review_cases
+                st.session_state.setdefault("semantic_review_issues", {}).update(
+                    dict(result.confirmation_errors)
+                )
                 resolved_lessons = tuple(getattr(result, "resolved_lessons", ()))
                 st.session_state["calendar_resolved_lessons"] = resolved_lessons
                 st.session_state["calendar_plan_snapshot"] = (
                     _calendar_plan_snapshot(resolved_lessons, result.content)
                 )
-            status_widget.update(label=_STATUS_READY, state="complete")
-            _set_work_status(_STATUS_READY)
+            ready_label = (
+                "Черновой календарный план готов"
+                if result.status is CalendarDocumentStatus.DRAFT_READY
+                else _STATUS_READY
+            )
+            status_widget.update(label=ready_label, state="complete")
+            _set_work_status(ready_label)
     except SemanticReviewRequired as error:
         stored_issues = st.session_state.setdefault("semantic_review_issues", {})
         stored_issues.update(dict(error.confirmation_errors))
@@ -4312,9 +4324,9 @@ def _show_generation_controls(
         and st.session_state.get("calendar_download")
     )
     reviews = _reviews_for_scope(review_scope_id) if review_scope_id else {}
-    generate_blocked = bool(
-        unresolved_disputed(matches, reviews) or semantic_review_blocked
-    )
+    # Semantic review no longer blocks a clearly marked draft. Match disputes
+    # still block because they can change which SOURCE belongs to a week.
+    generate_blocked = bool(unresolved_disputed(matches, reviews))
     has_error = bool(st.session_state.get("calendar_generation_error"))
     should_generate = (
         bool(st.session_state.get("calendar_generate_after_check"))
@@ -4336,6 +4348,7 @@ def _show_generation_controls(
         st.session_state.pop("calendar_download", None)
         st.session_state.pop("calendar_warnings", None)
         st.session_state.pop("calendar_ai_usage", None)
+        st.session_state.pop("calendar_document_status", None)
         st.session_state.pop("semantic_review_pipeline_cases", None)
         try:
             _execute_calendar_generation(
@@ -4372,8 +4385,19 @@ def _show_generation_result() -> None:
     if download is not None and not generation_error:
         context = st.session_state.get("calendar_context") or {}
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
+        status = st.session_state.get("calendar_document_status")
+        is_draft = status == CalendarDocumentStatus.DRAFT_READY.value
+        if is_draft:
+            st.warning(
+                "Сформирован черновик: недели с недоказанным содержанием "
+                "явно отмечены и требуют проверки педагога."
+            )
         st.download_button(
-            f"Скачать календарный план за {academic_year} учебный год",
+            (
+                f"Скачать черновой календарный план за {academic_year} учебный год"
+                if is_draft
+                else f"Скачать календарный план за {academic_year} учебный год"
+            ),
             data=download.content,
             file_name=download.filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

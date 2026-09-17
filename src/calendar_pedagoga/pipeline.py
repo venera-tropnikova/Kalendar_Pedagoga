@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
 from calendar_pedagoga.ai_provider import AIProvider, AIUsage, OpenAIProvider
@@ -42,6 +43,7 @@ from calendar_pedagoga.semantic_review import (
     apply_manual_semantic_confirmations,
     build_review_context_fingerprint,
     build_semantic_review_cases,
+    draft_candidate_safety_issues,
     review_context_fingerprint_from_rows,
 )
 
@@ -50,8 +52,16 @@ from calendar_pedagoga.semantic_review import (
 USE_CONTENT_ENGINE_V2 = True
 
 
+class CalendarDocumentStatus(str, Enum):
+    HARD_BLOCK = "HARD_BLOCK"
+    DRAFT_READY = "DRAFT_READY"
+    FINAL_READY = "FINAL_READY"
+
+
 class PipelineError(RuntimeError):
     """Операция формирования календаря не может быть завершена."""
+
+    status = CalendarDocumentStatus.HARD_BLOCK
 
 
 class SemanticReviewRequired(PipelineError):
@@ -103,6 +113,67 @@ def _lesson_rows_from_v2(rows: tuple[LessonContentV2Row, ...]) -> tuple[LessonCo
     )
 
 
+@dataclass(frozen=True)
+class _LessonContentBuild:
+    rows: tuple[LessonContentRow, ...]
+    v2_rows: tuple[LessonContentV2Row, ...]
+    status: CalendarDocumentStatus
+    review_cases: tuple[SemanticReviewCase, ...] = ()
+    accepted_review_ids: tuple[str, ...] = ()
+    confirmation_errors: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _build_pipeline_lesson_content_outcome(
+    content_rows: tuple[CalendarContentRow, ...],
+    *,
+    use_content_engine_v2: bool,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    review_context_fingerprint: str | None = None,
+    semantic_revision: str | None = None,
+) -> _LessonContentBuild:
+    """Build every row while keeping review separate from hard failures."""
+
+    if not use_content_engine_v2:
+        return _LessonContentBuild(
+            rows=build_lesson_content(content_rows),
+            v2_rows=(),
+            status=CalendarDocumentStatus.FINAL_READY,
+        )
+
+    v2_rows = build_lesson_content_v2(content_rows)
+    blocks = unresolved_mandatory_review_blocks(v2_rows)
+    if not blocks:
+        return _LessonContentBuild(
+            rows=_lesson_rows_from_v2(v2_rows),
+            v2_rows=v2_rows,
+            status=CalendarDocumentStatus.FINAL_READY,
+        )
+
+    context = review_context_fingerprint or review_context_fingerprint_from_rows(
+        v2_rows,
+        semantic_revision=semantic_revision or generator_revision(),
+    )
+    cases = build_semantic_review_cases(v2_rows, context_fingerprint=context)
+    application = apply_manual_semantic_confirmations(
+        v2_rows,
+        cases,
+        manual_confirmations,
+    )
+    status = (
+        CalendarDocumentStatus.DRAFT_READY
+        if application.pending_cases
+        else CalendarDocumentStatus.FINAL_READY
+    )
+    return _LessonContentBuild(
+        rows=_lesson_rows_from_v2(application.rows),
+        v2_rows=application.rows,
+        status=status,
+        review_cases=application.pending_cases,
+        accepted_review_ids=application.accepted_review_ids,
+        confirmation_errors=application.errors,
+    )
+
+
 def _build_pipeline_lesson_content(
     content_rows: tuple[CalendarContentRow, ...],
     *,
@@ -111,32 +182,54 @@ def _build_pipeline_lesson_content(
     review_context_fingerprint: str | None = None,
     semantic_revision: str | None = None,
 ) -> tuple[LessonContentRow, ...]:
-    if use_content_engine_v2:
-        v2_rows = build_lesson_content_v2(content_rows)
-        blocks = unresolved_mandatory_review_blocks(v2_rows)
-        if not blocks:
-            return _lesson_rows_from_v2(v2_rows)
-        context = review_context_fingerprint or review_context_fingerprint_from_rows(
-            v2_rows,
-            semantic_revision=semantic_revision or generator_revision(),
+    """Final-only compatibility facade for immutable semantic checks."""
+
+    outcome = _build_pipeline_lesson_content_outcome(
+        content_rows,
+        use_content_engine_v2=use_content_engine_v2,
+        manual_confirmations=manual_confirmations,
+        review_context_fingerprint=review_context_fingerprint,
+        semantic_revision=semantic_revision,
+    )
+    if outcome.status is CalendarDocumentStatus.DRAFT_READY or outcome.confirmation_errors:
+        raise SemanticReviewRequired(
+            outcome.review_cases,
+            confirmation_errors=outcome.confirmation_errors,
+            accepted_review_ids=outcome.accepted_review_ids,
         )
-        cases = build_semantic_review_cases(
-            v2_rows,
-            context_fingerprint=context,
-        )
-        application = apply_manual_semantic_confirmations(
-            v2_rows,
-            cases,
-            manual_confirmations,
-        )
-        if application.pending_cases or application.errors:
-            raise SemanticReviewRequired(
-                application.pending_cases,
-                confirmation_errors=application.errors,
-                accepted_review_ids=application.accepted_review_ids,
+    return outcome.rows
+
+
+def _draft_resolved_rows(
+    rows: tuple[ResolvedLessonRow, ...],
+    v2_rows: tuple[LessonContentV2Row, ...],
+    cases: tuple[SemanticReviewCase, ...],
+) -> tuple[ResolvedLessonRow, ...]:
+    """Mark pending rows without presenting unproved text as verified."""
+
+    pending_weeks = {case.week_number for case in cases}
+    v2_by_week = {row.source.week_number: row for row in v2_rows}
+    output: list[ResolvedLessonRow] = []
+    for row in rows:
+        week = row.source.source.week_number
+        if week not in pending_weeks:
+            output.append(row)
+            continue
+        candidate = v2_by_week[week]
+        if draft_candidate_safety_issues(candidate):
+            result = "Не подтверждено педагогом"
+            control = "Не подтверждено педагогом"
+        else:
+            result = f"Требует проверки: {row.planned_result}"
+            control = f"Требует проверки: {row.assessment_method}"
+        output.append(
+            replace(
+                row,
+                planned_result=result,
+                assessment_method=control,
             )
-        return _lesson_rows_from_v2(application.rows)
-    return build_lesson_content(content_rows)
+        )
+    return tuple(output)
 
 
 @dataclass(frozen=True)
@@ -145,6 +238,10 @@ class PipelineResult:
     content: bytes
     warnings: tuple[str, ...]
     resolved_lessons: tuple[ResolvedLessonRow, ...]
+    status: CalendarDocumentStatus = CalendarDocumentStatus.FINAL_READY
+    review_cases: tuple[SemanticReviewCase, ...] = ()
+    accepted_review_ids: tuple[str, ...] = ()
+    confirmation_errors: tuple[tuple[str, tuple[str, ...]], ...] = ()
     ai_usage: AIUsage | None = None
 
 
@@ -209,13 +306,14 @@ def run_calendar_pipeline(
         schedule=schedule,
         semantic_revision=revision,
     )
-    lesson_rows = _build_pipeline_lesson_content(
+    lesson_build = _build_pipeline_lesson_content_outcome(
         content_rows,
         use_content_engine_v2=use_ce2,
         manual_confirmations=manual_confirmations,
         review_context_fingerprint=review_context,
         semantic_revision=revision,
     )
+    lesson_rows = lesson_build.rows
 
     ai_result = None
     ai_usage = None
@@ -245,10 +343,19 @@ def run_calendar_pipeline(
         ai_result,
         freeze_pedagogical_fields=use_ce2 and not use_ai,
     )
+    rows_for_docx = (
+        _draft_resolved_rows(
+            resolved,
+            lesson_build.v2_rows,
+            lesson_build.review_cases,
+        )
+        if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
+        else resolved
+    )
     try:
         docx_bytes = generate_calendar_docx(
             utp,
-            resolved,
+            rows_for_docx,
             template,
             academic_year,
             program_title=program.title if program else None,
@@ -259,12 +366,15 @@ def run_calendar_pipeline(
             group_number=group_number,
             class_name=class_name,
             teacher_name=teacher_name,
+            draft_review_weeks=tuple(
+                case.week_number for case in lesson_build.review_cases
+            ),
         )
     except Exception as error:
         log_docx_qa_failure(
             "generate_calendar_docx",
             error,
-            logical_rows=len(resolved),
+            logical_rows=len(rows_for_docx),
         )
         raise
     if on_progress is not None:
@@ -287,7 +397,7 @@ def run_calendar_pipeline(
             "validate_calendar_docx",
             error,
             content=docx_bytes,
-            logical_rows=len(resolved),
+            logical_rows=len(rows_for_docx),
         )
         raise
 
@@ -305,6 +415,16 @@ def run_calendar_pipeline(
                 for warning in row.warnings
             ),
             *(
+                (
+                    "Черновик: требуется проверка недель "
+                    + ", ".join(
+                        str(case.week_number) for case in lesson_build.review_cases
+                    ),
+                )
+                if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
+                else ()
+            ),
+            *(
                 issue.message
                 for issue in (*qa_issues, *visual_issues)
                 if issue.severity.value == "warning"
@@ -312,9 +432,17 @@ def run_calendar_pipeline(
         }
     )
     return PipelineResult(
-        filename=build_output_filename(utp, academic_year),
+        filename=(
+            "Черновик_" + build_output_filename(utp, academic_year)
+            if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
+            else build_output_filename(utp, academic_year)
+        ),
         content=docx_bytes,
         warnings=tuple(warnings),
         resolved_lessons=resolved,
+        status=lesson_build.status,
+        review_cases=lesson_build.review_cases,
+        accepted_review_ids=lesson_build.accepted_review_ids,
+        confirmation_errors=lesson_build.confirmation_errors,
         ai_usage=ai_usage,
     )

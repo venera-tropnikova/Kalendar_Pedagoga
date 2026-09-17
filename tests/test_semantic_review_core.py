@@ -14,8 +14,12 @@ from calendar_pedagoga.content_engine_v2 import (
 from calendar_pedagoga.content_generation import CalendarContentRow
 from calendar_pedagoga.matching import MatchStatus
 from calendar_pedagoga.pipeline import (
+    CalendarDocumentStatus,
     SemanticReviewRequired,
     _build_pipeline_lesson_content,
+    _build_pipeline_lesson_content_outcome,
+    _draft_resolved_rows,
+    _lesson_rows_from_v2,
 )
 from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import build_schedule
@@ -24,7 +28,9 @@ from calendar_pedagoga.semantic_review import (
     apply_manual_semantic_confirmations,
     build_review_context_fingerprint,
     build_semantic_review_cases,
+    draft_candidate_safety_issues,
 )
+from calendar_pedagoga.lesson_resolution import resolve_lesson_content
 
 
 def _source(week: int, text: str = "Выполнение упражнения.") -> CalendarContentRow:
@@ -256,6 +262,50 @@ def test_pipeline_exposes_structured_review_required(monkeypatch) -> None:
         manual_confirmations={case.review_id: _confirmation(case)},
     )
     assert lessons[0].planned_result == "Выполняет упражнение."
+
+
+def test_pipeline_review_outcome_is_draft_ready(monkeypatch) -> None:
+    row = _review_row()
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.build_lesson_content_v2",
+        lambda _content: (row,),
+    )
+    outcome = _build_pipeline_lesson_content_outcome(
+        (row.source,),
+        use_content_engine_v2=True,
+        semantic_revision="revision",
+    )
+    assert outcome.status is CalendarDocumentStatus.DRAFT_READY
+    assert [case.week_number for case in outcome.review_cases] == [1]
+    assert len(outcome.rows) == 1
+
+
+def test_draft_marks_safe_proposal_and_hides_unsafe_proposal() -> None:
+    safe = _review_row(1)
+    unsafe = _review_row(
+        2,
+        "Выполнение упражнения без страховки запрещено.",
+    )
+    assert not draft_candidate_safety_issues(safe)
+    assert draft_candidate_safety_issues(unsafe)
+    rows = (safe, unsafe)
+    cases = build_semantic_review_cases(rows, context_fingerprint="context")
+    resolved = resolve_lesson_content(_lesson_rows_from_v2(rows))
+    # CE1 values above are irrelevant to the marker decision; use the exact
+    # proposed CE2 text that will cross the draft display boundary.
+    resolved = tuple(
+        replace(
+            item,
+            planned_result=row.planned_result,
+            assessment_method=row.assessment_method,
+        )
+        for item, row in zip(resolved, rows)
+    )
+    marked = _draft_resolved_rows(resolved, rows, cases)
+    assert marked[0].planned_result.startswith("Требует проверки:")
+    assert marked[0].assessment_method.startswith("Требует проверки:")
+    assert marked[1].planned_result == "Не подтверждено педагогом"
+    assert marked[1].assessment_method == "Не подтверждено педагогом"
 
 
 def test_pipeline_one_confirmation_keeps_other_week_blocked(monkeypatch) -> None:

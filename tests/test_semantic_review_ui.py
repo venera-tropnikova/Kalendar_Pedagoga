@@ -275,7 +275,7 @@ def test_all_confirmed_allows_generation_and_passes_mapping() -> None:
     assert execute.call_args.kwargs["manual_confirmations"] == {"id": confirmation}
 
 
-def test_pending_review_keeps_docx_unavailable() -> None:
+def test_pending_review_allows_draft_docx_generation() -> None:
     state = {
         "calendar_generate_after_check": True,
         "calendar_generation_inputs": "inputs",
@@ -299,7 +299,7 @@ def test_pending_review_keeps_docx_unavailable() -> None:
             semantic_review_blocked=True,
             manual_confirmations={},
         )
-    execute.assert_not_called()
+    execute.assert_called_once()
 
 
 def test_no_cases_do_not_render_review_ui() -> None:
