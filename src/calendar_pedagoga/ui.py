@@ -184,6 +184,7 @@ def _sync_generation_fingerprint(fingerprint: tuple[str, str]) -> bool:
         "calendar_generation_pending", "calendar_generation_error",
         "calendar_generation_succeeded", "calendar_resolved_lessons",
         "calendar_plan_snapshot", "calendar_remote_job",
+        "calendar_remote_started_at",
     )
     if any(st.session_state.get(key) for key in keys):
         st.session_state["calendar_generation_invalidated"] = True
@@ -243,6 +244,7 @@ def _reset_analysis_state() -> None:
         "calendar_busy",
         "calendar_work_status",
         "calendar_remote_job",
+        "calendar_remote_started_at",
         "semantic_review_scope",
         "semantic_review_confirmations",
         "semantic_review_issues",
@@ -3030,8 +3032,8 @@ def _form_is_open() -> bool:
 def _open_input_form() -> None:
     st.session_state["ui_edit_inputs"] = True
     st.session_state.pop("calendar_generate_after_check", None)
-    _clear_work_busy()
     _invalidate_generated_plan()
+    _clear_work_busy()
     st.rerun()
 
 
@@ -3354,7 +3356,29 @@ def _work_status_block(slot, label: str) -> Iterator[object]:
     yield widget
 
 
+def _active_remote_job_handle() -> dict | None:
+    handle = st.session_state.get("calendar_remote_job")
+    if not isinstance(handle, dict) or not handle.get("job_id"):
+        return None
+    return handle
+
+
+def _persisted_remote_started_at(handle: Mapping[str, object]) -> float:
+    stored = st.session_state.get("calendar_remote_started_at")
+    if stored is None:
+        stored = handle.get("started_at")
+        if stored is not None:
+            st.session_state["calendar_remote_started_at"] = stored
+    try:
+        return float(stored or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _clear_work_busy() -> None:
+    if _active_remote_job_handle() is not None:
+        st.session_state["calendar_busy"] = True
+        return
     st.session_state["calendar_busy"] = False
     st.session_state.pop("calendar_work_status", None)
     st.session_state.pop("calendar_check_pending", None)
@@ -3599,6 +3623,7 @@ def _invalidate_generated_plan() -> None:
         "calendar_resolved_lessons",
         "calendar_plan_snapshot",
         "calendar_remote_job",
+        "calendar_remote_started_at",
     ):
         st.session_state.pop(key, None)
     if had_result:
@@ -4254,6 +4279,7 @@ def _fail_remote_generation(message: str, error: BaseException | None = None) ->
         _emit_generation_error_to_stderr(error)
     st.session_state["calendar_generation_error"] = message
     st.session_state.pop("calendar_remote_job", None)
+    st.session_state.pop("calendar_remote_started_at", None)
     _clear_work_busy()
 
 
@@ -4261,15 +4287,28 @@ def _generation_fingerprint() -> object:
     return st.session_state.get("calendar_generation_fingerprint")
 
 
+def _drop_remote_job() -> None:
+    st.session_state.pop("calendar_remote_job", None)
+    st.session_state.pop("calendar_remote_started_at", None)
+    _clear_work_busy()
+
+
 def _poll_active_remote_job(*, show_status: bool = False) -> None:
-    handle = st.session_state.get("calendar_remote_job")
-    if not isinstance(handle, dict) or not handle.get("job_id"):
+    handle = _active_remote_job_handle()
+    if handle is None:
         return
+    started_at = _persisted_remote_started_at(handle)
+    now = time.time()
+    poll_handle = {
+        **handle,
+        "started_at": started_at,
+        "fingerprint": handle.get("fingerprint") or _generation_fingerprint(),
+    }
     try:
         outcome = advance_remote_generation_job(
-            handle,
+            poll_handle,
             current_fingerprint=_generation_fingerprint(),
-            now=time.time(),
+            now=now,
             fetch_job=fetch_remote_calendar_job,
             download_document=lambda job_id, fallback_name=None: (
                 download_remote_calendar_document(job_id, fallback_name=fallback_name)
@@ -4280,9 +4319,9 @@ def _poll_active_remote_job(*, show_status: bool = False) -> None:
     except (PipelineError, ScheduleValidationError, ValueError) as error:
         _fail_remote_generation(str(error), error)
         return
-    if outcome.action == "stale":
-        st.session_state.pop("calendar_remote_job", None)
-        _clear_work_busy()
+    if outcome.action == "succeeded" and outcome.result is not None:
+        _store_generation_result(outcome.result)
+        _drop_remote_job()
         return
     if outcome.action in {"timeout", "failed"}:
         message = outcome.error or REMOTE_JOB_TIMEOUT_MESSAGE
@@ -4290,10 +4329,14 @@ def _poll_active_remote_job(*, show_status: bool = False) -> None:
         return
     if outcome.action == "pending":
         st.session_state["calendar_remote_job"] = {
-            **handle,
+            "job_id": poll_handle["job_id"],
+            "started_at": started_at,
+            "fingerprint": poll_handle.get("fingerprint"),
             "job_state": outcome.job_state,
             "phase": outcome.phase,
         }
+        st.session_state["calendar_remote_started_at"] = started_at
+        st.session_state["calendar_busy"] = True
         if outcome.label:
             _set_work_status(outcome.label)
             if show_status:
@@ -4301,17 +4344,18 @@ def _poll_active_remote_job(*, show_status: bool = False) -> None:
                     _work_status_markup(outcome.label, state="running"),
                     unsafe_allow_html=True,
                 )
+    if now - started_at >= DEFAULT_WAIT_TIMEOUT_SECONDS:
+        _fail_remote_generation(REMOTE_JOB_TIMEOUT_MESSAGE)
         return
-    if outcome.action == "succeeded" and outcome.result is not None:
-        _store_generation_result(outcome.result)
-        st.session_state.pop("calendar_remote_job", None)
-        _clear_work_busy()
+    if outcome.action == "stale":
+        _drop_remote_job()
 
 
 def _render_generation_result(*, show_status: bool = True) -> None:
-    inputs = st.session_state.get("calendar_generation_inputs", "")
-    if _sync_generation_fingerprint((inputs, _generator_revision())):
-        _reset_analysis_state()
+    if _active_remote_job_handle() is None:
+        inputs = st.session_state.get("calendar_generation_inputs", "")
+        if _sync_generation_fingerprint((inputs, _generator_revision())):
+            _reset_analysis_state()
     _poll_active_remote_job(show_status=show_status)
     if st.session_state.get("calendar_generation_invalidated"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
@@ -4357,6 +4401,8 @@ def _execute_calendar_generation(
     manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
     status_slot=None,
 ) -> None:
+    if _active_remote_job_handle() is not None:
+        return
     utp = validated_utp.parsed
     assert isinstance(utp, (ConfirmedStudyPlan, UtpParseResult))
     program = None
@@ -4401,13 +4447,16 @@ def _execute_calendar_generation(
             job_id = str(created.get("job_id") or "")
             if not job_id:
                 raise PipelineError("Generation API не вернул job_id.")
+            started_at = time.time()
+            st.session_state["calendar_remote_started_at"] = started_at
             st.session_state["calendar_remote_job"] = {
                 "job_id": job_id,
-                "started_at": time.time(),
+                "started_at": started_at,
                 "fingerprint": _generation_fingerprint(),
                 "job_state": created.get("job_state") or "QUEUED",
                 "phase": created.get("phase"),
             }
+            st.session_state["calendar_busy"] = True
             label = remote_job_progress_label(
                 created.get("job_state"), created.get("phase")
             )
@@ -4417,7 +4466,7 @@ def _execute_calendar_generation(
         stored_issues = st.session_state.setdefault("semantic_review_issues", {})
         stored_issues.update(dict(error.confirmation_errors))
         st.session_state["semantic_review_pipeline_cases"] = error.review_cases
-        st.session_state.pop("calendar_remote_job", None)
+        _drop_remote_job()
         _set_work_status("")
     except (PipelineError, ScheduleValidationError, ValueError) as error:
         _fail_remote_generation(str(error), error)
@@ -4719,6 +4768,7 @@ def run_app() -> None:
             st.session_state.pop("calendar_generation_invalidated", None)
             st.session_state.pop("calendar_check_error", None)
             st.session_state.pop("calendar_remote_job", None)
+            st.session_state.pop("calendar_remote_started_at", None)
             st.session_state["calendar_generate_after_check"] = True
             st.session_state["ui_edit_inputs"] = False
             check_status.update(label=_STATUS_BUILD_PLAN, state="running")

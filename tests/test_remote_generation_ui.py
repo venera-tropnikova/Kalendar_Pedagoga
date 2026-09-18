@@ -311,3 +311,99 @@ def test_stale_fingerprint_does_not_apply_remote_result() -> None:
     assert "calendar_generation_succeeded" not in state
     widgets.download_button.assert_not_called()
     widgets.error.assert_not_called()
+
+
+def test_busy_active_job_still_polls() -> None:
+    fetches: list[str] = []
+
+    def fetch(job_id, **_kwargs):
+        fetches.append(job_id)
+        return _job_status(job_state="RUNNING", phase="DOCX")
+
+    state = _state_with_job()
+    state["calendar_busy"] = True
+    started_at = state["calendar_remote_job"]["started_at"]
+    _fragment(state, fetch_remote_calendar_job=fetch)
+    assert fetches == ["abc"]
+    assert state["calendar_remote_job"]["job_id"] == "abc"
+    assert state["calendar_remote_job"]["started_at"] == started_at
+    assert state["calendar_busy"] is True
+    assert state["calendar_work_status"] == "Формируем календарный план…"
+
+
+def test_started_at_unchanged_across_fragment_reruns() -> None:
+    started_at = time.time() - 5
+    state = _state_with_job(_handle(started_at=started_at))
+    state["calendar_remote_started_at"] = started_at
+    for _ in range(3):
+        _fragment(
+            state,
+            fetch_remote_calendar_job=_job_status(
+                job_state="RUNNING",
+                phase="SEMANTIC",
+            ),
+        )
+    assert state["calendar_remote_job"]["job_id"] == "abc"
+    assert state["calendar_remote_job"]["started_at"] == started_at
+    assert state["calendar_remote_started_at"] == started_at
+
+
+def test_timeout_reached_while_busy_after_pending_polls() -> None:
+    started_at = time.time() - 10
+    state = _state_with_job(_handle(started_at=started_at))
+    state["calendar_busy"] = True
+    state["calendar_remote_started_at"] = started_at
+    fetches: list[str] = []
+
+    def fetch(job_id, **_kwargs):
+        fetches.append(job_id)
+        return _job_status(job_state="RUNNING", phase="SEMANTIC")
+
+    widgets = _fragment(state, fetch_remote_calendar_job=fetch)
+    assert fetches == ["abc"]
+    assert state["calendar_remote_job"]["started_at"] == started_at
+
+    state["calendar_remote_started_at"] = time.time() - DEFAULT_WAIT_TIMEOUT_SECONDS - 1
+    state["calendar_remote_job"]["started_at"] = state["calendar_remote_started_at"]
+    widgets = _fragment(
+        state,
+        fetch_remote_calendar_job=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("timeout must not GET")
+        ),
+    )
+    assert len(fetches) == 1
+    assert "calendar_remote_job" not in state
+    assert "calendar_remote_started_at" not in state
+    assert state["calendar_generation_error"] == REMOTE_JOB_TIMEOUT_MESSAGE
+    assert REMOTE_JOB_TIMEOUT_MESSAGE in widgets.error.call_args.args[0]
+    assert state["calendar_busy"] is False
+
+
+def test_clear_work_busy_keeps_in_flight_remote_job() -> None:
+    state = _state_with_job()
+    with patch.object(ui.st, "session_state", state):
+        ui._clear_work_busy()
+    assert state["calendar_remote_job"]["job_id"] == "abc"
+    assert state["calendar_busy"] is True
+
+
+def test_in_flight_job_skips_fingerprint_rehash() -> None:
+    state = _state_with_job()
+    with (
+        patch.object(ui.st, "session_state", state),
+        patch.object(ui, "_generator_revision") as revision,
+        patch.object(
+            ui,
+            "fetch_remote_calendar_job",
+            return_value=_job_status(job_state="QUEUED"),
+        ),
+        patch.object(ui.st, "markdown"),
+        patch.object(ui.st, "error"),
+        patch.object(ui.st, "info"),
+        patch.object(ui.st, "warning"),
+        patch.object(ui.st, "download_button"),
+    ):
+        ui._render_generation_result()
+    revision.assert_not_called()
+    assert state["calendar_remote_job"]["job_id"] == "abc"
+
