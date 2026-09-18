@@ -30,6 +30,7 @@ from calendar_pedagoga.semantic_review import (
     build_semantic_review_cases,
     draft_candidate_safety_issues,
     review_proposal_docx_issues,
+    source_grounded_review_proposal,
 )
 from calendar_pedagoga.lesson_resolution import resolve_lesson_content
 
@@ -333,35 +334,79 @@ def test_semantic_coverage_review_keeps_safe_docx_text() -> None:
     assert marked[0].assessment_method
 
 
-def test_grammar_fail_blanks_review_docx_cells() -> None:
-    row = replace(
-        _review_row(),
-        planned_result="Характеризует правилу безопасного поведения.",
-        assessment_method="устный опрос по правилу безопасного поведения",
+def _unsafe_proposal(text: str) -> LessonContentV2Row:
+    """Week whose proposed CONTROL cannot cross the first safe gate."""
+
+    row = replace(_review_row(text=text), assessment_method="устный опрос по истории")
+    assert review_proposal_docx_issues(row)
+    return row
+
+
+def _stub_second_candidate(monkeypatch, *, result: str, control: str) -> None:
+    """Force one exact second-pass candidate to probe a single gate."""
+
+    def _fake_derive(**kwargs):
+        derived = derive_fields_v2(**kwargs)
+        return replace(derived, planned_result=result, assessment_method=control)
+
+    monkeypatch.setattr(
+        "calendar_pedagoga.semantic_review.derive_fields_v2", _fake_derive
     )
-    assert any("grammar" in issue.casefold() for issue in review_proposal_docx_issues(row))
+
+
+def test_unsafe_proposal_is_replaced_by_source_grounded_candidate() -> None:
+    row = _unsafe_proposal("Виды туристских узлов.")
+    rebuilt = source_grounded_review_proposal(row)
+    assert rebuilt is not None
     marked, cases = _docx_rows_for(row)
     assert [case.week_number for case in cases] == [1]
+    assert marked[0].planned_result == rebuilt[0]
+    assert marked[0].assessment_method == rebuilt[1]
+    assert marked[0].assessment_method != row.assessment_method
+    assert "туристских узлов" in marked[0].planned_result
+    assert "истории" not in marked[0].assessment_method
+
+
+def test_second_candidate_grammar_fail_blanks_docx_cells(monkeypatch) -> None:
+    row = _unsafe_proposal("Виды туристских узлов.")
+    _stub_second_candidate(
+        monkeypatch,
+        result="Характеризует правилу безопасного поведения.",
+        control="устный опрос по правилу безопасного поведения",
+    )
+    assert source_grounded_review_proposal(row) is None
+    marked, _cases = _docx_rows_for(row)
     assert marked[0].planned_result == ""
     assert marked[0].assessment_method == ""
 
 
-def test_r13_fail_blanks_review_docx_cells() -> None:
+def test_second_candidate_control_coverage_fail_blanks_docx_cells(monkeypatch) -> None:
+    row = _unsafe_proposal("Виды туристских узлов.")
+    _stub_second_candidate(
+        monkeypatch,
+        result="Называет виды туристских узлов.",
+        control="устный опрос по истории",
+    )
+    assert source_grounded_review_proposal(row) is None
+    marked, _cases = _docx_rows_for(row)
+    assert marked[0].planned_result == ""
+    assert marked[0].assessment_method == ""
+
+
+def test_r13_source_leaves_docx_cells_empty() -> None:
     row = _review_row(text="Выполнение упражнения без страховки запрещено.")
     assert any("R13" in issue for issue in review_proposal_docx_issues(row))
+    assert source_grounded_review_proposal(row) is None
     marked, cases = _docx_rows_for(row)
     assert [case.week_number for case in cases] == [1]
     assert marked[0].planned_result == ""
     assert marked[0].assessment_method == ""
 
 
-def test_control_coverage_fail_blanks_review_docx_cells() -> None:
-    row = replace(
-        _review_row(),
-        assessment_method="устный опрос по истории",
-    )
-    assert not draft_candidate_safety_issues(row)
-    assert any("покрыва" in issue.casefold() for issue in review_proposal_docx_issues(row))
+def test_second_pass_adds_no_meaning_outside_source() -> None:
+    # The only candidate this SOURCE can derive names the topic, not the clause.
+    row = _unsafe_proposal("Правила безопасного поведения.")
+    assert source_grounded_review_proposal(row) is None
     marked, cases = _docx_rows_for(row)
     assert [case.week_number for case in cases] == [1]
     assert marked[0].planned_result == ""

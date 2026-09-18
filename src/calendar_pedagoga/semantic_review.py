@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -20,10 +20,14 @@ from calendar_pedagoga.content_engine_v2 import (
     _apply_result_grammar_gate,
     _blocking_grammar_issues,
     _control_covers_all_result_items,
+    _drop_leading_verb,
+    _meaning_stems,
     _normalize_spaces,
     _rc_verbosity_block_reasons,
     _r13_must_abstain_action_reconstruction,
+    _result_sentences,
     _role_is_required,
+    derive_fields_v2,
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
 )
@@ -153,6 +157,101 @@ def review_proposal_docx_issues(row: LessonContentV2Row) -> tuple[str, ...]:
     if result and control and not _control_covers_all_result_items(result, control):
         issues.append("CONTROL не покрывает RESULT")
     return tuple(dict.fromkeys(issues))
+
+
+def _result_object_stems(result: str) -> list[str]:
+    """Meaning stems of RESULT objects; the finite verb is CE2's own predicate."""
+
+    stems: list[str] = []
+    for sentence in _result_sentences(result):
+        stems.extend(_meaning_stems(_drop_leading_verb(sentence)))
+    return stems
+
+
+def _stem_cited_in(stems: list[str], text: str) -> bool:
+    low = _normalize_spaces(text).casefold()
+    return any(stem[:4] in low for stem in stems)
+
+
+def _candidate_is_source_grounded(
+    result: str,
+    claimed_clauses: tuple[str, ...],
+    source_text: str,
+) -> bool:
+    """No object may come from outside SOURCE, and every claim must be cited."""
+
+    object_stems = _result_object_stems(result)
+    if not object_stems:
+        return False
+    source_low = _normalize_spaces(source_text).casefold()
+    if any(stem[:4] not in source_low for stem in object_stems):
+        return False
+    result_stems = _meaning_stems(result)
+    return all(
+        _stem_cited_in(result_stems, clause) for clause in claimed_clauses
+    )
+
+
+def source_grounded_review_proposal(
+    row: LessonContentV2Row,
+) -> tuple[str, str] | None:
+    """Rebuild RESULT/CONTROL for a reviewed week from its own SOURCE clauses.
+
+    Only clauses of this week feed the candidate. Acceptance reuses the manual
+    confirmation gates (SOURCE coverage of the claimed clauses, R13, grammar,
+    CONTROL coverage) and additionally requires that the wording stay grounded
+    in SOURCE, so no generic phrase and no new meaning can enter the DOCX.
+    """
+
+    role_map = dict(row.clause_roles)
+    clauses = tuple(
+        clause
+        for clause, _status in row.clause_coverage
+        if _role_is_required(role_map.get(clause, REQUIRED_ACTION))
+        and not _r13_must_abstain_action_reconstruction(clause)
+    )
+    if not clauses:
+        return None
+    source_text = " ".join(
+        (
+            row.source.topic_title,
+            row.theory_text,
+            row.practice_text,
+            row.source.program_content_full,
+        )
+    )
+    practice_hours = row.source.practice_hours
+    for size in range(len(clauses), 0, -1):
+        claimed = clauses[:size]
+        clause_text = ". ".join(clause.rstrip(". ") for clause in claimed) + "."
+        derived = derive_fields_v2(
+            topic_title=row.source.topic_title,
+            theory_text="" if practice_hours else clause_text,
+            practice_text=clause_text if practice_hours else "",
+            program_content=clause_text,
+            theory_hours=row.source.theory_hours,
+            practice_hours=practice_hours,
+        )
+        claimed_row = replace(
+            row,
+            clause_coverage=tuple((clause, "NEEDS_REVIEW") for clause in claimed),
+            clause_roles=tuple(
+                (clause, role_map.get(clause, REQUIRED_ACTION)) for clause in claimed
+            ),
+        )
+        verdict = validate_manual_lesson_content(
+            claimed_row,
+            planned_result=derived.planned_result,
+            assessment_method=derived.assessment_method,
+        )
+        if not verdict.accepted:
+            continue
+        if not _candidate_is_source_grounded(
+            derived.planned_result, claimed, source_text
+        ):
+            continue
+        return derived.planned_result, derived.assessment_method
+    return None
 
 
 def _canonical(value: Any) -> Any:

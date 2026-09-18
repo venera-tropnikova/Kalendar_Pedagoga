@@ -46,6 +46,7 @@ from calendar_pedagoga.semantic_review import (
     build_semantic_review_cases,
     review_proposal_docx_issues,
     review_context_fingerprint_from_rows,
+    source_grounded_review_proposal,
 )
 
 
@@ -206,7 +207,11 @@ def _draft_resolved_rows(
     v2_rows: tuple[LessonContentV2Row, ...],
     cases: tuple[SemanticReviewCase, ...],
 ) -> tuple[ResolvedLessonRow, ...]:
-    """Write safe proposed RESULT/CONTROL; blank grammar/R13/control failures."""
+    """Write safe proposed RESULT/CONTROL; blank grammar/R13/control failures.
+
+    An unsafe proposal gets one more chance through a SOURCE-grounded rebuild
+    from the week's own clauses; cells stay empty when that proof also fails.
+    """
 
     pending_weeks = {case.week_number for case in cases}
     v2_by_week = {row.source.week_number: row for row in v2_rows}
@@ -217,16 +222,18 @@ def _draft_resolved_rows(
             output.append(row)
             continue
         candidate = v2_by_week[week]
-        if review_proposal_docx_issues(candidate):
-            output.append(
-                replace(
-                    row,
-                    planned_result="",
-                    assessment_method="",
-                )
-            )
+        if not review_proposal_docx_issues(candidate):
+            output.append(row)
             continue
-        output.append(row)
+        rebuilt = source_grounded_review_proposal(candidate)
+        planned_result, assessment_method = rebuilt if rebuilt else ("", "")
+        output.append(
+            replace(
+                row,
+                planned_result=planned_result,
+                assessment_method=assessment_method,
+            )
+        )
     return tuple(output)
 
 
