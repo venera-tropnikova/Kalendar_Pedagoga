@@ -29,6 +29,7 @@ from calendar_pedagoga.semantic_review import (
     build_review_context_fingerprint,
     build_semantic_review_cases,
     draft_candidate_safety_issues,
+    review_proposal_docx_issues,
 )
 from calendar_pedagoga.lesson_resolution import resolve_lesson_content
 
@@ -280,7 +281,23 @@ def test_pipeline_review_outcome_is_draft_ready(monkeypatch) -> None:
     assert len(outcome.rows) == 1
 
 
-def test_draft_blanks_unproven_result_and_control() -> None:
+def _docx_rows_for(
+    *v2_rows: LessonContentV2Row,
+) -> tuple[tuple, tuple]:
+    cases = build_semantic_review_cases(v2_rows, context_fingerprint="context")
+    resolved = resolve_lesson_content(_lesson_rows_from_v2(v2_rows))
+    resolved = tuple(
+        replace(
+            item,
+            planned_result=row.planned_result,
+            assessment_method=row.assessment_method,
+        )
+        for item, row in zip(resolved, v2_rows)
+    )
+    return _draft_resolved_rows(resolved, v2_rows, cases), cases
+
+
+def test_draft_keeps_safe_review_content_and_blanks_r13() -> None:
     safe = _review_row(1)
     unsafe = _review_row(
         2,
@@ -291,28 +308,64 @@ def test_draft_blanks_unproven_result_and_control() -> None:
         clause_coverage=(("Выполнение упражнения", "COVERED"),),
         warnings=(),
     )
-    assert not draft_candidate_safety_issues(safe)
-    assert draft_candidate_safety_issues(unsafe)
-    rows = (safe, unsafe, proven)
-    cases = build_semantic_review_cases(rows, context_fingerprint="context")
-    resolved = resolve_lesson_content(_lesson_rows_from_v2(rows))
-    resolved = tuple(
-        replace(
-            item,
-            planned_result=row.planned_result,
-            assessment_method=row.assessment_method,
-        )
-        for item, row in zip(resolved, rows)
-    )
-    marked = _draft_resolved_rows(resolved, rows, cases)
+    assert not review_proposal_docx_issues(safe)
+    assert any("R13" in issue for issue in review_proposal_docx_issues(unsafe))
+    marked, cases = _docx_rows_for(safe, unsafe, proven)
     pending_weeks = {case.week_number for case in cases}
     assert pending_weeks == {1, 2}
-    assert marked[0].planned_result == ""
-    assert marked[0].assessment_method == ""
+    assert marked[0].planned_result == safe.planned_result
+    assert marked[0].assessment_method == safe.assessment_method
     assert marked[1].planned_result == ""
     assert marked[1].assessment_method == ""
     assert marked[2].planned_result == proven.planned_result
     assert marked[2].assessment_method == proven.assessment_method
+
+
+def test_semantic_coverage_review_keeps_safe_docx_text() -> None:
+    row = _review_row()
+    assert not draft_candidate_safety_issues(row)
+    assert not review_proposal_docx_issues(row)
+    marked, cases = _docx_rows_for(row)
+    assert [case.week_number for case in cases] == [1]
+    assert marked[0].planned_result == row.planned_result
+    assert marked[0].assessment_method == row.assessment_method
+    assert marked[0].planned_result
+    assert marked[0].assessment_method
+
+
+def test_grammar_fail_blanks_review_docx_cells() -> None:
+    row = replace(
+        _review_row(),
+        planned_result="Характеризует правилу безопасного поведения.",
+        assessment_method="устный опрос по правилу безопасного поведения",
+    )
+    assert any("grammar" in issue.casefold() for issue in review_proposal_docx_issues(row))
+    marked, cases = _docx_rows_for(row)
+    assert [case.week_number for case in cases] == [1]
+    assert marked[0].planned_result == ""
+    assert marked[0].assessment_method == ""
+
+
+def test_r13_fail_blanks_review_docx_cells() -> None:
+    row = _review_row(text="Выполнение упражнения без страховки запрещено.")
+    assert any("R13" in issue for issue in review_proposal_docx_issues(row))
+    marked, cases = _docx_rows_for(row)
+    assert [case.week_number for case in cases] == [1]
+    assert marked[0].planned_result == ""
+    assert marked[0].assessment_method == ""
+
+
+def test_control_coverage_fail_blanks_review_docx_cells() -> None:
+    row = replace(
+        _review_row(),
+        assessment_method="устный опрос по истории",
+    )
+    assert not draft_candidate_safety_issues(row)
+    assert any("покрыва" in issue.casefold() for issue in review_proposal_docx_issues(row))
+    marked, cases = _docx_rows_for(row)
+    assert [case.week_number for case in cases] == [1]
+    assert marked[0].planned_result == ""
+    assert marked[0].assessment_method == ""
 
 
 def test_pipeline_one_confirmation_keeps_other_week_blocked(monkeypatch) -> None:

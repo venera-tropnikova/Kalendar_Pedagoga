@@ -118,11 +118,7 @@ def _corpus(*needles: str) -> Path | None:
     return None
 
 
-def _stub_docx_bytes(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "calendar_pedagoga.pipeline.generate_calendar_docx",
-        lambda *_args, **_kwargs: b"PK\x03\x04docx",
-    )
+def _stub_docx_qa(monkeypatch) -> None:
     monkeypatch.setattr(
         "calendar_pedagoga.pipeline.validate_calendar_docx",
         lambda *_args, **_kwargs: (),
@@ -135,6 +131,14 @@ def _stub_docx_bytes(monkeypatch) -> None:
         "calendar_pedagoga.pipeline.has_blocking_qa_issues",
         lambda *_args, **_kwargs: False,
     )
+
+
+def _stub_docx_bytes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.generate_calendar_docx",
+        lambda *_args, **_kwargs: b"PK\x03\x04docx",
+    )
+    _stub_docx_qa(monkeypatch)
 
 
 def _run_named_corpus(utp_path: Path, program_path: Path, *, study_year: int):
@@ -158,6 +162,21 @@ def _run_named_corpus(utp_path: Path, program_path: Path, *, study_year: int):
     return result, expected
 
 
+def _capture_docx_rows(monkeypatch) -> dict:
+    captured: dict = {}
+
+    def _fake_generate(utp, rows, *args, **kwargs):
+        captured["rows"] = rows
+        return b"PK\x03\x04docx"
+
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.generate_calendar_docx",
+        _fake_generate,
+    )
+    _stub_docx_qa(monkeypatch)
+    return captured
+
+
 def test_key_y1_draft_uses_ordinary_calendar_filename(monkeypatch) -> None:
     utp_path = _corpus("утп", "ключ", "1 г")
     program_path = REFERENCES / "Программа КЛЮЧ.DOC"
@@ -165,13 +184,39 @@ def test_key_y1_draft_uses_ordinary_calendar_filename(monkeypatch) -> None:
         program_path = _corpus("програм", "ключ")
     if utp_path is None or program_path is None or not program_path.exists():
         pytest.skip("В references нет УТП КЛЮЧ 1 г")
-    _stub_docx_bytes(monkeypatch)
+    captured = _capture_docx_rows(monkeypatch)
     result, expected = _run_named_corpus(utp_path, program_path, study_year=1)
     assert result.status is CalendarDocumentStatus.DRAFT_READY
     assert result.review_cases
     assert result.filename == expected
     assert result.filename == "Календарный_план_КЛЮЧ_2026-2027.docx"
     assert "Черновик_" not in result.filename
+    rows = captured["rows"]
+    assert len(rows) == 36
+    review_weeks = {case.week_number for case in result.review_cases}
+    assert len(review_weeks) == 18
+    empty_review = [
+        row.source.source.week_number
+        for row in rows
+        if row.source.source.week_number in review_weeks
+        and not (row.planned_result.strip() and row.assessment_method.strip())
+    ]
+    filled_review = [
+        row.source.source.week_number
+        for row in rows
+        if row.source.source.week_number in review_weeks
+        and row.planned_result.strip()
+        and row.assessment_method.strip()
+    ]
+    assert filled_review
+    assert set(empty_review) <= review_weeks
+    verified_empty = [
+        row.source.source.week_number
+        for row in rows
+        if row.source.source.week_number not in review_weeks
+        and not (row.planned_result.strip() and row.assessment_method.strip())
+    ]
+    assert verified_empty == []
 
 
 def test_climb_keeps_ordinary_calendar_filename(monkeypatch) -> None:
@@ -179,12 +224,19 @@ def test_climb_keeps_ordinary_calendar_filename(monkeypatch) -> None:
     program_path = _corpus("програм", "скалолаз")
     if utp_path is None or program_path is None:
         pytest.skip("В references нет документов Скалолазание")
-    _stub_docx_bytes(monkeypatch)
+    captured = _capture_docx_rows(monkeypatch)
     result, expected = _run_named_corpus(utp_path, program_path, study_year=1)
     assert result.status is CalendarDocumentStatus.FINAL_READY
     assert not result.review_cases
     assert result.filename == expected
     assert "Черновик_" not in result.filename
+    rows = captured["rows"]
+    assert len(rows) == len(result.resolved_lessons)
+    for docx_row, resolved in zip(rows, result.resolved_lessons, strict=True):
+        assert docx_row.planned_result == resolved.planned_result
+        assert docx_row.assessment_method == resolved.assessment_method
+        assert docx_row.planned_result.strip()
+        assert docx_row.assessment_method.strip()
 
 
 def test_content_engine_v2_flag_defaults_on() -> None:

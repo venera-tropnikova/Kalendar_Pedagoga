@@ -462,10 +462,18 @@ def test_key_y1_api_returns_draft_ready() -> None:
         assert "Не подтверждено педагогом" not in text
         weeks = _week_result_control(content)
         assert len(weeks) == 36
-        for week in review_weeks:
-            result, control = weeks[week]
-            assert result == ""
-            assert control == ""
+        filled_review = [
+            week
+            for week in review_weeks
+            if weeks[week][0].strip() and weeks[week][1].strip()
+        ]
+        empty_review = [
+            week
+            for week in review_weeks
+            if not (weeks[week][0].strip() and weeks[week][1].strip())
+        ]
+        assert filled_review
+        assert set(empty_review) <= review_weeks
         proven = [week for week in weeks if week not in review_weeks]
         assert proven
-        assert any(weeks[week][0] or weeks[week][1] for week in proven)
+        assert all(weeks[week][0].strip() and weeks[week][1].strip() for week in proven)
