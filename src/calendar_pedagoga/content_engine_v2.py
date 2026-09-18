@@ -2502,6 +2502,10 @@ def _transform_segment(
         phrase, action, obj = care
         return phrase, action, obj, ""
 
+    knowledge = _knowledge_clause_result(text, theory_only=theory_only)
+    if knowledge:
+        return knowledge
+
     if not theory_only:
         reconstructed = _explicit_action_reconstruction(text, theory_only=theory_only)
         if reconstructed:
@@ -3351,12 +3355,283 @@ def _nominal_knowledge_subject_number(text: str) -> str:
     return ""
 
 
+def _split_source_list(text: str) -> list[str]:
+    return [
+        part.strip(" .")
+        for part in re.split(r",\s*|\s+и\s+", _normalize_spaces(text))
+        if part.strip(" .")
+    ]
+
+
+def _quote_source_term(term: str) -> str:
+    return f"«{term.strip(' .«»\"„“')}»"
+
+
+def _join_quoted_source_terms(terms: list[str], source_tail: str) -> str:
+    quoted = [_quote_source_term(term) for term in terms]
+    if re.search(r"(?i)\s+и\s+", source_tail):
+        return _join_and(quoted)
+    return ", ".join(quoted)
+
+
+def _np_to_genitive(text: str) -> str:
+    """Genitive of a SOURCE NP via proven morphology only; otherwise abstain."""
+
+    tokens = _normalize_spaces(text).split()
+    if not tokens:
+        return ""
+    from calendar_pedagoga.morphology import parse_head, parse_nominal, _restore
+
+    out: list[str] = []
+    for token in tokens:
+        core = _strip_punct_word(token)[1]
+        if not core:
+            return ""
+        if core.casefold() in {"и", "или"}:
+            out.append(token)
+            continue
+        parsed = parse_head(core) or parse_nominal(core)
+        if parsed is None:
+            return ""
+        gram = {"gent"}
+        if parsed.tag.number:
+            gram.add(parsed.tag.number)
+        inflected = parsed.inflect(gram)
+        if inflected is None:
+            return ""
+        word = _restore(token, inflected.word)
+        # «цветы» is the -ы plural; pymorphy maps it onto the -ки lexeme
+        # (цветков). Keep the SOURCE plural type: -ы → -ов.
+        src_core = core.casefold()
+        inf_core = _strip_punct_word(word)[1].casefold()
+        if src_core.endswith("ы") and inf_core.endswith("ков") and inf_core[:-3] == src_core[:-1]:
+            word = _restore(token, core[:-1] + "ов")
+        out.append(word)
+    return _normalize_spaces(" ".join(out))
+
+
+def _source_list_to_genitive(text: str) -> str:
+    items = _split_source_list(text)
+    if len(items) < 1:
+        return ""
+    gens = [_np_to_genitive(item) for item in items]
+    if not all(gens):
+        return ""
+    return _join_and(gens)
+
+
+def _noun_to_instrumental(word: str) -> str:
+    from calendar_pedagoga.morphology import parse_head, _restore
+
+    core = _strip_punct_word(word)[1]
+    if not core:
+        return ""
+    parsed = parse_head(core)
+    if parsed is None:
+        return ""
+    gram = {"ablt"}
+    if parsed.tag.number:
+        gram.add(parsed.tag.number)
+    inflected = parsed.inflect(gram)
+    if inflected is None:
+        return ""
+    return _restore(word, inflected.word)
+
+
+def _concept_values_clause_result(text: str) -> tuple[str, str, str, str] | None:
+    cleaned = _normalize_spaces(text).strip(" .")
+    match = re.fullmatch(r"(?i)поняти[ея]\s*:\s*(.+)", cleaned)
+    if match is None:
+        return None
+    raw = match.group(1).strip(" .")
+    terms = _split_source_list(raw)
+    if len(terms) < 2:
+        return None
+    if any(_FINITE_VERB_RE.search(term) or ":" in term for term in terms):
+        return None
+    joined = _join_quoted_source_terms(terms, raw)
+    obj = f"значения понятий {joined}"
+    return f"объясняет {obj}", "объясняет", obj, ""
+
+
+def _purpose_clause_result(text: str) -> tuple[str, str, str, str] | None:
+    cleaned = _normalize_spaces(text).strip()
+    paren = re.search(r"(?i)\(\s*для\s+чего\s+нужн[аоые]+\s+(.+?)\s*\)", cleaned)
+    standalone = re.fullmatch(
+        r"(?i)для\s+чего\s+нужн[аоые]+\s+(.+?)\s*\??",
+        cleaned.strip(" ."),
+    )
+    body = paren.group(1) if paren is not None else standalone.group(1) if standalone else ""
+    body = _normalize_spaces(body).strip(" .")
+    if not body:
+        return None
+    if _FINITE_VERB_RE.search(body) or ":" in body:
+        return None
+    gen = _source_list_to_genitive(body)
+    if not gen:
+        return None
+    obj = f"функции {gen}"
+    return f"объясняет {obj}", "объясняет", obj, ""
+
+
+def _classification_head_blocked(head: str) -> bool:
+    first = _token_core(head.split()[0]).casefold() if head.split() else ""
+    if first in _KNOWLEDGE_NOUNS or first in {"понятия", "значения", "сведения"}:
+        return True
+    if _has_clause_initial_productive_head(head):
+        return True
+    for token in head.split():
+        if token.casefold() in {"и", "или"}:
+            continue
+        if (
+            _is_leading_form_activity(token)
+            or _looks_like_verbal_noun(token)
+            or _is_exercise_word(token)
+            or _is_walk_word(token)
+            or _is_travel_word(token)
+        ):
+            return True
+    return False
+
+
+def _classification_clause_result(
+    text: str,
+    *,
+    theory_only: bool,
+) -> tuple[str, str, str, str] | None:
+    cleaned = _normalize_spaces(text).strip(" .")
+    if ":" not in cleaned:
+        return None
+    head, tail = cleaned.split(":", 1)
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail or _classification_head_blocked(head):
+        return None
+    cats = _split_source_list(tail)
+    if len(cats) != 2:
+        return None
+    if "," in tail or not re.search(r"(?i)\s+и\s+", tail):
+        return None
+    if re.search(r"(?i)\b(?:другие|прочие|др\.|т\.?\s*п\.?)\b", tail):
+        return None
+    if any(_FINITE_VERB_RE.search(cat) or ":" in cat for cat in cats):
+        return None
+    all_adj = all(
+        all(
+            _is_adjective(token) or token.casefold() in {"и", "или"}
+            for token in cat.split()
+        )
+        for cat in cats
+    )
+    if not all_adj:
+        return None
+    objects = _decap_phrase(head)
+    obj = f"{tail} {objects}"
+    return f"различает {obj}", "различает", obj, ""
+
+
+def _symbol_clause_result(text: str) -> tuple[str, str, str, str] | None:
+    cleaned = _normalize_spaces(text).strip(" .")
+    match = re.fullmatch(
+        r"(?i)(.+?)\s*[—–−-]\s*символ(?:ом)?\s+(.+)",
+        cleaned,
+    )
+    if match is None:
+        return None
+    subject = _decap_phrase(match.group(1).strip())
+    owner = _normalize_spaces(match.group(2)).strip(" .")
+    if (
+        not subject
+        or not owner
+        or ":" in subject
+        or len(subject.split()) > 6
+        or _has_clause_initial_productive_head(subject)
+        or any(_is_proven_finite_token(token) for token in owner.split())
+    ):
+        return None
+    inst = _noun_to_instrumental("символ")
+    if inst.casefold() != "символом":
+        return None
+    obj = f"{subject} {inst} {owner}"
+    return f"называет {obj}", "называет", obj, ""
+
+
+def _knowledge_clause_result(
+    text: str,
+    *,
+    theory_only: bool,
+) -> tuple[str, str, str, str] | None:
+    """Clause-level knowledge frames. Each SOURCE clause yields at most one."""
+
+    cleaned = _normalize_spaces(text)
+    if not cleaned:
+        return None
+    for builder in (
+        _concept_values_clause_result,
+        _purpose_clause_result,
+        _symbol_clause_result,
+    ):
+        built = builder(cleaned)
+        if built:
+            return built
+    return _classification_clause_result(cleaned, theory_only=theory_only)
+
+
+def _knowledge_result_shape(result: str) -> str:
+    obj = _drop_leading_verb(_normalize_spaces(result)).rstrip(" .").casefold()
+    if obj.startswith("значения понятий"):
+        return "concept_values"
+    if obj.startswith("функции "):
+        return "functions"
+    if obj.startswith("что такое"):
+        return "what_is"
+    if re.match(r"(?i)в\s+ч[её]м\s+состоя", obj):
+        return "consists"
+    return _leading_finite_verb(result).casefold() or obj[:24]
+
+
+def _knowledge_control_label(verb: str, obj: str) -> str:
+    phrase = _normalize_spaces(obj).strip(" .")
+    concepts = re.fullmatch(r"(?i)значения\s+понятий\s+(.+)", phrase)
+    if concepts:
+        return "понятия " + concepts.group(1)
+    functions = re.fullmatch(r"(?i)функции\s+(.+)", phrase)
+    if functions:
+        return "функции " + functions.group(1)
+    symbol = re.fullmatch(r"(?i)(.+?)\s+символом\s+(.+)", phrase)
+    if verb == "называет" and symbol:
+        return f"{symbol.group(1)} как символ {symbol.group(2)}"
+    if verb == "различает" and phrase:
+        return phrase
+    return ""
+
+
+def _declared_knowledge_control(result: str) -> str:
+    """Oral CONTROL labels taken only from confirmed knowledge RESULT frames."""
+
+    labels: list[str] = []
+    for sentence in _result_sentences(result):
+        verb = _leading_finite_verb(sentence).casefold()
+        if verb not in _KNOWLEDGE_RESULT_VERBS:
+            continue
+        obj = _drop_leading_verb(sentence).rstrip(".")
+        label = _knowledge_control_label(verb, obj)
+        if not label:
+            return ""
+        labels.append(label)
+    if not labels:
+        return ""
+    return _cap_sentence("устный опрос: " + "; ".join(labels))
+
+
 def _theory_knowledge_reconstruction(
     text: str,
 ) -> tuple[str, str, str, str] | None:
     """Build a finite theory RESULT without changing the SOURCE object's case."""
 
     source = _normalize_spaces(text).strip()
+    structured = _knowledge_clause_result(source, theory_only=True)
+    if structured is not None:
+        return structured
     question = re.fullmatch(r"(?i)что\s+такое\s+([^?!:;]+?)\s*\?", source)
     if question is not None:
         subject = _normalize_spaces(question.group(1)).strip(" .")
@@ -3401,12 +3676,18 @@ def _explained_knowledge_subject(text: str) -> str:
     if question is not None:
         return _normalize_spaces(question.group(1)).strip(" .")
     nominal = re.fullmatch(r"(?i)в\s+ч[её]м\s+(состоит|состоят)\s+(.+)", normalized)
-    if nominal is None:
-        return ""
-    subject = _normalize_spaces(nominal.group(2)).strip(" .")
-    number = _nominal_knowledge_subject_number(subject)
-    expected = "состоят" if number == "plural" else "состоит" if number == "singular" else ""
-    return subject if expected and nominal.group(1).casefold() == expected else ""
+    if nominal is not None:
+        subject = _normalize_spaces(nominal.group(2)).strip(" .")
+        number = _nominal_knowledge_subject_number(subject)
+        expected = "состоят" if number == "plural" else "состоит" if number == "singular" else ""
+        return subject if expected and nominal.group(1).casefold() == expected else ""
+    values = re.fullmatch(r"(?i)значения\s+понятий\s+(.+)", normalized)
+    if values is not None:
+        return _normalize_spaces(values.group(1)).strip(" .")
+    functions = re.fullmatch(r"(?i)функции\s+(.+)", normalized)
+    if functions is not None:
+        return _normalize_spaces(functions.group(1)).strip(" .")
+    return ""
 
 
 def _transform_inner(text: str, *, theory_only: bool, full_source: str) -> str:
@@ -4471,7 +4752,7 @@ def _drop_leading_verb(text: str) -> str:
     )
 
 
-_KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет", "объясняет"})
+_KNOWLEDGE_RESULT_VERBS = frozenset({"характеризует", "называет", "объясняет", "различает"})
 _PROVEN_FINITE_VERBS = frozenset(_VERBAL_NOUN_TO_VERB.values()) | _KNOWLEDGE_RESULT_VERBS | frozenset(
     _FINITE_TO_NOUN
 ) | {
@@ -4650,8 +4931,11 @@ def _control_from_proven_result(result: str, *, lesson_type: str = "") -> str:
         for verb, obj in segments
         if verb in _KNOWLEDGE_RESULT_VERBS and obj
     ]
-    oral = _oral_from_knowledge_objects(knowledge)
     skill_result = _rebuild_skill_result(segments)
+    declared = _declared_knowledge_control(result)
+    if declared and not skill_result:
+        return declared
+    oral = declared.rstrip(".") if declared else _oral_from_knowledge_objects(knowledge)
     observed = ""
     if skill_result:
         observed = (
@@ -6415,15 +6699,20 @@ def _control_requires_case_rebuild(control: str) -> bool:
     """Detect supported malformed labels that must be rebuilt from RESULT."""
 
     text = _normalize_spaces(control)
+    broken_coord = re.search(
+        r"(?i)\bи\s+[а-яё-]+(?:ов|ев|ёв|ей|ствий|ений|аний|яний|ок)\b",
+        text,
+    )
+    # Declared knowledge CONTROL copies RESULT genitive lists after a colon
+    # («функции корней … и плодов»). That is not a broken dative reconstruction.
+    if broken_coord and re.search(r"(?i)устный опрос:", text):
+        broken_coord = None
     return bool(
         re.search(
             r"(?i)\bна\s+[а-яё-]+(?:ых|их)\s+[а-яё-]+(?:ов|ев|ёв|ей|ий|ств)\b",
             text,
         )
-        or re.search(
-            r"(?i)\bи\s+[а-яё-]+(?:ов|ев|ёв|ей|ствий|ений|аний|яний|ок)\b",
-            text,
-        )
+        or broken_coord
         or re.search(r"(?i)(?:^|[:,;]\s*)играх\b", text)
     )
 
@@ -6441,10 +6730,23 @@ def _semantic_labels_control(result: str) -> str:
     knowledge = [
         obj for verb, obj in segments if verb in _KNOWLEDGE_RESULT_VERBS and obj
     ]
+    declared_labels: list[str] = []
+    declared_ok = bool(knowledge)
+    for verb, obj in segments:
+        if verb not in _KNOWLEDGE_RESULT_VERBS or not obj:
+            continue
+        label = _knowledge_control_label(verb, obj)
+        if not label:
+            declared_ok = False
+            break
+        declared_labels.append(label)
     # A colon introduces unchanged, already-proven RESULT objects without a
     # lossy suffix-based attempt to manufacture dative government for a long
     # coordinated list.
-    oral = "устный опрос: " + _join_and(knowledge) if knowledge else ""
+    if declared_ok and declared_labels:
+        oral = "устный опрос: " + "; ".join(declared_labels)
+    else:
+        oral = "устный опрос: " + _join_and(knowledge) if knowledge else ""
 
     observed_labels: list[str] = []
     observed_seen: set[str] = set()
@@ -6472,6 +6774,8 @@ def _semantic_labels_control(result: str) -> str:
         observed = "Педагогическое наблюдение: " + _join_and(observed_labels)
     if oral and observed:
         return f"{oral}; {observed}"
+    if oral and declared_ok and declared_labels and not observed:
+        return _cap_sentence(oral)
     return oral or observed
 
 
@@ -9377,6 +9681,8 @@ def _clause_is_knowledge_content(text: str) -> bool:
     cleaned = _normalize_spaces(text)
     if not cleaned or _bare_list_without_action(cleaned):
         return False
+    if _knowledge_clause_result(cleaned, theory_only=True):
+        return True
     if _knowledge_label_over_catalogue(cleaned):
         return True
     tokens = cleaned.split()
@@ -10637,7 +10943,8 @@ def _merge_part_results(results: list[str]) -> str:
     if len(unique) == 1:
         return unique[0] if unique[0].endswith(".") else unique[0] + "."
     verbs = [_leading_finite_verb(item) for item in unique]
-    if all(verbs) and len({verb.casefold() for verb in verbs}) == 1:
+    shapes = {_knowledge_result_shape(item) for item in unique}
+    if all(verbs) and len({verb.casefold() for verb in verbs}) == 1 and len(shapes) <= 1:
         objects = [_drop_leading_verb(item).rstrip(" .") for item in unique]
         return _cap_sentence(f"{verbs[0]} {_join_and(objects)}")
     sentences = [item if item.endswith(".") else f"{item}." for item in unique]
