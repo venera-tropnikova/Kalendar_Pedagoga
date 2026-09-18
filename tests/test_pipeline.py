@@ -4,7 +4,9 @@ from unittest.mock import Mock
 
 import pytest
 
+from calendar_pedagoga.confirmed_study_plan import confirmed_plan_from_external_utp
 from calendar_pedagoga.content_generation import build_content_model
+from calendar_pedagoga.docx_generation import build_output_filename
 from calendar_pedagoga.pipeline import (
     CalendarDocumentStatus,
     PipelineError,
@@ -99,6 +101,90 @@ def test_hard_block_prevents_docx_generation(monkeypatch) -> None:
 
     assert raised.value.status is CalendarDocumentStatus.HARD_BLOCK
     generate_docx.assert_not_called()
+
+
+def _corpus(*needles: str) -> Path | None:
+    roots = (REFERENCES, Path(r"D:\Kalendar_Pedagoga\references"))
+    for root in roots:
+        if not root.exists():
+            continue
+        matches = [
+            path
+            for path in root.iterdir()
+            if all(needle.casefold() in path.name.casefold() for needle in needles)
+        ]
+        if matches:
+            return matches[0]
+    return None
+
+
+def _stub_docx_bytes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.generate_calendar_docx",
+        lambda *_args, **_kwargs: b"PK\x03\x04docx",
+    )
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.validate_calendar_docx",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.validate_calendar_docx_visual",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        "calendar_pedagoga.pipeline.has_blocking_qa_issues",
+        lambda *_args, **_kwargs: False,
+    )
+
+
+def _run_named_corpus(utp_path: Path, program_path: Path, *, study_year: int):
+    utp = parse_utp(utp_path)
+    program = parse_program(
+        program_path.read_bytes(), program_path.name, study_year=study_year
+    )
+    plan = confirmed_plan_from_external_utp(
+        utp, study_year=study_year, source_name=utp_path.name
+    )
+    result = run_calendar_pipeline(
+        plan,
+        program,
+        academic_year="2026–2027",
+        template=select_calendar_template(),
+        source_utp_name=utp_path.name,
+        use_ai=False,
+        program_filename=program_path.name,
+    )
+    expected = build_output_filename(plan.as_utp_parse_result(), "2026–2027")
+    return result, expected
+
+
+def test_key_y1_draft_uses_ordinary_calendar_filename(monkeypatch) -> None:
+    utp_path = _corpus("утп", "ключ", "1 г")
+    program_path = REFERENCES / "Программа КЛЮЧ.DOC"
+    if not program_path.exists():
+        program_path = _corpus("програм", "ключ")
+    if utp_path is None or program_path is None or not program_path.exists():
+        pytest.skip("В references нет УТП КЛЮЧ 1 г")
+    _stub_docx_bytes(monkeypatch)
+    result, expected = _run_named_corpus(utp_path, program_path, study_year=1)
+    assert result.status is CalendarDocumentStatus.DRAFT_READY
+    assert result.review_cases
+    assert result.filename == expected
+    assert result.filename == "Календарный_план_КЛЮЧ_2026-2027.docx"
+    assert "Черновик_" not in result.filename
+
+
+def test_climb_keeps_ordinary_calendar_filename(monkeypatch) -> None:
+    utp_path = _corpus("утп", "скалолаз")
+    program_path = _corpus("програм", "скалолаз")
+    if utp_path is None or program_path is None:
+        pytest.skip("В references нет документов Скалолазание")
+    _stub_docx_bytes(monkeypatch)
+    result, expected = _run_named_corpus(utp_path, program_path, study_year=1)
+    assert result.status is CalendarDocumentStatus.FINAL_READY
+    assert not result.review_cases
+    assert result.filename == expected
+    assert "Черновик_" not in result.filename
 
 
 def test_content_engine_v2_flag_defaults_on() -> None:

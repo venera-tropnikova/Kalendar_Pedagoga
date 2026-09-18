@@ -426,11 +426,7 @@ def run_calendar_pipeline(
         }
     )
     return PipelineResult(
-        filename=(
-            "Черновик_" + build_output_filename(utp, academic_year)
-            if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
-            else build_output_filename(utp, academic_year)
-        ),
+        filename=build_output_filename(utp, academic_year),
         content=docx_bytes,
         warnings=tuple(warnings),
         resolved_lessons=resolved,
