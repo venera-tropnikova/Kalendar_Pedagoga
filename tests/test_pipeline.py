@@ -194,7 +194,7 @@ def test_key_y1_draft_uses_ordinary_calendar_filename(monkeypatch) -> None:
     rows = captured["rows"]
     assert len(rows) == 36
     review_weeks = {case.week_number for case in result.review_cases}
-    assert len(review_weeks) == 18
+    assert len(review_weeks) == 17
     empty_review = [
         row.source.source.week_number
         for row in rows

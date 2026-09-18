@@ -6133,6 +6133,58 @@ def _compact_control_labels(obj: str) -> list[str]:
     return labels
 
 
+_CONTROL_PIECE_PREP_RE = re.compile(
+    r"(?i)^(?:в|во|на|за|к|ко|с|со|по|из|от|до|у|о|об|обо|при|для|через|над|под)\b"
+)
+
+
+def _control_keeps_no_finite_predicate(control: str) -> bool:
+    """True when CONTROL names methods and objects without RESULT predicates."""
+
+    return not any(
+        _is_proven_finite_token(word) for word in _normalize_spaces(control).split()
+    )
+
+
+def _process_action_control_piece(verb: str, obj: str) -> str:
+    """Non-quoting CONTROL label for one proven process action of the RESULT.
+
+    The observed object keeps the action checkable without pasting the RESULT
+    predicate into CONTROL. Only a compact label already proven for CONTROL is
+    used, so anything less certain fails closed to an empty piece.
+    """
+
+    verb_low = verb.casefold()
+    if verb_low in _KNOWLEDGE_RESULT_VERBS or verb_low not in _ACTION_FINITE_VERBS:
+        return ""
+    labels = [
+        _normalize_spaces(label).strip(" ,.;") for label in _compact_control_labels(obj)
+    ]
+    if not labels or not all(labels):
+        return ""
+    if any(_CONTROL_PIECE_PREP_RE.match(label) for label in labels):
+        return ""
+    piece = "педагогическое наблюдение: " + _join_and(labels)
+    if not _control_keeps_no_finite_predicate(piece):
+        return ""
+    return piece
+
+
+def _control_coverage_piece(control: str, verb: str, obj: str) -> str:
+    """CONTROL piece for an uncovered RESULT action; quoting is the last resort.
+
+    A non-quoting label may only extend CONTROL that itself stays free of
+    RESULT predicates; otherwise the quoted form keeps the week blocked.
+    """
+
+    if _control_keeps_no_finite_predicate(control):
+        piece = _process_action_control_piece(verb, obj)
+        if piece:
+            return piece
+    payload = _shorten_control_action_phrase(_normalize_spaces(f"{verb} {obj}"))
+    return "практическая проверка " + _format_control_action_quote(payload)
+
+
 def _control_requires_case_rebuild(control: str) -> bool:
     """Detect supported malformed labels that must be rebuilt from RESULT."""
 
@@ -6258,12 +6310,8 @@ def control_from_frame(
     if len(operations) > 1:
         for verb, obj in operations:
             if not _control_covers_operation(control, verb, obj):
-                payload = _shorten_control_action_phrase(
-                    _normalize_spaces(f"{verb} {obj}")
-                )
-                control += "; практическая проверка " + _format_control_action_quote(
-                    payload
-                )
+                piece = _control_coverage_piece(control, verb, obj)
+                control = f"{control}; {piece}" if control else piece
     return control
 
 
@@ -9003,10 +9051,7 @@ def _rebuild_control_from_accepted_result(
             continue
         if _control_covers_operation(text, verb, obj):
             continue
-        payload = _shorten_control_action_phrase(
-            _normalize_spaces(f"{verb} {obj}")
-        )
-        piece = "практическая проверка " + _format_control_action_quote(payload)
+        piece = _control_coverage_piece(text, verb, obj)
         text = f"{text}; {piece}" if text else piece
     return text
 
