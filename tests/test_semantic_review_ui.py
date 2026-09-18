@@ -305,6 +305,13 @@ def test_pending_review_allows_draft_docx_generation() -> None:
     execute.assert_called_once()
 
 
+def test_ready_plan_message_keeps_review_count_in_ui() -> None:
+    assert ui._ready_plan_message(0) == "Календарный план готов"
+    assert ui._ready_plan_message(18) == (
+        "Календарный план готов. Есть замечания: 18 недель"
+    )
+
+
 def test_no_cases_do_not_render_review_ui() -> None:
     state: dict = {}
     with (

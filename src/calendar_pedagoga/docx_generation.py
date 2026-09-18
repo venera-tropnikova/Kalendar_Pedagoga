@@ -1349,29 +1349,9 @@ def _write_document_header(
 
 
 def _write_draft_notice(document, table, review_weeks: tuple[int, ...]) -> None:
-    """Place an explicit non-final marker immediately before the calendar."""
+    """Review notes stay in the UI; the calendar DOCX has no draft stamps."""
 
-    if not review_weeks:
-        return
-    texts = (
-        ("ЧЕРНОВИК — есть недели, требующие проверки", True),
-        (
-            "Недели, требующие проверки: "
-            + ", ".join(f"№{week}" for week in review_weeks),
-            False,
-        ),
-    )
-    for text, bold in texts:
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        paragraph.paragraph_format.keep_with_next = True
-        paragraph.paragraph_format.space_after = Pt(2)
-        run = paragraph.add_run(text)
-        run.bold = bold
-        run.font.size = Pt(CALENDAR_BODY_FONT_SIZE_PT)
-        _set_run_font_family(run, STANDARD_TABLE_FONT_FAMILY)
-        _normalize_run_character_spacing(run)
-        table._tbl.addprevious(paragraph._p)
+    del document, table, review_weeks
 
 
 def _populate_calendar_table(

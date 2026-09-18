@@ -95,6 +95,8 @@ def _fragment(state, **patches):
         patch.object(ui.st, "warning") as warning_mock,
         patch.object(ui.st, "download_button") as download_mock,
         patch.object(ui.st, "markdown") as markdown_mock,
+        patch.object(ui.st, "button", return_value=False) as button_mock,
+        patch.object(ui.st, "rerun"),
     ):
         ui._render_generation_result()
         return SimpleNamespace(
@@ -103,6 +105,7 @@ def _fragment(state, **patches):
             warning=warning_mock,
             download_button=download_mock,
             markdown=markdown_mock,
+            button=button_mock,
         )
 
 
@@ -224,8 +227,23 @@ def test_fragment_polls_queued_running_succeeded() -> None:
     )
 
 
-def test_fragment_draft_ready_shows_draft_download() -> None:
+def test_fragment_draft_ready_shows_plain_download_and_review_notes() -> None:
     state = _state_with_job()
+    review_cases = [
+        {
+            "review_id": f"r{week}",
+            "source_fingerprint": "s",
+            "week_number": week,
+            "topic_title": "Тема",
+            "program_source": "SOURCE",
+            "required_clauses": ["A"],
+            "proposed_result": "Результат.",
+            "proposed_control": "Контроль.",
+            "reasons": ["Причина"],
+            "status": "REVIEW_REQUIRED",
+        }
+        for week in range(1, 19)
+    ]
     widgets = _fragment(
         state,
         fetch_remote_calendar_job=_job_status(
@@ -234,15 +252,22 @@ def test_fragment_draft_ready_shows_draft_download() -> None:
             pipeline_status=CalendarDocumentStatus.DRAFT_READY.value,
             docx_available=True,
             filename="Draft.docx",
+            review_cases=review_cases,
         ),
         download_remote_calendar_document=("Draft.docx", b"PK\x03\x04draft"),
     )
     assert state["calendar_document_status"] == CalendarDocumentStatus.DRAFT_READY.value
     assert state["calendar_download"].content == b"PK\x03\x04draft"
-    widgets.warning.assert_called()
+    widgets.warning.assert_not_called()
     assert widgets.download_button.call_args.args[0] == (
-        "Скачать черновой календарный план за 2026–2027 учебный год"
+        "Скачать календарный план за 2026–2027 учебный год"
     )
+    assert any(
+        "Календарный план готов. Есть замечания: 18 недель" in str(call.args[0])
+        for call in widgets.markdown.call_args_list
+    )
+    widgets.button.assert_called()
+    assert widgets.button.call_args.args[0] == "Проверить замечания"
 
 
 @pytest.mark.parametrize(

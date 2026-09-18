@@ -44,7 +44,6 @@ from calendar_pedagoga.semantic_review import (
     apply_manual_semantic_confirmations,
     build_review_context_fingerprint,
     build_semantic_review_cases,
-    draft_candidate_safety_issues,
     review_context_fingerprint_from_rows,
 )
 
@@ -206,28 +205,21 @@ def _draft_resolved_rows(
     v2_rows: tuple[LessonContentV2Row, ...],
     cases: tuple[SemanticReviewCase, ...],
 ) -> tuple[ResolvedLessonRow, ...]:
-    """Mark pending rows without presenting unproved text as verified."""
+    """Keep proven or already-accepted text; blank unproven RESULT/CONTROL."""
 
+    del v2_rows
     pending_weeks = {case.week_number for case in cases}
-    v2_by_week = {row.source.week_number: row for row in v2_rows}
     output: list[ResolvedLessonRow] = []
     for row in rows:
         week = row.source.source.week_number
         if week not in pending_weeks:
             output.append(row)
             continue
-        candidate = v2_by_week[week]
-        if draft_candidate_safety_issues(candidate):
-            result = "Не подтверждено педагогом"
-            control = "Не подтверждено педагогом"
-        else:
-            result = f"Требует проверки: {row.planned_result}"
-            control = f"Требует проверки: {row.assessment_method}"
         output.append(
             replace(
                 row,
-                planned_result=result,
-                assessment_method=control,
+                planned_result="",
+                assessment_method="",
             )
         )
     return tuple(output)

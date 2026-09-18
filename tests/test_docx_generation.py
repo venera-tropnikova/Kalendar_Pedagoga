@@ -393,14 +393,14 @@ def test_semantic_pass_generation_produces_36_data_rows() -> None:
     assert len(table.columns) >= 8
 
 
-def test_draft_docx_has_explicit_review_markers_and_final_has_none() -> None:
+def test_draft_docx_has_no_review_markers() -> None:
     utp, _schedule, resolved = _semantic_pass_fixture()
     first = resolved[0]
     draft_rows = (
         replace(
             first,
-            planned_result=f"Требует проверки: {first.planned_result}",
-            assessment_method=f"Требует проверки: {first.assessment_method}",
+            planned_result="",
+            assessment_method="",
         ),
         *resolved[1:],
     )
@@ -415,19 +415,21 @@ def test_draft_docx_has_explicit_review_markers_and_final_has_none() -> None:
     draft_document = Document(BytesIO(draft))
     final_document = Document(BytesIO(final))
 
-    draft_header = "\n".join(paragraph.text for paragraph in draft_document.paragraphs)
+    draft_text = "\n".join(
+        [paragraph.text for paragraph in draft_document.paragraphs]
+        + [cell.text for row in draft_document.tables[0].rows for cell in row.cells]
+    )
     final_header = "\n".join(paragraph.text for paragraph in final_document.paragraphs)
-    assert "ЧЕРНОВИК — есть недели, требующие проверки" in draft_header
-    assert "Недели, требующие проверки: №1" in draft_header
+    assert "ЧЕРНОВИК" not in draft_text
+    assert "Требует проверки" not in draft_text
+    assert "Не подтверждено педагогом" not in draft_text
     assert "ЧЕРНОВИК" not in final_header
 
     draft_cells = _logical_cells(draft)
     final_cells = _logical_cells(final)
-    normalized_draft = [
-        [value.replace("Требует проверки: ", "") for value in row]
-        for row in draft_cells
-    ]
-    assert normalized_draft == final_cells
+    assert draft_cells[0][-2] == ""
+    assert draft_cells[0][-1] == ""
+    assert draft_cells[0][-2:] != final_cells[0][-2:]
 
 
 def test_standard_docx_keeps_2026_dates_and_builds_2027_without_gap() -> None:

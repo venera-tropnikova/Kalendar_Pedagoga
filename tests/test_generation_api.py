@@ -3,10 +3,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from io import BytesIO
 from pathlib import Path
 import shutil
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
 
 from calendar_pedagoga.confirmed_study_plan import confirmed_plan_from_external_utp
@@ -346,6 +348,35 @@ def test_api_process_requires_token_env(monkeypatch) -> None:
             pass
 
 
+def _docx_blob_text(content: bytes) -> str:
+    document = Document(BytesIO(content))
+    parts = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            parts.extend(cell.text for cell in row.cells)
+    return "\n".join(parts)
+
+
+def _week_result_control(content: bytes) -> dict[int, tuple[str, str]]:
+    document = Document(BytesIO(content))
+    mapping: dict[int, tuple[str, str]] = {}
+    for row in document.tables[0].rows[2:]:
+        cells = [cell.text.strip() for cell in row.cells]
+        if len(cells) < 3:
+            continue
+        week_token = cells[1].split("\n", 1)[0].strip()
+        if not week_token.isdigit():
+            continue
+        mapping[int(week_token)] = (cells[-2], cells[-1])
+    return mapping
+
+
+def _download_job_docx(client: TestClient, job_id: str) -> bytes:
+    response = client.get(f"/v1/calendar-jobs/{job_id}/document", headers=_auth())
+    assert response.status_code == 200
+    return response.content
+
+
 def _reference_named(*needles: str) -> Path | None:
     matches = [
         path
@@ -387,10 +418,20 @@ def test_climb_api_returns_final_ready() -> None:
             headers=_auth(),
         )
         assert created.status_code == 202
-        completed = _terminal(client, created.json()["job_id"], timeout=720)
+        job_id = created.json()["job_id"]
+        completed = _terminal(client, job_id, timeout=720)
         assert completed["job_state"] == "SUCCEEDED"
         assert completed["pipeline_status"] == "FINAL_READY"
         assert completed["docx_available"] is True
+        assert not (completed.get("review_cases") or [])
+        content = _download_job_docx(client, job_id)
+        text = _docx_blob_text(content)
+        assert "ЧЕРНОВИК" not in text
+        assert "Требует проверки" not in text
+        assert "Не подтверждено педагогом" not in text
+        weeks = _week_result_control(content)
+        assert weeks
+        assert all(result and control for result, control in weeks.values())
 
 
 def test_key_y1_api_returns_draft_ready() -> None:
@@ -405,7 +446,26 @@ def test_key_y1_api_returns_draft_ready() -> None:
             headers=_auth(),
         )
         assert created.status_code == 202
-        completed = _terminal(client, created.json()["job_id"], timeout=720)
+        job_id = created.json()["job_id"]
+        completed = _terminal(client, job_id, timeout=720)
         assert completed["job_state"] == "SUCCEEDED"
         assert completed["pipeline_status"] == "DRAFT_READY"
         assert completed["docx_available"] is True
+        review_weeks = {
+            int(item["week_number"]) for item in completed.get("review_cases") or []
+        }
+        assert len(review_weeks) == 18
+        content = _download_job_docx(client, job_id)
+        text = _docx_blob_text(content)
+        assert "ЧЕРНОВИК" not in text
+        assert "Требует проверки" not in text
+        assert "Не подтверждено педагогом" not in text
+        weeks = _week_result_control(content)
+        assert len(weeks) == 36
+        for week in review_weeks:
+            result, control = weeks[week]
+            assert result == ""
+            assert control == ""
+        proven = [week for week in weeks if week not in review_weeks]
+        assert proven
+        assert any(weeks[week][0] or weeks[week][1] for week in proven)

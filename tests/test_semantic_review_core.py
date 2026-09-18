@@ -280,19 +280,22 @@ def test_pipeline_review_outcome_is_draft_ready(monkeypatch) -> None:
     assert len(outcome.rows) == 1
 
 
-def test_draft_marks_safe_proposal_and_hides_unsafe_proposal() -> None:
+def test_draft_blanks_unproven_result_and_control() -> None:
     safe = _review_row(1)
     unsafe = _review_row(
         2,
         "Выполнение упражнения без страховки запрещено.",
     )
+    proven = replace(
+        _review_row(3),
+        clause_coverage=(("Выполнение упражнения", "COVERED"),),
+        warnings=(),
+    )
     assert not draft_candidate_safety_issues(safe)
     assert draft_candidate_safety_issues(unsafe)
-    rows = (safe, unsafe)
+    rows = (safe, unsafe, proven)
     cases = build_semantic_review_cases(rows, context_fingerprint="context")
     resolved = resolve_lesson_content(_lesson_rows_from_v2(rows))
-    # CE1 values above are irrelevant to the marker decision; use the exact
-    # proposed CE2 text that will cross the draft display boundary.
     resolved = tuple(
         replace(
             item,
@@ -302,10 +305,14 @@ def test_draft_marks_safe_proposal_and_hides_unsafe_proposal() -> None:
         for item, row in zip(resolved, rows)
     )
     marked = _draft_resolved_rows(resolved, rows, cases)
-    assert marked[0].planned_result.startswith("Требует проверки:")
-    assert marked[0].assessment_method.startswith("Требует проверки:")
-    assert marked[1].planned_result == "Не подтверждено педагогом"
-    assert marked[1].assessment_method == "Не подтверждено педагогом"
+    pending_weeks = {case.week_number for case in cases}
+    assert pending_weeks == {1, 2}
+    assert marked[0].planned_result == ""
+    assert marked[0].assessment_method == ""
+    assert marked[1].planned_result == ""
+    assert marked[1].assessment_method == ""
+    assert marked[2].planned_result == proven.planned_result
+    assert marked[2].assessment_method == proven.assessment_method
 
 
 def test_pipeline_one_confirmation_keeps_other_week_blocked(monkeypatch) -> None:

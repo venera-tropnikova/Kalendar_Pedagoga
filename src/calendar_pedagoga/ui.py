@@ -249,6 +249,7 @@ def _reset_analysis_state() -> None:
         "semantic_review_confirmations",
         "semantic_review_issues",
         "semantic_review_pipeline_cases",
+        "calendar_show_semantic_review",
     ):
         st.session_state.pop(key, None)
     for key in tuple(st.session_state):
@@ -3285,6 +3286,23 @@ _STATUS_CHECK_DOCX = "Проверяем готовый документ…"
 _STATUS_READY = "Календарный план готов"
 
 
+def _review_week_count(cases: object | None = None) -> int:
+    if cases is None:
+        cases = st.session_state.get("semantic_review_pipeline_cases") or ()
+    weeks = {
+        getattr(case, "week_number", None)
+        for case in cases
+    }
+    weeks.discard(None)
+    return len(weeks)
+
+
+def _ready_plan_message(review_weeks: int) -> str:
+    if review_weeks:
+        return f"{_STATUS_READY}. Есть замечания: {review_weeks} недель"
+    return _STATUS_READY
+
+
 def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
     visible: list[str] = []
     safe_codes: list[str] = []
@@ -3435,6 +3453,7 @@ def _clear_semantic_review_state() -> None:
         "semantic_review_confirmations",
         "semantic_review_issues",
         "semantic_review_pipeline_cases",
+        "calendar_show_semantic_review",
     ):
         st.session_state.pop(key, None)
     for key in tuple(st.session_state):
@@ -3624,6 +3643,7 @@ def _invalidate_generated_plan() -> None:
         "calendar_plan_snapshot",
         "calendar_remote_job",
         "calendar_remote_started_at",
+        "calendar_show_semantic_review",
     ):
         st.session_state.pop(key, None)
     if had_result:
@@ -4113,7 +4133,13 @@ def _render_teacher_analysis_screen(
     title_col, edit_col = st.columns((3.4, 1.1), gap="small")
     with title_col:
         if generated:
-            if rejected or extra_notices:
+            review_weeks = _review_week_count()
+            if review_weeks:
+                st.markdown(
+                    f'<p class="kp-status-title">{html.escape(_ready_plan_message(review_weeks))}</p>',
+                    unsafe_allow_html=True,
+                )
+            elif rejected or extra_notices:
                 st.markdown(
                     '<p class="kp-status-title">Календарный план сформирован с замечаниями</p>',
                     unsafe_allow_html=True,
@@ -4265,12 +4291,7 @@ def _store_generation_result(result) -> None:
         st.session_state["calendar_plan_snapshot"] = (
             _calendar_plan_snapshot(resolved_lessons, result.content)
         )
-    ready_label = (
-        "Черновой календарный план готов"
-        if result.status is CalendarDocumentStatus.DRAFT_READY
-        else _STATUS_READY
-    )
-    _set_work_status(ready_label)
+    _set_work_status(_ready_plan_message(_review_week_count(result.review_cases)))
     st.session_state["calendar_generation_succeeded"] = True
 
 
@@ -4367,25 +4388,20 @@ def _render_generation_result(*, show_status: bool = True) -> None:
     if download is not None and not generation_error:
         context = st.session_state.get("calendar_context") or {}
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
-        status = st.session_state.get("calendar_document_status")
-        is_draft = status == CalendarDocumentStatus.DRAFT_READY.value
-        if is_draft:
-            st.warning(
-                "Сформирован черновик: недели с недоказанным содержанием "
-                "явно отмечены и требуют проверки педагога."
-            )
+        review_weeks = _review_week_count()
+        st.markdown(_ready_plan_message(review_weeks))
         st.download_button(
-            (
-                f"Скачать черновой календарный план за {academic_year} учебный год"
-                if is_draft
-                else f"Скачать календарный план за {academic_year} учебный год"
-            ),
+            f"Скачать календарный план за {academic_year} учебный год",
             data=download.content,
             file_name=download.filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             type="primary",
             use_container_width=True,
         )
+        if review_weeks:
+            if st.button("Проверить замечания", key="kp_open_semantic_review"):
+                st.session_state["calendar_show_semantic_review"] = True
+                st.rerun()
 
 
 def _execute_calendar_generation(
@@ -4878,16 +4894,16 @@ def run_app() -> None:
         if unresolved_disputed(matches, reviews):
             _clear_work_busy()
 
-        semantic_review_blocked = _render_semantic_review_section(
-            scope=semantic_scope,
-            cases=semantic_cases,
-            rows=v2_rows,
-        )
+        semantic_review_blocked = bool(semantic_application.pending_cases)
+        if st.session_state.get("calendar_show_semantic_review") and semantic_cases:
+            _render_semantic_review_section(
+                scope=semantic_scope,
+                cases=semantic_cases,
+                rows=v2_rows,
+            )
         semantic_confirmations = _semantic_review_confirmations_for_scope(
             semantic_scope
         )
-        if semantic_review_blocked:
-            _clear_work_busy()
 
         _render_teacher_analysis_screen(
             utp=utp,
