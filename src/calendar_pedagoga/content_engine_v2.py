@@ -141,6 +141,7 @@ _VERBAL_NOUN_TO_VERB: dict[str, str] = {
     "расчёт": "рассчитывает",
     "решение": "решает",
     "рисование": "рисует",
+    "создание": "создаёт",
     "сборка": "собирает",
     "свертывание": "свертывает",
     "смешивание": "смешивает",
@@ -1230,6 +1231,10 @@ def _explicit_pupil_perform_clause(text: str) -> bool:
             return True
     if _ACTIVITY_START_RE.match(cleaned):
         return True
+    if _locative_drawing_object(cleaned) is not None:
+        return True
+    if _semiotic_object_phrase(cleaned) is not None:
+        return True
     return False
 
 
@@ -1591,6 +1596,162 @@ def _keep_proven_action_complements(remainder: str) -> str:
             break
         kept.append(part)
     return ", ".join(kept)
+
+
+_LOCATIVE_DRAWING_RE = re.compile(
+    r"(?i)^(?P<object>.+?)\s+в\s+рисунках\s+"
+    r"(?:детей|учащихся|учеников)\s*\.?$"
+)
+_SEMIOTIC_HEAD_RE = re.compile(
+    r"(?i)^(знаки?|символы?|эмблем(?:а|ы)?|пиктограмм(?:а|ы)?)$"
+)
+_PRODUCTIVE_FINITE_RE = re.compile(
+    r"(?i)^(рисуют|рисует|изготавлива\w*|созда[её]т|создают|"
+    r"разрабатыва\w*)\b"
+)
+_PRODUCTIVE_LEMMAS = frozenset(
+    {"рисование", "изготовление", "создание", "разработка"}
+)
+
+
+def _decap_phrase(text: str) -> str:
+    words = _normalize_spaces(text).split()
+    if not words:
+        return ""
+    words[0] = _decap_lexical(words[0])
+    return " ".join(words)
+
+
+def _object_phrase_to_acc(obj: str) -> str:
+    cleaned = _normalize_spaces(obj).rstrip(" .")
+    if not cleaned:
+        return ""
+    from calendar_pedagoga.morphology import inflect_heads_only
+
+    inflected = inflect_heads_only(cleaned)
+    return _decap_phrase(inflected or cleaned)
+
+
+def _has_clause_initial_productive_head(text: str) -> bool:
+    cleaned = _normalize_spaces(text)
+    if not cleaned:
+        return False
+    if _PRODUCTIVE_FINITE_RE.match(cleaned):
+        return True
+    _mods, rest = _leading_modifiers(cleaned.split())
+    if not rest:
+        return False
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    lemma = _verbal_noun_lemma(head).casefold()
+    if lemma in _PRODUCTIVE_LEMMAS:
+        return True
+    return bool(_CREATIVE_HEAD_RE.match(head) and _conjugate_verbal_noun(head))
+
+
+def _locative_drawing_object(text: str) -> str | None:
+    match = _LOCATIVE_DRAWING_RE.match(_normalize_spaces(text))
+    if match is None:
+        return None
+    prefix = match.group("object").strip(" ,.;")
+    if not prefix or _has_clause_initial_productive_head(prefix):
+        return None
+    return prefix
+
+
+def _is_semiotic_head(word: str) -> bool:
+    core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE)
+    return bool(_SEMIOTIC_HEAD_RE.match(core))
+
+
+def _semiotic_head_plural(word: str) -> bool:
+    core = re.sub(r"[^\wёЁ]", "", word, flags=re.IGNORECASE).casefold()
+    return bool(re.fullmatch(r"(знаки|символы|эмблемы|пиктограммы)", core))
+
+
+def _semiotic_object_to_genitive(obj: str) -> str:
+    """Genitive of a SOURCE semiotic NP; dependents and quotes stay."""
+
+    words = _normalize_spaces(obj).rstrip(" .").split()
+    if not words:
+        return obj
+    from calendar_pedagoga.morphology import parse_head, _restore
+
+    out: list[str] = []
+    for word in words:
+        _prefix, core, _suffix = _strip_punct_word(word)
+        if _is_semiotic_head(core):
+            parsed = parse_head(core)
+            gram = {"gent"}
+            if parsed is not None and parsed.tag.number:
+                gram.add(parsed.tag.number)
+            inflected = parsed.inflect(gram) if parsed is not None else None
+            out.append(_restore(word, inflected.word) if inflected else word)
+            continue
+        if _is_adjective(core):
+            out.append(_adj_to_genitive(word))
+            continue
+        out.append(word)
+    return _normalize_spaces(" ".join(out))
+
+
+def _semiotic_object_phrase(text: str) -> str | None:
+    cleaned = _normalize_spaces(text).rstrip(" .")
+    if not cleaned or _has_clause_initial_productive_head(cleaned):
+        return None
+    if _locative_drawing_object(cleaned) is not None:
+        return None
+    mods, rest = _leading_modifiers(cleaned.split())
+    if not rest:
+        return None
+    head = re.sub(r"^[«(\"]+|[»)\",;:]+$", "", rest[0])
+    if not _is_semiotic_head(head):
+        return None
+    return _normalize_spaces(" ".join([*mods, *rest]))
+
+
+def _locative_drawing_result(text: str) -> tuple[str, str, str, str] | None:
+    obj = _locative_drawing_object(text)
+    if obj is None:
+        return None
+    acc = _object_phrase_to_acc(obj)
+    phrase = _normalize_spaces(f"рисует {acc}")
+    return phrase, "рисование", acc, ""
+
+
+def _semiotic_object_result(text: str) -> tuple[str, str, str, str] | None:
+    obj = _semiotic_object_phrase(text)
+    if obj is None:
+        return None
+    acc = _object_phrase_to_acc(obj)
+    tokens = acc.split()
+    head = next(
+        (token for token in reversed(tokens) if _is_semiotic_head(token)),
+        tokens[-1] if tokens else "",
+    )
+    pronoun = "их" if _semiotic_head_plural(head) else "его"
+    phrase = _normalize_spaces(f"распознаёт {acc} и объясняет {pronoun} значение")
+    return phrase, "распознавание", acc, ""
+
+
+def _finite_produce_result(text: str) -> tuple[str, str, str, str] | None:
+    match = _PRODUCTIVE_FINITE_RE.match(_normalize_spaces(text))
+    if match is None:
+        return None
+    raw = match.group(1).casefold()
+    remainder = _normalize_spaces(text)[match.end() :].strip(" ,.")
+    if raw.startswith("рису"):
+        verb, action = "рисует", "рисование"
+    elif raw.startswith("изготавлива"):
+        verb, action = "изготавливает", "изготовление"
+    elif raw.startswith("созда"):
+        verb, action = "создаёт", "создание"
+    elif raw.startswith("разрабатыва"):
+        verb, action = "разрабатывает", "разработка"
+    else:
+        return None
+    acc = _object_phrase_to_acc(remainder) if remainder else ""
+    phrase = _normalize_spaces(f"{verb} {acc}")
+    return phrase, action, acc, ""
 
 
 def _creative_activity_result(text: str) -> tuple[str, str, str, str] | None:
@@ -2345,6 +2506,12 @@ def _transform_segment(
         reconstructed = _explicit_action_reconstruction(text, theory_only=theory_only)
         if reconstructed:
             return reconstructed
+        produced = _finite_produce_result(text)
+        if produced:
+            return produced
+        drawing = _locative_drawing_result(text)
+        if drawing:
+            return drawing
         paired = _shared_object_after_paired_verbs(text)
         if paired:
             phrase, action, rest = paired
@@ -2479,6 +2646,9 @@ def _transform_segment(
         formed = _closed_form_activity_result(text)
         if formed:
             return formed
+        semiotic = _semiotic_object_result(text)
+        if semiotic:
+            return semiotic
         unconjugated = _unconjugated_practice_activity_result(text)
         if unconjugated:
             return unconjugated
@@ -3885,6 +4055,10 @@ def _action_class(clause: str, *, theory_only: bool = False) -> int:
         return 3
     if _has_stem(lead, _PERFORM_STEMS):
         return 3
+    if _locative_drawing_object(clause) is not None:
+        return 3
+    if _semiotic_object_phrase(clause) is not None:
+        return 2
     if _has_stem(lead, _PRODUCE_STEMS + ("ориентир", "измерен")):
         return 3
     if re.match(r"(?i)^(определен|изучен|знакомств|поняти|значен)", first):
@@ -4268,6 +4442,8 @@ _FINITE_TO_NOUN = {
     "ведёт": "ведения",
     "ведет": "ведения",
     "рисует": "рисования",
+    "создаёт": "создания",
+    "создает": "создания",
     "разрабатывает": "разработки",
     "собирает": "сборки",
     "строит": "построения",
@@ -5396,7 +5572,53 @@ def _result_actions(result: str) -> list[tuple[str, str]]:
     return actions
 
 
+def _declared_product_control(result: str) -> str:
+    """CONTROL labels bound to proven produce/semiotic RESULT verbs only."""
+
+    pieces: list[str] = []
+    for sentence in _result_sentences(result):
+        verb = _leading_finite_verb(sentence).casefold()
+        if verb == "рисует":
+            pieces.append("просмотр рисунков")
+            continue
+        if verb == "распознаёт":
+            obj = _drop_leading_verb(sentence)
+            obj = re.sub(
+                r"(?i)\s+и\s+объясняет\s+\S+\s+значение\.?$",
+                "",
+                obj,
+            ).strip(" .")
+            if obj:
+                pieces.append(
+                    "устный опрос по значению " + _semiotic_object_to_genitive(obj)
+                )
+            continue
+        if verb in {"создаёт", "создает", "изготавливает"}:
+            pieces.append("просмотр и оценка готовой работы")
+    if not pieces:
+        return ""
+    return _cap_sentence("; ".join(dict.fromkeys(pieces)))
+
+
+def _covers_declared_product_control(control: str, verb: str, obj: str) -> bool:
+    low = control.casefold()
+    verb_low = verb.casefold()
+    if verb_low == "рисует":
+        return bool(re.search(r"(?i)просмотр\s+рисунк", low))
+    if verb_low == "распознаёт":
+        stems = _meaning_stems(obj) or _meaning_stems(verb)
+        return "опрос" in low and any(stem[:4] in low for stem in stems)
+    if verb_low == "объясняет":
+        return "опрос" in low and "значен" in low
+    if verb_low in {"создаёт", "создает", "изготавливает"}:
+        return "просмотр" in low and "оценк" in low
+    return False
+
+
 def _product_control(result: str) -> str:
+    declared = _declared_product_control(result)
+    if declared:
+        return declared
     text = result.rstrip(".")
     low = text.casefold()
     if re.match(r"(?i)^(характеризует|называет)\b", text):
@@ -5793,6 +6015,8 @@ def _control_result_obligations(result: str) -> list[tuple[str, str]]:
 
 def _control_covers_operation(control: str, verb: str, obj: str) -> bool:
     """Require an operation anchor with its object, not an object alone."""
+    if _covers_declared_product_control(control, verb, obj):
+        return True
     noun = _FINITE_TO_NOUN.get(verb.casefold()) or _VERB_TO_VERBAL_NOUN.get(verb.casefold())
     anchor_word = (noun or verb).casefold()
     if len(anchor_word) <= 6 and anchor_word.endswith(("а", "я", "и")):
@@ -6758,6 +6982,10 @@ def _unit_has_action_head(clause: str) -> bool:
     if _is_action_head(head) or _is_leading_form_activity(head):
         return True
     if head and _CREATIVE_HEAD_RE.match(head):
+        return True
+    if _locative_drawing_object(text) is not None:
+        return True
+    if _semiotic_object_phrase(text) is not None:
         return True
     if _participation_lemma(head):
         return True
@@ -9021,6 +9249,9 @@ def _rebuild_control_from_accepted_result(
     ) > 1
     if _control_covers_all_result_items(result, control) and not repeated_oral:
         return control
+    product = _product_control(result)
+    if product and _control_covers_all_result_items(result, product):
+        return product
     # Named-form CONTROL is valid only for a single named activity RESULT.
     sentences = [s for s in _result_sentences(result) if _leading_finite_verb(s)]
     if len(sentences) <= 1:
@@ -9132,6 +9363,10 @@ def _clause_has_pupil_action(text: str) -> bool:
     if _clause_has_performance_quantity(cleaned) and any(
         len(_token_core(token)) >= 4 for token in tokens
     ):
+        return True
+    if _locative_drawing_object(cleaned) is not None:
+        return True
+    if _semiotic_object_phrase(cleaned) is not None:
         return True
     return False
 
@@ -9804,13 +10039,21 @@ def _normalize_factored_result_grammar(result: str, source_context: str) -> str:
                 except _UncertainGrammar:
                     pass
         if not _object_starts_in_proven_genitive(target_obj):
-            normalized.append(_cap_sentence(f"{match.group(1)} {target_obj}".rstrip(".")))
+            phrase_obj = target_obj
+            if verb == "рисует":
+                phrase_obj = _object_phrase_to_acc(phrase_obj) or phrase_obj
+            normalized.append(_cap_sentence(f"{match.group(1)} {phrase_obj}".rstrip(".")))
             continue
         try:
             obj = _inflect_object_phrase(target_obj, case="acc")
         except _UncertainGrammar:
-            normalized.append(_cap_sentence(sentence.rstrip(".")))
+            phrase_obj = target_obj
+            if verb == "рисует":
+                phrase_obj = _object_phrase_to_acc(phrase_obj) or phrase_obj
+            normalized.append(_cap_sentence(f"{match.group(1)} {phrase_obj}".rstrip(".")))
             continue
+        if verb == "рисует":
+            obj = _object_phrase_to_acc(obj) or obj
         normalized.append(_cap_sentence(f"{match.group(1)} {obj}".rstrip(".")))
     return _normalize_spaces(" ".join(normalized))
 
