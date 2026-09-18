@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from calendar_pedagoga import ui
@@ -73,8 +74,12 @@ def _valid_text() -> tuple[str, str]:
     )
 
 
+def _empty_review_row(week: int = 1) -> LessonContentV2Row:
+    return replace(_review_row(week), planned_result="", assessment_method="")
+
+
 def test_review_required_renders_only_blocked_weeks() -> None:
-    blocked = _review_row(1)
+    blocked = _empty_review_row(1)
     covered = replace(
         _review_row(2),
         clause_coverage=(("Выполнение упражнения", "COVERED"),),
@@ -111,14 +116,57 @@ def test_review_required_renders_only_blocked_weeks() -> None:
         )
     text = "\n".join(markdown)
     assert blocked_for_docx
-    assert "Требуется подтверждение содержания" in text
+    assert "Требуется заполнить: 1 неделя" in text
+    assert "Требуется подтверждение содержания" not in text
     assert "Неделя №1" in text
     assert "Неделя №2" not in text
     assert "Тема 1" in text
     assert "Причины NEEDS_REVIEW" in text
     assert "Предложенный RESULT" in text
     assert "Предложенный CONTROL" in text
-    assert "Выполнение упражнения." in codes
+    assert text_areas == ["Результат педагога", "Контроль педагога"]
+    assert buttons == ["Подтвердить"]
+
+
+def test_filled_review_weeks_are_notices_without_manual_input() -> None:
+    filled = _review_row(3)
+    empty = _empty_review_row(17)
+    cases = build_semantic_review_cases(
+        (filled, empty), context_fingerprint="scope"
+    )
+    markdown: list[str] = []
+    text_areas: list[str] = []
+    buttons: list[str] = []
+    writes: list[str] = []
+    state: dict = {}
+    with (
+        patch.object(ui.st, "session_state", state),
+        patch.object(ui.st, "markdown", side_effect=lambda text, **_: markdown.append(text)),
+        patch.object(ui.st, "write", side_effect=lambda text, **_: writes.append(str(text))),
+        patch.object(ui.st, "code"),
+        patch.object(
+            ui.st,
+            "text_area",
+            side_effect=lambda label, **_: text_areas.append(label) or "",
+        ),
+        patch.object(
+            ui.st,
+            "button",
+            side_effect=lambda label, **_: buttons.append(label) or False,
+        ),
+        patch.object(ui.st, "error"),
+        patch.object(ui.st, "success"),
+    ):
+        still_empty = ui._render_semantic_review_section(
+            scope="scope", cases=cases, rows=(filled, empty)
+        )
+    text = "\n".join(markdown)
+    assert still_empty
+    assert "Есть замечания: 1 неделя" in text
+    assert "Требуется заполнить: 1 неделя" in text
+    assert "Неделя №3" in text
+    assert "Неделя №17" in text
+    assert "Ручное подтверждение не требуется." in "\n".join(writes)
     assert text_areas == ["Результат педагога", "Контроль педагога"]
     assert buttons == ["Подтвердить"]
 
@@ -144,7 +192,7 @@ def test_valid_confirmation_is_saved_and_revalidated() -> None:
 
 
 def test_valid_card_is_read_only_and_offers_change() -> None:
-    row = _review_row()
+    row = _empty_review_row()
     case = build_semantic_review_cases((row,), context_fingerprint="scope")[0]
     result, control = _valid_text()
     confirmation = ManualSemanticConfirmation(
@@ -307,9 +355,46 @@ def test_pending_review_allows_draft_docx_generation() -> None:
 
 def test_ready_plan_message_keeps_review_count_in_ui() -> None:
     assert ui._ready_plan_message(0) == "Календарный план готов"
+    assert ui._ready_plan_message(1) == (
+        "Календарный план готов. Есть замечания: 1 неделя"
+    )
     assert ui._ready_plan_message(18) == (
         "Календарный план готов. Есть замечания: 18 недель"
     )
+    assert ui._fill_required_message(1) == "Требуется заполнить: 1 неделя"
+    assert ui._fill_required_message(2) == "Требуется заполнить: 2 недели"
+
+
+def test_resolved_empty_cells_require_fill() -> None:
+    row = _review_row(17)
+    cases = build_semantic_review_cases((row,), context_fingerprint="scope")
+    resolved = SimpleNamespace(
+        source=SimpleNamespace(source=SimpleNamespace(week_number=17)),
+        planned_result="",
+        assessment_method="",
+    )
+    markdown: list[str] = []
+    text_areas: list[str] = []
+    state = {"calendar_resolved_lessons": (resolved,)}
+    with (
+        patch.object(ui.st, "session_state", state),
+        patch.object(ui.st, "markdown", side_effect=lambda text, **_: markdown.append(text)),
+        patch.object(ui.st, "write", lambda *_, **__: None),
+        patch.object(ui.st, "code"),
+        patch.object(
+            ui.st,
+            "text_area",
+            side_effect=lambda label, **_: text_areas.append(label) or "",
+        ),
+        patch.object(ui.st, "button", return_value=False),
+        patch.object(ui.st, "error"),
+        patch.object(ui.st, "success"),
+    ):
+        assert ui._render_semantic_review_section(
+            scope="scope", cases=cases, rows=(row,)
+        )
+    assert "Требуется заполнить: 1 неделя" in "\n".join(markdown)
+    assert text_areas == ["Результат педагога", "Контроль педагога"]
 
 
 def test_no_cases_do_not_render_review_ui() -> None:

@@ -3297,10 +3297,44 @@ def _review_week_count(cases: object | None = None) -> int:
     return len(weeks)
 
 
+def _empty_review_week_count(cases: object | None = None) -> int:
+    if cases is None:
+        cases = st.session_state.get("semantic_review_pipeline_cases") or ()
+    empty = 0
+    for case in cases:
+        week = getattr(case, "week_number", None)
+        if week is None:
+            continue
+        cells = _resolved_review_cells(week)
+        if cells is None:
+            proposed_result = getattr(case, "proposed_result", "") or ""
+            proposed_control = getattr(case, "proposed_control", "") or ""
+            if not (str(proposed_result).strip() and str(proposed_control).strip()):
+                empty += 1
+            continue
+        if not (str(cells[0]).strip() and str(cells[1]).strip()):
+            empty += 1
+    return empty
+
+
 def _ready_plan_message(review_weeks: int) -> str:
     if review_weeks:
-        return f"{_STATUS_READY}. Есть замечания: {review_weeks} недель"
+        return f"{_STATUS_READY}. Есть замечания: {review_weeks} {_count_weeks_word(review_weeks)}"
     return _STATUS_READY
+
+
+def _count_weeks_word(count: int) -> str:
+    remainder_ten = count % 10
+    remainder_hundred = count % 100
+    if remainder_ten == 1 and remainder_hundred != 11:
+        return "неделя"
+    if remainder_ten in {2, 3, 4} and remainder_hundred not in {12, 13, 14}:
+        return "недели"
+    return "недель"
+
+
+def _fill_required_message(count: int) -> str:
+    return f"Требуется заполнить: {count} {_count_weeks_word(count)}"
 
 
 def _teacher_generation_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
@@ -3461,6 +3495,66 @@ def _clear_semantic_review_state() -> None:
             st.session_state.pop(key, None)
 
 
+def _resolved_review_cells(week_number: int) -> tuple[str, str] | None:
+    """Actual RESULT/CONTROL from the generated calendar, if it already exists."""
+
+    for row in st.session_state.get("calendar_resolved_lessons") or ():
+        source = getattr(getattr(row, "source", None), "source", None)
+        week = getattr(source, "week_number", None)
+        if week != week_number:
+            continue
+        return (
+            getattr(row, "planned_result", "") or "",
+            getattr(row, "assessment_method", "") or "",
+        )
+    snapshot = st.session_state.get("calendar_plan_snapshot") or {}
+    items = snapshot.get(week_number) or ()
+    if not items:
+        return None
+    last = items[-1]
+    if len(last) < 7:
+        return None
+    return last[5], last[6]
+
+
+def _review_cells_are_empty(case: SemanticReviewCase, row: LessonContentV2Row) -> bool:
+    """True when the calendar cells are blank and the teacher must type RESULT/CONTROL."""
+
+    resolved = _resolved_review_cells(case.week_number)
+    if resolved is not None:
+        result, control = resolved
+        return not (str(result).strip() and str(control).strip())
+    return not (row.planned_result.strip() and row.assessment_method.strip())
+
+
+def _split_review_cases(
+    cases: tuple[SemanticReviewCase, ...],
+    row_by_id: Mapping[str, LessonContentV2Row],
+) -> tuple[tuple[SemanticReviewCase, ...], tuple[SemanticReviewCase, ...]]:
+    notices: list[SemanticReviewCase] = []
+    fill_required: list[SemanticReviewCase] = []
+    for case in cases:
+        if _review_cells_are_empty(case, row_by_id[case.review_id]):
+            fill_required.append(case)
+        else:
+            notices.append(case)
+    return tuple(notices), tuple(fill_required)
+
+
+def _render_review_case_facts(case: SemanticReviewCase) -> None:
+    st.markdown(f"### Неделя №{case.week_number}")
+    st.markdown(f"**Тема:** {case.topic_title}")
+    st.markdown("**SOURCE:**")
+    st.code(case.program_source or "SOURCE из программы отсутствует")
+    st.markdown("**Причины NEEDS_REVIEW:**")
+    for reason in case.reasons:
+        st.markdown(f"- {reason}")
+    st.markdown("**Предложенный RESULT:**")
+    st.code(case.proposed_result or "—")
+    st.markdown("**Предложенный CONTROL:**")
+    st.code(case.proposed_control or "—")
+
+
 def _semantic_review_confirmations_for_scope(
     scope: str,
 ) -> dict[str, ManualSemanticConfirmation]:
@@ -3543,12 +3637,12 @@ def _render_semantic_review_section(
     cases: tuple[SemanticReviewCase, ...],
     rows: tuple[LessonContentV2Row, ...],
 ) -> bool:
-    """Render blocked weeks and return True while DOCX must stay blocked."""
+    """Render remarks and empty-cell forms. True while empty weeks stay unfilled."""
 
     if not cases:
         return False
     confirmations = _semantic_review_confirmations_for_scope(scope)
-    valid, pending = _validated_semantic_confirmations(
+    valid, _pending = _validated_semantic_confirmations(
         cases=cases,
         rows=rows,
         confirmations=confirmations,
@@ -3558,73 +3652,74 @@ def _render_semantic_review_section(
         confirmations.update(valid)
     issues_by_id = st.session_state.setdefault("semantic_review_issues", {})
     row_by_id = _semantic_review_row_by_id(cases, rows)
+    notices, fill_required = _split_review_cases(cases, row_by_id)
 
-    st.markdown("## Требуется подтверждение содержания")
-    st.write(f"Подтверждено {len(valid)} из {len(cases)}")
-    for case in cases:
-        row = row_by_id[case.review_id]
-        st.markdown(f"### Неделя №{case.week_number}")
-        st.markdown(f"**Тема:** {case.topic_title}")
-        st.markdown("**SOURCE:**")
-        st.code(case.program_source or "SOURCE из программы отсутствует")
-        st.markdown("**Причины NEEDS_REVIEW:**")
-        for reason in case.reasons:
-            st.markdown(f"- {reason}")
-        st.markdown("**Предложенный RESULT:**")
-        st.code(case.proposed_result or "—")
-        st.markdown("**Предложенный CONTROL:**")
-        st.code(case.proposed_control or "—")
+    if notices:
+        st.markdown(f"## Есть замечания: {len(notices)} {_count_weeks_word(len(notices))}")
+        st.write(
+            "Эти недели уже заполнены в календарном плане. "
+            "Ручное подтверждение не требуется."
+        )
+        for case in notices:
+            _render_review_case_facts(case)
 
-        confirmation = valid.get(case.review_id)
-        widget_suffix = case.review_id.rsplit(":", 1)[-1][:16]
-        result_key = f"semantic_review_input_result_{widget_suffix}"
-        control_key = f"semantic_review_input_control_{widget_suffix}"
-        if confirmation is not None:
-            st.text_area(
+    if fill_required:
+        st.markdown(f"## {_fill_required_message(len(fill_required))}")
+        st.write(f"Подтверждено {sum(1 for case in fill_required if case.review_id in valid)} из {len(fill_required)}")
+        for case in fill_required:
+            row = row_by_id[case.review_id]
+            _render_review_case_facts(case)
+            confirmation = valid.get(case.review_id)
+            widget_suffix = case.review_id.rsplit(":", 1)[-1][:16]
+            result_key = f"semantic_review_input_result_{widget_suffix}"
+            control_key = f"semantic_review_input_control_{widget_suffix}"
+            if confirmation is not None:
+                st.text_area(
+                    "Результат педагога",
+                    value=confirmation.planned_result,
+                    disabled=True,
+                    key=f"semantic_review_read_result_{widget_suffix}",
+                )
+                st.text_area(
+                    "Контроль педагога",
+                    value=confirmation.assessment_method,
+                    disabled=True,
+                    key=f"semantic_review_read_control_{widget_suffix}",
+                )
+                st.success("Содержание подтверждено.")
+                if st.button("Изменить", key=f"semantic_review_change_{widget_suffix}"):
+                    confirmations.pop(case.review_id, None)
+                    issues_by_id.pop(case.review_id, None)
+                    st.session_state[result_key] = confirmation.planned_result
+                    st.session_state[control_key] = confirmation.assessment_method
+                    _invalidate_generated_plan()
+                    st.session_state["calendar_generate_after_check"] = True
+                    st.rerun()
+                continue
+
+            result = st.text_area(
                 "Результат педагога",
-                value=confirmation.planned_result,
-                disabled=True,
-                key=f"semantic_review_read_result_{widget_suffix}",
+                value="",
+                key=result_key,
             )
-            st.text_area(
+            control = st.text_area(
                 "Контроль педагога",
-                value=confirmation.assessment_method,
-                disabled=True,
-                key=f"semantic_review_read_control_{widget_suffix}",
+                value="",
+                key=control_key,
             )
-            st.success("Содержание подтверждено.")
-            if st.button("Изменить", key=f"semantic_review_change_{widget_suffix}"):
-                confirmations.pop(case.review_id, None)
-                issues_by_id.pop(case.review_id, None)
-                st.session_state[result_key] = confirmation.planned_result
-                st.session_state[control_key] = confirmation.assessment_method
-                _invalidate_generated_plan()
-                st.session_state["calendar_generate_after_check"] = True
+            for issue in issues_by_id.get(case.review_id, ()):
+                st.error(issue)
+            if st.button("Подтвердить", key=f"semantic_review_confirm_{widget_suffix}"):
+                _store_semantic_confirmation(
+                    scope=scope,
+                    case=case,
+                    row=row,
+                    planned_result=result,
+                    assessment_method=control,
+                )
                 st.rerun()
-            continue
 
-        result = st.text_area(
-            "Результат педагога",
-            value="",
-            key=result_key,
-        )
-        control = st.text_area(
-            "Контроль педагога",
-            value="",
-            key=control_key,
-        )
-        for issue in issues_by_id.get(case.review_id, ()):
-            st.error(issue)
-        if st.button("Подтвердить", key=f"semantic_review_confirm_{widget_suffix}"):
-            _store_semantic_confirmation(
-                scope=scope,
-                case=case,
-                row=row,
-                planned_result=result,
-                assessment_method=control,
-            )
-            st.rerun()
-    return bool(pending)
+    return any(case.review_id not in valid for case in fill_required)
 
 
 def _invalidate_generated_plan() -> None:
@@ -4390,6 +4485,9 @@ def _render_generation_result(*, show_status: bool = True) -> None:
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
         review_weeks = _review_week_count()
         st.markdown(_ready_plan_message(review_weeks))
+        empty_weeks = _empty_review_week_count()
+        if empty_weeks:
+            st.markdown(_fill_required_message(empty_weeks))
         st.download_button(
             f"Скачать календарный план за {academic_year} учебный год",
             data=download.content,
