@@ -8,6 +8,11 @@ from enum import Enum
 
 from calendar_pedagoga.ai_preparation import prepare_ai_requests
 from calendar_pedagoga.ai_provider import AIProvider, AIUsage, OpenAIProvider
+from calendar_pedagoga.ai_review_proposal import (
+    ReviewProposalSession,
+    ai_review_proposal_candidate,
+    build_review_proposal_session,
+)
 from calendar_pedagoga.content_generation import CalendarContentRow, build_content_model
 from calendar_pedagoga.confirmed_study_plan import (
     ConfirmedStudyPlan,
@@ -206,11 +211,13 @@ def _draft_resolved_rows(
     rows: tuple[ResolvedLessonRow, ...],
     v2_rows: tuple[LessonContentV2Row, ...],
     cases: tuple[SemanticReviewCase, ...],
+    proposal_session: ReviewProposalSession | None = None,
 ) -> tuple[ResolvedLessonRow, ...]:
     """Write safe proposed RESULT/CONTROL; blank grammar/R13/control failures.
 
     An unsafe proposal gets one more chance through a SOURCE-grounded rebuild
-    from the week's own clauses; cells stay empty when that proof also fails.
+    from the week's own clauses, and then through a constrained AI proposal that
+    the same gates must accept; cells stay empty when every proof fails.
     """
 
     pending_weeks = {case.week_number for case in cases}
@@ -225,7 +232,9 @@ def _draft_resolved_rows(
         if not review_proposal_docx_issues(candidate):
             output.append(row)
             continue
-        rebuilt = source_grounded_review_proposal(candidate)
+        rebuilt = source_grounded_review_proposal(candidate) or (
+            ai_review_proposal_candidate(candidate, proposal_session)
+        )
         planned_result, assessment_method = rebuilt if rebuilt else ("", "")
         output.append(
             replace(
@@ -353,6 +362,7 @@ def run_calendar_pipeline(
             resolved,
             lesson_build.v2_rows,
             lesson_build.review_cases,
+            proposal_session=build_review_proposal_session(),
         )
         if lesson_build.status is CalendarDocumentStatus.DRAFT_READY
         else resolved

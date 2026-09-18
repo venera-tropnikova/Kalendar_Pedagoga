@@ -284,6 +284,7 @@ def test_pipeline_review_outcome_is_draft_ready(monkeypatch) -> None:
 
 def _docx_rows_for(
     *v2_rows: LessonContentV2Row,
+    proposal_session=None,
 ) -> tuple[tuple, tuple]:
     cases = build_semantic_review_cases(v2_rows, context_fingerprint="context")
     resolved = resolve_lesson_content(_lesson_rows_from_v2(v2_rows))
@@ -295,7 +296,12 @@ def _docx_rows_for(
         )
         for item, row in zip(resolved, v2_rows)
     )
-    return _draft_resolved_rows(resolved, v2_rows, cases), cases
+    return (
+        _draft_resolved_rows(
+            resolved, v2_rows, cases, proposal_session=proposal_session
+        ),
+        cases,
+    )
 
 
 def test_draft_keeps_safe_review_content_and_blanks_r13() -> None:
