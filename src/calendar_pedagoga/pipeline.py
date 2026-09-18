@@ -43,6 +43,7 @@ from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import build_schedule
 from calendar_pedagoga.generator_revision import generator_revision
+from calendar_pedagoga.knowledge_case_repair import try_repair_review_candidate
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -215,9 +216,10 @@ def _draft_resolved_rows(
 ) -> tuple[ResolvedLessonRow, ...]:
     """Write safe proposed RESULT/CONTROL; blank grammar/R13/control failures.
 
-    An unsafe proposal gets one more chance through a SOURCE-grounded rebuild
-    from the week's own clauses, and then through a constrained AI proposal that
-    the same gates must accept; cells stay empty when every proof fails.
+    An unsafe proposal first tries a scoped morphology repair of knowledge
+    phrases already rejected as unproven_knowledge_object_case.  If that proof
+    fails, a SOURCE-grounded rebuild and then a constrained AI proposal get one
+    more chance; cells stay empty when every proof fails.
     """
 
     pending_weeks = {case.week_number for case in cases}
@@ -231,6 +233,16 @@ def _draft_resolved_rows(
         candidate = v2_by_week[week]
         if not review_proposal_docx_issues(candidate):
             output.append(row)
+            continue
+        repaired = try_repair_review_candidate(candidate)
+        if repaired is not None:
+            output.append(
+                replace(
+                    row,
+                    planned_result=repaired.planned_result,
+                    assessment_method=repaired.assessment_method,
+                )
+            )
             continue
         rebuilt = source_grounded_review_proposal(candidate) or (
             ai_review_proposal_candidate(candidate, proposal_session)
