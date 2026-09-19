@@ -16,6 +16,7 @@ class ObjectStatus(StrEnum):
     UNRESOLVED = "UNRESOLVED"
     COVERED = "COVERED"
     OPTIONAL = "OPTIONAL"
+    UNASSESSED = "UNASSESSED"
 
 
 class ImportStatus(StrEnum):
@@ -150,6 +151,48 @@ class SourceAtom:
             text=str(data["text"]),
             clause_id=str(data["clause_id"]),
             transitional=bool(data.get("transitional", True)),
+        )
+
+
+@dataclass(frozen=True)
+class SourceDelimiter:
+    id: str
+    span: SourceSpan
+    source_fingerprint: str
+    provenance: Provenance
+    status: ObjectStatus
+    text: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SourceDelimiter:
+        return cls(
+            id=str(data["id"]),
+            span=SourceSpan.from_dict(data["span"]),
+            source_fingerprint=str(data["source_fingerprint"]),
+            provenance=_provenance(data["provenance"]),
+            status=_enum(ObjectStatus, data["status"]),
+            text=str(data["text"]),
+        )
+
+
+@dataclass(frozen=True)
+class AtomizationResult:
+    source: str
+    atoms: tuple[SourceAtom, ...]
+    delimiters: tuple[SourceDelimiter, ...]
+    status: ObjectStatus
+    note: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> AtomizationResult:
+        return cls(
+            source=str(data.get("source") or ""),
+            atoms=tuple(SourceAtom.from_dict(item) for item in data.get("atoms", ())),
+            delimiters=tuple(
+                SourceDelimiter.from_dict(item) for item in data.get("delimiters", ())
+            ),
+            status=_enum(ObjectStatus, data["status"]),
+            note=str(data.get("note") or ""),
         )
 
 
