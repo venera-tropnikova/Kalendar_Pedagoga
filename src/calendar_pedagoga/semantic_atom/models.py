@@ -18,6 +18,23 @@ class ObjectStatus(StrEnum):
     OPTIONAL = "OPTIONAL"
 
 
+class ImportStatus(StrEnum):
+    PLAN_CONFIRMED = "PLAN_CONFIRMED"
+    CONTENT_PARSED = "CONTENT_PARSED"
+    NOTICE = "NOTICE"
+    BLOCK = "BLOCK"
+
+
+class MatchConfidence(StrEnum):
+    EXACT = "EXACT"
+    NORMALIZED = "NORMALIZED"
+    NUMBER_MATCH = "NUMBER_MATCH"
+    TEXT_MATCH = "TEXT_MATCH"
+    CONFIRMED = "CONFIRMED"
+    AMBIGUOUS = "AMBIGUOUS"
+    NONE = "NONE"
+
+
 class FrameKind(StrEnum):
     ACTION = "ACTION"
     KNOWLEDGE = "KNOWLEDGE"
@@ -231,6 +248,85 @@ class CoverageReport:
             projected_control=str(data.get("projected_control") or ""),
             uncovered=tuple(data.get("uncovered") or ()),
         )
+
+
+def projected_span(*, adapter: str, role: str, document: str = "", extra: str = "") -> SourceSpan:
+    fingerprint = fingerprint_source(f"{document}:{extra}:{role}")
+    return SourceSpan(
+        id=make_object_id("span", fingerprint, adapter, role),
+        start=0,
+        end=0,
+        source_fingerprint=fingerprint,
+        provenance=Provenance(adapter=adapter, role=role),
+        status=ObjectStatus.PROJECTED,
+        document=document,
+    )
+
+
+@dataclass(frozen=True)
+class ProjectedPlanTopic:
+    number: str
+    title: str
+    section: str
+    theory_hours: str
+    practice_hours: str
+    total_hours: str
+
+
+@dataclass(frozen=True)
+class ProgramSource:
+    id: str
+    span: SourceSpan
+    source_fingerprint: str
+    provenance: Provenance
+    status: ObjectStatus
+    import_status: ImportStatus
+    statuses: tuple[ImportStatus, ...]
+    study_year: int | None
+    study_weeks: int | None
+    theory_hours: str
+    practice_hours: str
+    total_hours: str
+    hours_per_week: str
+    topics: tuple[ProjectedPlanTopic, ...]
+    notices: tuple[str, ...]
+    error_type: str
+    error: str
+    document_names: tuple[str, ...]
+    content_hashes: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class ScheduleRow:
+    id: str
+    span: SourceSpan
+    source_fingerprint: str
+    provenance: Provenance
+    status: ObjectStatus
+    week_number: int
+    date_range: str
+    month: str
+    topic_number: str
+    topic_title: str
+    theory_hours: str
+    practice_hours: str
+    total_hours: str
+
+
+@dataclass(frozen=True)
+class MatchBinding:
+    id: str
+    span: SourceSpan
+    source_fingerprint: str
+    provenance: Provenance
+    status: ObjectStatus
+    week_number: int
+    match_status: str
+    confidence: MatchConfidence
+    source: str
+    source_hash: str
+    warnings: tuple[str, ...]
+    evidence: tuple[tuple[str, str], ...]
 
 
 def to_jsonable(value: Any) -> Any:
