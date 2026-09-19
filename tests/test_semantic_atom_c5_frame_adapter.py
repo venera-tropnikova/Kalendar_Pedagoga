@@ -294,7 +294,7 @@ def test_what_is_clause_stays_unresolved_in_c5() -> None:
     )
     row = _theory(source)
     _assert_identity_equal(row, source)
-    projection = project_frames(source, row)
+    projection = project_frames(source, row, dispatcher=SemanticFrameDispatcher(C5_REGISTRY))
     assert [frame.status for frame in projection.frames] == [
         ObjectStatus.UNRESOLVED,
         ObjectStatus.PROVEN,

@@ -194,8 +194,9 @@ def test_questions_and_knowledge_np_stay_unresolved() -> None:
         "Памятники города.",
         "Игры: «Давай поговорим».",
     )
+    c7 = SemanticFrameDispatcher((*C5_REGISTRY, *ACTION_REGISTRY))
     for source in sources:
-        projection = project_frames(source)
+        projection = project_frames(source, dispatcher=c7)
         assert projection.frames, source
         assert all(
             frame.status is ObjectStatus.UNRESOLVED for frame in projection.frames

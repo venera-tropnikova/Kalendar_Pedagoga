@@ -9,6 +9,7 @@ from calendar_pedagoga.semantic_atom.atom_adapter import atomize, identity_field
 from calendar_pedagoga.semantic_atom.flags import USE_SEMANTIC_ATOM_ENGINE
 from calendar_pedagoga.semantic_atom.dispatcher import SemanticFrameDispatcher
 from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
+from calendar_pedagoga.semantic_atom.knowledge_builders import KNOWLEDGE_REGISTRY
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
 from calendar_pedagoga.semantic_atom.import_adapter import project_import
 from calendar_pedagoga.semantic_atom.match_adapter import (
@@ -69,6 +70,7 @@ __all__ = (
     "ScheduleRow",
     "SemanticFrame",
     "ACTION_REGISTRY",
+    "KNOWLEDGE_REGISTRY",
     "atomize",
     "identity_fields",
     "project_frames",

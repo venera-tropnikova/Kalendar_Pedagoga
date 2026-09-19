@@ -189,7 +189,9 @@ def _atom_ranges(text: str, mask: list[bool]) -> list[tuple[int, int]]:
         nxt = text[index + 1] if index + 1 < length else ""
         if char in ".!?" and (nxt == "" or nxt.isspace()):
             ends.append(index + 1)
-        elif char == ";" or char == "\n":
+        elif char == "\n":
+            ends.append(index)
+        elif char == ";" and not _semicolon_inside_colon_list(text, mask, ends, index):
             ends.append(index)
     if not ends or ends[-1] != length:
         ends.append(length)
@@ -212,6 +214,20 @@ def _atom_ranges(text: str, mask: list[bool]) -> list[tuple[int, int]]:
             start = text.find(stripped)
             ranges.append((start, start + len(stripped)))
     return ranges
+
+
+def _semicolon_inside_colon_list(
+    text: str,
+    mask: list[bool],
+    ends: list[int],
+    index: int,
+) -> bool:
+    """Keep ``NP: A; B; C`` as one atom; still split bare clause semicolons."""
+
+    start = ends[-1] if ends else 0
+    return any(
+        text[cursor] == ":" and not mask[cursor] for cursor in range(start, index)
+    )
 
 
 def _delimiter_only(fragment: str) -> bool:

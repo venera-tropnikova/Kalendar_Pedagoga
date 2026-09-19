@@ -254,8 +254,11 @@ def default_dispatcher() -> SemanticFrameDispatcher:
 
 def full_dispatcher() -> SemanticFrameDispatcher:
     from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
+    from calendar_pedagoga.semantic_atom.knowledge_builders import KNOWLEDGE_REGISTRY
 
-    return SemanticFrameDispatcher((*C5_REGISTRY, *ACTION_REGISTRY))
+    return SemanticFrameDispatcher(
+        (*C5_REGISTRY, *ACTION_REGISTRY, *KNOWLEDGE_REGISTRY)
+    )
 
 
 def project_frames(
