@@ -13,6 +13,7 @@ module except when a test feeds production text through a shadow row.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 import re
 
 import pymorphy3
@@ -76,6 +77,21 @@ TEMPLATE_FUNCTION_WORDS = frozenset(
     }
 )
 
+# Existing closed CONTROL labels only. New template texts require their own commit.
+APPROVED_CONTROL_TEMPLATES: dict[str, str] = {
+    "product_review.drawings": "просмотр рисунков",
+    "product_review.ready_work": "просмотр и оценка готовой работы",
+}
+
+
+@dataclass(frozen=True)
+class ApprovedControlTemplate:
+    template_id: str
+    text: str
+    provenance: str = ""
+    bound: bool = False
+    proven: bool = False
+
 
 def pedagogical_predicates() -> frozenset[str]:
     """Live CE2 closed predicate registry (nouns + proven finites)."""
@@ -106,12 +122,48 @@ def _allowed_lemmas(source: str | None) -> frozenset[str]:
     return frozenset(lemmas)
 
 
+def _fold_template(text: str | None) -> str:
+    return " ".join(item.casefold() for item in tokenize(text))
+
+
+def lookup_approved_control_template(text: str | None) -> str | None:
+    folded = _fold_template(text)
+    if not folded:
+        return None
+    for template_id, registered in APPROVED_CONTROL_TEMPLATES.items():
+        if _fold_template(registered) == folded:
+            return template_id
+    return None
+
+
+def _template_control_lemmas(
+    control: str | None,
+    approved_templates: Iterable[ApprovedControlTemplate],
+) -> frozenset[str]:
+    segments = {_fold_template(part) for part in (control or "").split(";")}
+    extra: set[str] = set()
+    for item in approved_templates:
+        if not (item.proven and item.bound and item.provenance and item.template_id):
+            continue
+        registered = APPROVED_CONTROL_TEMPLATES.get(item.template_id)
+        if registered is None:
+            continue
+        folded = _fold_template(registered)
+        if _fold_template(item.text) != folded:
+            continue
+        if folded not in segments:
+            continue
+        extra.update(_allowed_lemmas(registered))
+    return frozenset(extra)
+
+
 def shadow_lexical_violations(
     *,
     source: str | None,
     result: str | None,
     control: str | None,
     extra_allowed: Iterable[str] = (),
+    approved_templates: Iterable[ApprovedControlTemplate] = (),
 ) -> tuple[str, ...]:
     """Return disallowed lexemes found in shadow RESULT/CONTROL."""
 
@@ -119,14 +171,16 @@ def shadow_lexical_violations(
     allowed.update(word.casefold() for word in pedagogical_predicates())
     allowed.update(TEMPLATE_FUNCTION_WORDS)
     allowed.update(token.casefold() for token in extra_allowed)
+    template_lemmas = _template_control_lemmas(control, approved_templates)
     violations: list[str] = []
     seen: set[str] = set()
-    for field in (result, control):
+    for field, use_templates in ((result, False), (control, True)):
+        field_allowed = allowed | template_lemmas if use_templates else allowed
         for token in tokenize(field):
             folded = token.casefold()
-            if folded in allowed or folded in seen:
+            if folded in field_allowed or folded in seen:
                 continue
-            if _lemmas(token) & allowed:
+            if _lemmas(token) & field_allowed:
                 continue
             seen.add(folded)
             violations.append(folded)

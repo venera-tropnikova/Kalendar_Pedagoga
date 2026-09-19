@@ -8,7 +8,12 @@ from calendar_pedagoga.semantic_atom.frame_adapter import (
     _traces_to_source,
     project_frames,
 )
-from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
+from calendar_pedagoga.semantic_atom.lexical import (
+    APPROVED_CONTROL_TEMPLATES,
+    ApprovedControlTemplate,
+    lookup_approved_control_template,
+    shadow_lexical_violations,
+)
 from calendar_pedagoga.semantic_atom.models import (
     ControlBinding,
     ControlKind,
@@ -40,7 +45,7 @@ _APPROVED_OBSERVATION = (
     "педагогическое наблюдение на экскурсии",
     "педагогическое наблюдение за ",
 )
-_EXTRA_ALLOWED = ("его", "её", "ее", "их", "готовой", "работы", "оценка")
+_EXTRA_ALLOWED = ("его", "её", "ее", "их")
 
 _KNOWLEDGE_KINDS = {
     FrameKind.KNOWLEDGE,
@@ -125,6 +130,7 @@ def _piece_for(source: str, frame: SemanticFrame) -> ControlPiece:
         result="",
         control=label,
         extra_allowed=_EXTRA_ALLOWED,
+        approved_templates=_approved_template_for(label, frame),
     )
     if violations:
         return _rejected(
@@ -148,6 +154,21 @@ def _piece_for(source: str, frame: SemanticFrame) -> ControlPiece:
         provenance=Provenance(adapter=ADAPTER_NAME, role="piece", note=str(kind)),
         lexical_check=LexicalCheckResult(passed=True),
         status=ObjectStatus.PROVEN,
+    )
+
+
+def _approved_template_for(label: str, frame: SemanticFrame) -> tuple[ApprovedControlTemplate, ...]:
+    template_id = lookup_approved_control_template(label)
+    if template_id is None:
+        return ()
+    return (
+        ApprovedControlTemplate(
+            template_id=template_id,
+            text=APPROVED_CONTROL_TEMPLATES[template_id],
+            provenance=ADAPTER_NAME,
+            bound=bool(frame.atom_id),
+            proven=frame.status is ObjectStatus.PROVEN,
+        ),
     )
 
 

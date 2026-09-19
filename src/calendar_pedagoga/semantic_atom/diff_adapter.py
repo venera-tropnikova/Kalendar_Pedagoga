@@ -9,7 +9,13 @@ from typing import Iterable
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.control_adapter import compose_control
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
-from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations, tokenize
+from calendar_pedagoga.semantic_atom.lexical import (
+    APPROVED_CONTROL_TEMPLATES,
+    ApprovedControlTemplate,
+    lookup_approved_control_template,
+    shadow_lexical_violations,
+    tokenize,
+)
 from calendar_pedagoga.semantic_atom.models import ObjectStatus
 from calendar_pedagoga.semantic_atom.passthrough import DiffKind
 
@@ -180,6 +186,7 @@ def snapshot_shadow(source: str, row: object | None = None) -> ShadowSnapshot:
         source=source,
         result=projection.candidate_result,
         control=control.composed_control,
+        approved_templates=_approved_templates_from_control(control),
     )
     return ShadowSnapshot(
         result=projection.candidate_result,
@@ -191,6 +198,38 @@ def snapshot_shadow(source: str, row: object | None = None) -> ShadowSnapshot:
         control_bindings=control.bindings,
         lexical_violations=violations,
     )
+
+
+def _approved_templates_from_control(control: object) -> tuple[ApprovedControlTemplate, ...]:
+    bound = {
+        str(getattr(item, "piece_id", "") or "")
+        for item in getattr(control, "bindings", ())
+        if getattr(item, "piece_id", "") and getattr(item, "atom_id", "")
+    }
+    found: list[ApprovedControlTemplate] = []
+    for piece in getattr(control, "pieces", ()):
+        if getattr(piece, "status", None) is not ObjectStatus.PROVEN:
+            continue
+        piece_id = str(getattr(piece, "id", "") or "")
+        if piece_id not in bound or not getattr(piece, "atom_id", ""):
+            continue
+        provenance = getattr(piece, "provenance", None)
+        adapter = getattr(provenance, "adapter", "") if provenance is not None else ""
+        if not adapter:
+            continue
+        template_id = lookup_approved_control_template(getattr(piece, "label", ""))
+        if template_id is None:
+            continue
+        found.append(
+            ApprovedControlTemplate(
+                template_id=template_id,
+                text=APPROVED_CONTROL_TEMPLATES[template_id],
+                provenance=adapter,
+                bound=True,
+                proven=True,
+            )
+        )
+    return tuple(found)
 
 
 def classify_week(row: object, source: str = "") -> WeekDiff:
