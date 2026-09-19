@@ -27,6 +27,7 @@ class DiffKind(StrEnum):
     NEW_LOSES = "NEW_LOSES"
     NEW_INVENTS = "NEW_INVENTS"
     UNRESOLVED_DRIFT = "UNRESOLVED_DRIFT"
+    BLOCKED = "BLOCKED"
 
 
 @dataclass(frozen=True)

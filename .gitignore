@@ -14,6 +14,9 @@ dist/
 build/
 *.egg-info/
 
+# Local C10 shadow diagnostics — never commit
+_shadow_out/
+
 # Project archive and generated calendar QA outputs
 Kalendar_Pedagoga.zip
 references/Календарный_план_*.docx

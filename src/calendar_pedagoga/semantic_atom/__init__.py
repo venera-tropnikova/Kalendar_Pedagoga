@@ -10,7 +10,19 @@ from calendar_pedagoga.semantic_atom.flags import USE_SEMANTIC_ATOM_ENGINE
 from calendar_pedagoga.semantic_atom.dispatcher import SemanticFrameDispatcher
 from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
 from calendar_pedagoga.semantic_atom.knowledge_builders import KNOWLEDGE_REGISTRY
+from calendar_pedagoga.semantic_atom.audit import (
+    discover_corpus_pairs,
+    run_differential_audit,
+    write_local_report,
+)
 from calendar_pedagoga.semantic_atom.control_adapter import compose_control, project_control
+from calendar_pedagoga.semantic_atom.diff_adapter import (
+    SEVERITY_ORDER,
+    classify_snapshots,
+    classify_week,
+    severity,
+    worst_kind,
+)
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
 from calendar_pedagoga.semantic_atom.import_adapter import project_import
 from calendar_pedagoga.semantic_atom.match_adapter import (
@@ -80,10 +92,18 @@ __all__ = (
     "ShadowControlReport",
     "ACTION_REGISTRY",
     "KNOWLEDGE_REGISTRY",
+    "SEVERITY_ORDER",
     "atomize",
     "identity_fields",
+    "classify_snapshots",
+    "classify_week",
     "compose_control",
+    "discover_corpus_pairs",
     "project_control",
+    "run_differential_audit",
+    "severity",
+    "worst_kind",
+    "write_local_report",
     "project_frames",
     "project_import",
     "project_match_bindings",
