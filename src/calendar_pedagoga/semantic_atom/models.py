@@ -46,6 +46,12 @@ class FrameKind(StrEnum):
     PROJECTED = "PROJECTED"
 
 
+class CandidateConfidence(StrEnum):
+    VALID = "VALID"
+    REJECTED = "REJECTED"
+    ERROR = "ERROR"
+
+
 @dataclass(frozen=True)
 class Provenance:
     adapter: str
@@ -197,6 +203,75 @@ class AtomizationResult:
 
 
 @dataclass(frozen=True)
+class StructuralEvidence:
+    notes: tuple[str, ...] = ()
+    specificity: int = 0
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> StructuralEvidence:
+        return cls(
+            notes=tuple(str(item) for item in data.get("notes", ())),
+            specificity=int(data.get("specificity") or 0),
+        )
+
+
+@dataclass(frozen=True)
+class LexicalCheckResult:
+    passed: bool
+    violations: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> LexicalCheckResult:
+        return cls(
+            passed=bool(data.get("passed")),
+            violations=tuple(str(item) for item in data.get("violations", ())),
+        )
+
+
+@dataclass(frozen=True)
+class FrameCandidate:
+    builder_id: str
+    atom_id: str
+    span: SourceSpan
+    source_fingerprint: str
+    proposed_kind: FrameKind
+    proposed_predicate: str
+    proposed_object: str
+    proposed_complement: str
+    proposed_result: str
+    proposed_control: str
+    structural_evidence: StructuralEvidence
+    lexical_check: LexicalCheckResult
+    confidence: CandidateConfidence
+    rejection_reason: str = ""
+
+    @property
+    def is_valid(self) -> bool:
+        return self.confidence is CandidateConfidence.VALID and not self.rejection_reason
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> FrameCandidate:
+        return cls(
+            builder_id=str(data["builder_id"]),
+            atom_id=str(data["atom_id"]),
+            span=SourceSpan.from_dict(data["span"]),
+            source_fingerprint=str(data["source_fingerprint"]),
+            proposed_kind=_enum(FrameKind, data["proposed_kind"]),
+            proposed_predicate=str(data.get("proposed_predicate") or ""),
+            proposed_object=str(data.get("proposed_object") or ""),
+            proposed_complement=str(data.get("proposed_complement") or ""),
+            proposed_result=str(data.get("proposed_result") or ""),
+            proposed_control=str(data.get("proposed_control") or ""),
+            structural_evidence=StructuralEvidence.from_dict(
+                data.get("structural_evidence") or {}
+            ),
+            lexical_check=LexicalCheckResult.from_dict(data.get("lexical_check") or {}),
+            confidence=_enum(CandidateConfidence, data["confidence"]),
+            rejection_reason=str(data.get("rejection_reason") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class FrameProjection:
     source: str
     atoms: tuple[SourceAtom, ...]
@@ -207,6 +282,7 @@ class FrameProjection:
     identity_result: str = ""
     identity_control: str = ""
     status: ObjectStatus = ObjectStatus.UNASSESSED
+    candidates: tuple[FrameCandidate, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> FrameProjection:
@@ -222,6 +298,9 @@ class FrameProjection:
             identity_result=str(data.get("identity_result") or ""),
             identity_control=str(data.get("identity_control") or ""),
             status=_enum(ObjectStatus, data.get("status") or ObjectStatus.UNASSESSED),
+            candidates=tuple(
+                FrameCandidate.from_dict(item) for item in data.get("candidates", ())
+            ),
         )
 
 

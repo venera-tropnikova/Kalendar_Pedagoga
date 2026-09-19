@@ -1,4 +1,4 @@
-"""Shadow FrameAdapter: proven builders from be1b745 / 7a714d6 only."""
+"""Shadow FrameAdapter: C5 builders registered on the C6 dispatcher."""
 
 from __future__ import annotations
 
@@ -7,6 +7,13 @@ from typing import Protocol
 
 from calendar_pedagoga import content_engine_v2 as _ce2
 from calendar_pedagoga.semantic_atom.atom_adapter import atomize, identity_fields
+from calendar_pedagoga.semantic_atom.dispatcher import (
+    BUILDER_ERROR,
+    NO_STRUCTURAL_MATCH,
+    SemanticFrameDispatcher,
+    UNSUPPORTED_ATOM_SHAPE,
+    RegisteredBuilder,
+)
 from calendar_pedagoga.semantic_atom.lexical import (
     TEMPLATE_FUNCTION_WORDS,
     _allowed_lemmas,
@@ -16,26 +23,26 @@ from calendar_pedagoga.semantic_atom.lexical import (
     tokenize,
 )
 from calendar_pedagoga.semantic_atom.models import (
-    CoverageBinding,
+    CandidateConfidence,
+    FrameCandidate,
     FrameKind,
     FrameProjection,
+    LexicalCheckResult,
     ObjectStatus,
-    Provenance,
-    SemanticFrame,
     SourceAtom,
-    make_object_id,
+    StructuralEvidence,
 )
 
 ADAPTER_NAME = "frame_c5"
-UNSUPPORTED_ATOM_SHAPE = "unsupported_atom_shape"
 AMBIGUOUS_ATOM_SHAPE = "ambiguous_atom_shape"
+AMBIGUOUS_FRAME_CANDIDATES = "ambiguous_frame_candidates"
 LEXICAL_VIOLATION = "lexical_violation"
 UNTRACED_COMPLEMENT = "untraced_object_or_complement"
 UNKNOWN_PREDICATE = "predicate_not_in_registry"
 
 _FRAME_ADAPTER_CALLS = 0
 
-_Builder = Callable[[str], tuple[str, str, str, str] | None]
+_Helper = Callable[[str], tuple[str, str, str, str] | None]
 
 
 class _IdentityRow(Protocol):
@@ -77,75 +84,56 @@ def _symbol_builder(text: str) -> tuple[str, str, str, str] | None:
     return _ce2._symbol_clause_result(text)
 
 
-_BUILDERS: tuple[tuple[str, FrameKind, _Builder], ...] = (
-    ("locative_drawing", FrameKind.ACTION, _locative_builder),
-    ("semiotic_object", FrameKind.KNOWLEDGE, _semiotic_builder),
-    ("concept_values", FrameKind.KNOWLEDGE, _concept_builder),
-    ("purpose_functions", FrameKind.KNOWLEDGE, _purpose_builder),
-    ("closed_classification", FrameKind.CLASSIFICATION, _classification_builder),
-    ("dash_symbol", FrameKind.DEFINITION, _symbol_builder),
-)
-
-
-def project_frames(
-    source: object,
-    row: _IdentityRow | None = None,
-) -> FrameProjection:
-    """Build candidate shadow frames. Never writes TYPE/RESULT/CONTROL."""
-
-    global _FRAME_ADAPTER_CALLS
-    _FRAME_ADAPTER_CALLS += 1
-    atoms = atomize(source)
-    frames: list[SemanticFrame] = []
-    bindings: list[CoverageBinding] = []
-    proven: list[str] = []
-    for index, atom in enumerate(atoms.atoms):
-        frame = _frame_for_atom(atom, index)
-        binding = _binding_for(atom, frame, index)
-        frames.append(frame)
-        bindings.append(binding)
-        if frame.status is ObjectStatus.PROVEN and frame.projected_result:
-            proven.append(frame.projected_result.rstrip("."))
-    identity_type = identity_result = identity_control = ""
-    if row is not None:
-        identity_type, identity_result, identity_control = identity_fields(row)
-    status = (
-        ObjectStatus.PROVEN
-        if any(frame.status is ObjectStatus.PROVEN for frame in frames)
-        else ObjectStatus.UNRESOLVED
-        if frames or atoms.status is ObjectStatus.UNRESOLVED
-        else ObjectStatus.UNASSESSED
-    )
-    return FrameProjection(
-        source=atoms.source,
-        atoms=atoms.atoms,
-        frames=tuple(frames),
-        bindings=tuple(bindings),
-        candidate_result=". ".join(proven),
-        identity_type=identity_type,
-        identity_result=identity_result,
-        identity_control=identity_control,
-        status=status,
-    )
-
-
-def _frame_for_atom(atom: SourceAtom, index: int) -> SemanticFrame:
-    hits: list[tuple[str, FrameKind, tuple[str, str, str, str]]] = []
-    for name, kind, builder in _BUILDERS:
-        built = builder(atom.text)
-        if built:
-            hits.append((name, kind, built))
-    if len(hits) != 1:
-        reason = UNSUPPORTED_ATOM_SHAPE if not hits else AMBIGUOUS_ATOM_SHAPE
-        return _unresolved(atom, index, reason)
-    name, kind, (phrase, action, obj, complement) = hits[0]
+def _c5_candidate(
+    builder_id: str,
+    kind: FrameKind,
+    helper: _Helper,
+    atom: SourceAtom,
+) -> FrameCandidate:
+    built = helper(atom.text)
+    if not built:
+        return FrameCandidate(
+            builder_id=builder_id,
+            atom_id=atom.id,
+            span=atom.span,
+            source_fingerprint=atom.source_fingerprint,
+            proposed_kind=kind,
+            proposed_predicate="",
+            proposed_object="",
+            proposed_complement="",
+            proposed_result="",
+            proposed_control="",
+            structural_evidence=StructuralEvidence(notes=(NO_STRUCTURAL_MATCH,)),
+            lexical_check=LexicalCheckResult(passed=True),
+            confidence=CandidateConfidence.REJECTED,
+            rejection_reason=NO_STRUCTURAL_MATCH,
+        )
+    phrase, action, obj, complement = built
     predicate = _closed_predicate(action, phrase)
     if not predicate:
-        return _unresolved(atom, index, UNKNOWN_PREDICATE)
+        return _rejected(
+            builder_id,
+            kind,
+            atom,
+            phrase=phrase,
+            predicate=action,
+            obj=obj,
+            complement=complement,
+            reason=UNKNOWN_PREDICATE,
+        )
     if not _traces_to_source(obj, atom.text) or not _traces_to_source(
         complement, atom.text
     ):
-        return _unresolved(atom, index, UNTRACED_COMPLEMENT)
+        return _rejected(
+            builder_id,
+            kind,
+            atom,
+            phrase=phrase,
+            predicate=predicate,
+            obj=obj,
+            complement=complement,
+            reason=UNTRACED_COMPLEMENT,
+        )
     result = _ce2._cap_sentence(phrase)
     control = _ce2._declared_knowledge_control(result) or _ce2._declared_product_control(
         result
@@ -157,17 +145,65 @@ def _frame_for_atom(atom: SourceAtom, index: int) -> SemanticFrame:
         extra_allowed=("его", "её", "ее", "их"),
     )
     if violations:
-        return _unresolved(atom, index, LEXICAL_VIOLATION)
-    return _proven(
-        atom,
-        index,
-        kind=kind,
-        builder=name,
-        result=result,
-        control=control,
-        predicate=predicate,
-        obj=obj,
-        complement=complement,
+        return _rejected(
+            builder_id,
+            kind,
+            atom,
+            phrase=result,
+            predicate=predicate,
+            obj=obj,
+            complement=complement,
+            reason=LEXICAL_VIOLATION,
+            control=control,
+            violations=violations,
+        )
+    return FrameCandidate(
+        builder_id=builder_id,
+        atom_id=atom.id,
+        span=atom.span,
+        source_fingerprint=atom.source_fingerprint,
+        proposed_kind=kind,
+        proposed_predicate=predicate,
+        proposed_object=obj,
+        proposed_complement=complement,
+        proposed_result=result,
+        proposed_control=control,
+        structural_evidence=StructuralEvidence(notes=(builder_id,)),
+        lexical_check=LexicalCheckResult(passed=True),
+        confidence=CandidateConfidence.VALID,
+    )
+
+
+def _rejected(
+    builder_id: str,
+    kind: FrameKind,
+    atom: SourceAtom,
+    *,
+    phrase: str,
+    predicate: str,
+    obj: str,
+    complement: str,
+    reason: str,
+    control: str = "",
+    violations: tuple[str, ...] = (),
+) -> FrameCandidate:
+    return FrameCandidate(
+        builder_id=builder_id,
+        atom_id=atom.id,
+        span=atom.span,
+        source_fingerprint=atom.source_fingerprint,
+        proposed_kind=kind,
+        proposed_predicate=predicate,
+        proposed_object=obj,
+        proposed_complement=complement,
+        proposed_result=phrase,
+        proposed_control=control,
+        structural_evidence=StructuralEvidence(notes=(reason,)),
+        lexical_check=LexicalCheckResult(
+            passed=not violations, violations=violations
+        ),
+        confidence=CandidateConfidence.REJECTED,
+        rejection_reason=reason,
     )
 
 
@@ -195,78 +231,68 @@ def _traces_to_source(fragment: str, source: str) -> bool:
     return True
 
 
-def _proven(
-    atom: SourceAtom,
-    index: int,
-    *,
-    kind: FrameKind,
-    builder: str,
-    result: str,
-    control: str,
-    predicate: str,
-    obj: str,
-    complement: str,
-) -> SemanticFrame:
-    return SemanticFrame(
-        id=make_object_id("frame", atom.id, result, "proven", builder),
-        span=atom.span,
-        source_fingerprint=atom.source_fingerprint,
-        provenance=Provenance(
-            adapter=ADAPTER_NAME,
-            role="frame",
-            clause_index=index,
-            note=builder,
-        ),
-        status=ObjectStatus.PROVEN,
-        kind=kind,
-        atom_id=atom.id,
-        clause_id=atom.clause_id,
-        projected_type="",
-        projected_result=result,
-        projected_control=control,
-        coverage_status="COVERED",
-        predicate=predicate,
-        object=obj,
-        complement=complement,
-        reason="",
+def _register(builder_id: str, kind: FrameKind, helper: _Helper) -> RegisteredBuilder:
+    def propose(atom: SourceAtom) -> FrameCandidate:
+        return _c5_candidate(builder_id, kind, helper, atom)
+
+    return RegisteredBuilder(builder_id=builder_id, propose=propose)
+
+
+C5_REGISTRY: tuple[RegisteredBuilder, ...] = (
+    _register("locative_drawing", FrameKind.ACTION, _locative_builder),
+    _register("semiotic_object", FrameKind.KNOWLEDGE, _semiotic_builder),
+    _register("concept_values", FrameKind.KNOWLEDGE, _concept_builder),
+    _register("purpose_functions", FrameKind.KNOWLEDGE, _purpose_builder),
+    _register("closed_classification", FrameKind.CLASSIFICATION, _classification_builder),
+    _register("dash_symbol", FrameKind.DEFINITION, _symbol_builder),
+)
+
+
+def default_dispatcher() -> SemanticFrameDispatcher:
+    return SemanticFrameDispatcher(C5_REGISTRY)
+
+
+def project_frames(
+    source: object,
+    row: _IdentityRow | None = None,
+    dispatcher: SemanticFrameDispatcher | None = None,
+) -> FrameProjection:
+    """Build candidate shadow frames. Never writes TYPE/RESULT/CONTROL."""
+
+    global _FRAME_ADAPTER_CALLS
+    _FRAME_ADAPTER_CALLS += 1
+    atoms = atomize(source)
+    active = dispatcher or default_dispatcher()
+    frames = []
+    bindings = []
+    candidates = []
+    proven: list[str] = []
+    for index, atom in enumerate(atoms.atoms):
+        decision = active.dispatch_atom(atom, index)
+        frames.append(decision.frame)
+        bindings.append(decision.binding)
+        candidates.extend(decision.candidates)
+        if decision.frame.status is ObjectStatus.PROVEN and decision.frame.projected_result:
+            proven.append(decision.frame.projected_result.rstrip("."))
+    identity_type = identity_result = identity_control = ""
+    if row is not None:
+        identity_type, identity_result, identity_control = identity_fields(row)
+    status = (
+        ObjectStatus.PROVEN
+        if any(frame.status is ObjectStatus.PROVEN for frame in frames)
+        else ObjectStatus.UNRESOLVED
+        if frames or atoms.status is ObjectStatus.UNRESOLVED
+        else ObjectStatus.UNASSESSED
     )
-
-
-def _unresolved(atom: SourceAtom, index: int, reason: str) -> SemanticFrame:
-    return SemanticFrame(
-        id=make_object_id("frame", atom.id, reason, "unresolved"),
-        span=atom.span,
-        source_fingerprint=atom.source_fingerprint,
-        provenance=Provenance(
-            adapter=ADAPTER_NAME,
-            role="frame",
-            clause_index=index,
-            note=reason,
-        ),
-        status=ObjectStatus.UNRESOLVED,
-        kind=FrameKind.PROJECTED,
-        atom_id=atom.id,
-        clause_id=atom.clause_id,
-        projected_type="",
-        projected_result="",
-        projected_control="",
-        coverage_status="UNRESOLVED",
-        reason=reason,
-    )
-
-
-def _binding_for(atom: SourceAtom, frame: SemanticFrame, index: int) -> CoverageBinding:
-    covered = frame.status is ObjectStatus.PROVEN
-    return CoverageBinding(
-        id=make_object_id("binding", atom.id, frame.id),
-        span=atom.span,
-        source_fingerprint=atom.source_fingerprint,
-        provenance=Provenance(
-            adapter=ADAPTER_NAME,
-            role="binding",
-            clause_index=index,
-        ),
-        status=ObjectStatus.COVERED if covered else ObjectStatus.UNRESOLVED,
-        atom_id=atom.id,
-        frame_id=frame.id,
+    return FrameProjection(
+        source=atoms.source,
+        atoms=atoms.atoms,
+        frames=tuple(frames),
+        bindings=tuple(bindings),
+        candidate_result=". ".join(proven),
+        identity_type=identity_type,
+        identity_result=identity_result,
+        identity_control=identity_control,
+        status=status,
+        candidates=tuple(candidates),
     )
