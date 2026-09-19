@@ -405,6 +405,92 @@ class CoverageReport:
         )
 
 
+class ControlKind(StrEnum):
+    ORAL_SURVEY = "ORAL_SURVEY"
+    PRODUCT_REVIEW = "PRODUCT_REVIEW"
+    PEDAGOGICAL_OBSERVATION = "PEDAGOGICAL_OBSERVATION"
+    PRACTICAL_CHECK = "PRACTICAL_CHECK"
+
+
+@dataclass(frozen=True)
+class ControlPiece:
+    id: str
+    frame_id: str
+    atom_id: str
+    span: SourceSpan
+    kind: ControlKind
+    label: str
+    source_object: str
+    source_complement: str
+    provenance: Provenance
+    lexical_check: LexicalCheckResult
+    status: ObjectStatus
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ControlPiece:
+        return cls(
+            id=str(data["id"]),
+            frame_id=str(data["frame_id"]),
+            atom_id=str(data["atom_id"]),
+            span=SourceSpan.from_dict(data["span"]),
+            kind=_enum(ControlKind, data["kind"]),
+            label=str(data.get("label") or ""),
+            source_object=str(data.get("source_object") or ""),
+            source_complement=str(data.get("source_complement") or ""),
+            provenance=_provenance(data["provenance"]),
+            lexical_check=LexicalCheckResult.from_dict(data.get("lexical_check") or {}),
+            status=_enum(ObjectStatus, data["status"]),
+            reason=str(data.get("reason") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class ControlBinding:
+    id: str
+    piece_id: str
+    frame_id: str
+    atom_id: str
+    span: SourceSpan
+    provenance: Provenance
+    status: ObjectStatus
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ControlBinding:
+        return cls(
+            id=str(data["id"]),
+            piece_id=str(data["piece_id"]),
+            frame_id=str(data["frame_id"]),
+            atom_id=str(data["atom_id"]),
+            span=SourceSpan.from_dict(data["span"]),
+            provenance=_provenance(data["provenance"]),
+            status=_enum(ObjectStatus, data["status"]),
+        )
+
+
+@dataclass(frozen=True)
+class ShadowControlReport:
+    source: str
+    pieces: tuple[ControlPiece, ...]
+    bindings: tuple[ControlBinding, ...]
+    composed_control: str
+    uncovered_frame_ids: tuple[str, ...]
+    status: ObjectStatus
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ShadowControlReport:
+        return cls(
+            source=str(data.get("source") or ""),
+            pieces=tuple(ControlPiece.from_dict(item) for item in data.get("pieces", ())),
+            bindings=tuple(
+                ControlBinding.from_dict(item) for item in data.get("bindings", ())
+            ),
+            composed_control=str(data.get("composed_control") or ""),
+            uncovered_frame_ids=tuple(data.get("uncovered_frame_ids") or ()),
+            status=_enum(ObjectStatus, data.get("status") or ObjectStatus.UNASSESSED),
+        )
+
+
 def projected_span(*, adapter: str, role: str, document: str = "", extra: str = "") -> SourceSpan:
     fingerprint = fingerprint_source(f"{document}:{extra}:{role}")
     return SourceSpan(

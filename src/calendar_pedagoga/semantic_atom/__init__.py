@@ -10,6 +10,7 @@ from calendar_pedagoga.semantic_atom.flags import USE_SEMANTIC_ATOM_ENGINE
 from calendar_pedagoga.semantic_atom.dispatcher import SemanticFrameDispatcher
 from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
 from calendar_pedagoga.semantic_atom.knowledge_builders import KNOWLEDGE_REGISTRY
+from calendar_pedagoga.semantic_atom.control_adapter import compose_control, project_control
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
 from calendar_pedagoga.semantic_atom.import_adapter import project_import
 from calendar_pedagoga.semantic_atom.match_adapter import (
@@ -20,6 +21,9 @@ from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
 from calendar_pedagoga.semantic_atom.models import (
     AtomizationResult,
     CandidateConfidence,
+    ControlBinding,
+    ControlKind,
+    ControlPiece,
     CoverageBinding,
     CoverageReport,
     FrameCandidate,
@@ -33,6 +37,7 @@ from calendar_pedagoga.semantic_atom.models import (
     Provenance,
     ScheduleRow,
     SemanticFrame,
+    ShadowControlReport,
     SourceAtom,
     SourceClause,
     SourceDelimiter,
@@ -53,6 +58,9 @@ __all__ = (
     "USE_SEMANTIC_ATOM_ENGINE",
     "AtomizationResult",
     "CandidateConfidence",
+    "ControlBinding",
+    "ControlKind",
+    "ControlPiece",
     "CoverageBinding",
     "CoverageReport",
     "DiffKind",
@@ -69,10 +77,13 @@ __all__ = (
     "Provenance",
     "ScheduleRow",
     "SemanticFrame",
+    "ShadowControlReport",
     "ACTION_REGISTRY",
     "KNOWLEDGE_REGISTRY",
     "atomize",
     "identity_fields",
+    "compose_control",
+    "project_control",
     "project_frames",
     "project_import",
     "project_match_bindings",
