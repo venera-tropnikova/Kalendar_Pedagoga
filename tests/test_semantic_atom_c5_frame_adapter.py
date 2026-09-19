@@ -13,7 +13,9 @@ from calendar_pedagoga.pipeline import _build_pipeline_lesson_content
 from calendar_pedagoga.semantic_atom import USE_SEMANTIC_ATOM_ENGINE
 from calendar_pedagoga.semantic_atom.adapter import project_passthrough_graph
 from calendar_pedagoga.semantic_atom.atom_adapter import atomize
+from calendar_pedagoga.semantic_atom.dispatcher import SemanticFrameDispatcher
 from calendar_pedagoga.semantic_atom.frame_adapter import (
+    C5_REGISTRY,
     LEXICAL_VIOLATION,
     UNSUPPORTED_ATOM_SHAPE,
     frame_adapter_calls,
@@ -346,7 +348,9 @@ def test_negative_shapes_stay_unresolved() -> None:
         "Рисуют деревья.",
     )
     for source in sources:
-        projection = project_frames(source)
+        projection = project_frames(
+            source, dispatcher=SemanticFrameDispatcher(C5_REGISTRY)
+        )
         assert projection.frames, source
         assert all(
             frame.status is ObjectStatus.UNRESOLVED for frame in projection.frames

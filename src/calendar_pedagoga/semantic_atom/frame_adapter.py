@@ -142,7 +142,7 @@ def _c5_candidate(
         source=atom.text,
         result=result,
         control=control,
-        extra_allowed=("его", "её", "ее", "их"),
+        extra_allowed=("его", "её", "ее", "их", "готовой", "работы"),
     )
     if violations:
         return _rejected(
@@ -252,6 +252,12 @@ def default_dispatcher() -> SemanticFrameDispatcher:
     return SemanticFrameDispatcher(C5_REGISTRY)
 
 
+def full_dispatcher() -> SemanticFrameDispatcher:
+    from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
+
+    return SemanticFrameDispatcher((*C5_REGISTRY, *ACTION_REGISTRY))
+
+
 def project_frames(
     source: object,
     row: _IdentityRow | None = None,
@@ -262,7 +268,7 @@ def project_frames(
     global _FRAME_ADAPTER_CALLS
     _FRAME_ADAPTER_CALLS += 1
     atoms = atomize(source)
-    active = dispatcher or default_dispatcher()
+    active = dispatcher or full_dispatcher()
     frames = []
     bindings = []
     candidates = []
