@@ -7,6 +7,7 @@ this package. The flag stays OFF until an explicit cutover commit.
 from calendar_pedagoga.semantic_atom.adapter import project_passthrough_graph
 from calendar_pedagoga.semantic_atom.atom_adapter import atomize, identity_fields
 from calendar_pedagoga.semantic_atom.flags import USE_SEMANTIC_ATOM_ENGINE
+from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
 from calendar_pedagoga.semantic_atom.import_adapter import project_import
 from calendar_pedagoga.semantic_atom.match_adapter import (
     project_match_bindings,
@@ -18,6 +19,7 @@ from calendar_pedagoga.semantic_atom.models import (
     CoverageBinding,
     CoverageReport,
     FrameKind,
+    FrameProjection,
     ImportStatus,
     MatchBinding,
     MatchConfidence,
@@ -49,6 +51,7 @@ __all__ = (
     "CoverageReport",
     "DiffKind",
     "FrameKind",
+    "FrameProjection",
     "IdentityDiff",
     "ImportStatus",
     "MatchBinding",
@@ -60,6 +63,7 @@ __all__ = (
     "SemanticFrame",
     "atomize",
     "identity_fields",
+    "project_frames",
     "project_import",
     "project_match_bindings",
     "project_schedule_rows",

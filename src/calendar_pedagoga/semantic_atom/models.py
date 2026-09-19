@@ -197,6 +197,35 @@ class AtomizationResult:
 
 
 @dataclass(frozen=True)
+class FrameProjection:
+    source: str
+    atoms: tuple[SourceAtom, ...]
+    frames: tuple[SemanticFrame, ...]
+    bindings: tuple[CoverageBinding, ...]
+    candidate_result: str
+    identity_type: str = ""
+    identity_result: str = ""
+    identity_control: str = ""
+    status: ObjectStatus = ObjectStatus.UNASSESSED
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> FrameProjection:
+        return cls(
+            source=str(data.get("source") or ""),
+            atoms=tuple(SourceAtom.from_dict(item) for item in data.get("atoms", ())),
+            frames=tuple(SemanticFrame.from_dict(item) for item in data.get("frames", ())),
+            bindings=tuple(
+                CoverageBinding.from_dict(item) for item in data.get("bindings", ())
+            ),
+            candidate_result=str(data.get("candidate_result") or ""),
+            identity_type=str(data.get("identity_type") or ""),
+            identity_result=str(data.get("identity_result") or ""),
+            identity_control=str(data.get("identity_control") or ""),
+            status=_enum(ObjectStatus, data.get("status") or ObjectStatus.UNASSESSED),
+        )
+
+
+@dataclass(frozen=True)
 class SemanticFrame:
     id: str
     span: SourceSpan
@@ -212,6 +241,8 @@ class SemanticFrame:
     coverage_status: str
     predicate: str = ""
     object: str = ""
+    complement: str = ""
+    reason: str = ""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SemanticFrame:
@@ -230,6 +261,8 @@ class SemanticFrame:
             coverage_status=str(data.get("coverage_status") or ""),
             predicate=str(data.get("predicate") or ""),
             object=str(data.get("object") or ""),
+            complement=str(data.get("complement") or ""),
+            reason=str(data.get("reason") or ""),
         )
 
 
