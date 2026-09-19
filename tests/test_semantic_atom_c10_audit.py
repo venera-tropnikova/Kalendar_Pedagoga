@@ -33,12 +33,14 @@ from calendar_pedagoga.semantic_atom.audit import (
 from calendar_pedagoga.semantic_atom.diff_adapter import (
     CONTROL_WITHOUT_BINDING,
     FRAME_WITHOUT_BINDING,
+    LEXICAL_VIOLATION,
     OLD_COVERED_SHADOW_UNRESOLVED,
     SEVERITY_ORDER,
     TITLE_ONLY,
     OldSnapshot,
     ShadowSnapshot,
     classify_snapshots,
+    coverage_text_match,
     severity,
     worst_kind,
 )
@@ -683,3 +685,187 @@ def test_live_audit_classifies_every_pair() -> None:
         assert report["c11_status"] == "BLOCKED"
     else:
         assert report["c11_status"] == "READY"
+
+
+def _catalog_shadow(atom_text: str, *, result: str = "", reason: str = "") -> ShadowSnapshot:
+    atom = _atom(atom_text)
+    proven = not reason
+    frame = _frame(
+        atom,
+        status=ObjectStatus.PROVEN if proven else ObjectStatus.UNRESOLVED,
+        result=result or atom_text,
+        reason=reason,
+    )
+    return ShadowSnapshot(
+        result=result or atom_text,
+        control="Педагогическое наблюдение на экскурсии.",
+        atoms=(atom,),
+        frames=(frame,),
+        bindings=(_binding(atom, frame),) if proven else (),
+    )
+
+
+def test_list_member_matches_full_catalog() -> None:
+    catalog = (
+        "Экскурсионные поездки: Стерлитамакские Шиханы, Нугушское водохранилище, "
+        "Хазинское урочище, Капова пещера"
+    )
+    member = "Экскурсионные поездки: Нугушское водохранилище"
+    assert coverage_text_match(member, catalog)
+    diff = classify_snapshots(
+        OldSnapshot(
+            result=member,
+            control="Педагогическое наблюдение на экскурсии.",
+            coverage=((member, "COVERED"),),
+            source=catalog,
+        ),
+        _catalog_shadow(catalog, result=member),
+    )
+    assert diff.kind is not DiffKind.NEW_LOSES
+
+
+def test_hyphen_variant_matches_catalog() -> None:
+    clause = (
+        "Экскурсии по бульвару С. Юлаева, к памятнику С. Юлаева, "
+        "по улицам Строителей, Первомайской"
+    )
+    catalog = (
+        "Экскурсии по бульвару С. Юлаева, к памятнику С. Юлаева, "
+        "по улицам - Строителей, Первомайской, Ленина"
+    )
+    assert coverage_text_match(clause, catalog)
+    assert coverage_text_match(clause, catalog.replace("-", "–"))
+    diff = classify_snapshots(
+        OldSnapshot(
+            result=clause,
+            control="Педагогическое наблюдение на экскурсии.",
+            coverage=((clause, "COVERED"),),
+            source=catalog,
+        ),
+        _catalog_shadow(catalog, result=clause),
+    )
+    assert diff.kind is not DiffKind.NEW_LOSES
+
+
+def test_unrelated_phrases_and_short_tokens_do_not_match() -> None:
+    catalog = "Экскурсии по улицам города, к памятникам, на предприятия и в учреждения города"
+    assert not coverage_text_match("Рисование деревьев.", "Коллективные приседания (50 раз).")
+    assert not coverage_text_match("Цели и задачи программы", catalog)
+    assert not coverage_text_match("на", catalog)
+    assert not coverage_text_match("игры", "Подвижные игры на свежем воздухе, эстафеты")
+    assert not coverage_text_match("и", catalog)
+    assert coverage_text_match("Торможение", "Выполняет торможение.")
+
+
+def test_coverage_match_is_deterministic_under_permutation() -> None:
+    member = "Экскурсионные поездки: Нугушское водохранилище"
+    first = "Экскурсионные поездки: Шиханы, Нугушское водохранилище, Капова пещера"
+    second = "Экскурсионные поездки: Капова пещера, Шиханы, Нугушское водохранилище"
+    assert coverage_text_match(member, first) is coverage_text_match(member, second)
+    assert coverage_text_match(member, first) is coverage_text_match(member, first)
+    left = classify_snapshots(
+        OldSnapshot(
+            result=member,
+            control="Педагогическое наблюдение на экскурсии.",
+            coverage=((member, "COVERED"),),
+            source=first,
+        ),
+        _catalog_shadow(first, result=member),
+    )
+    right = classify_snapshots(
+        OldSnapshot(
+            result=member,
+            control="Педагогическое наблюдение на экскурсии.",
+            coverage=((member, "COVERED"),),
+            source=second,
+        ),
+        _catalog_shadow(second, result=member),
+    )
+    assert left.kind is right.kind
+    assert left.kind is not DiffKind.NEW_LOSES
+
+
+def test_unresolved_covered_clause_stays_new_loses() -> None:
+    title = "Цели и задачи программы"
+    proven = _atom("Коллективные приседания (50 раз).", atom_id="atom:ofp")
+    unresolved = _atom(title, atom_id="atom:title")
+    proven_frame = _frame(
+        proven,
+        status=ObjectStatus.PROVEN,
+        result="Выполняет коллективные приседания (50 раз).",
+        frame_id="frame:ofp",
+    )
+    lost_frame = _frame(
+        unresolved,
+        status=ObjectStatus.UNRESOLVED,
+        reason="unsupported_atom_shape",
+        frame_id="frame:title",
+    )
+    diff = classify_snapshots(
+        OldSnapshot(
+            result="Характеризует цели и задачи программы.",
+            control="устный опрос: цели и задачи программы",
+            coverage=((title, "COVERED"),),
+            source=f"{title}. {proven.text}",
+        ),
+        ShadowSnapshot(
+            result="Выполняет коллективные приседания (50 раз).",
+            control="Педагогическое наблюдение за выполнением задания",
+            atoms=(proven, unresolved),
+            frames=(proven_frame, lost_frame),
+            bindings=(_binding(proven, proven_frame),),
+        ),
+    )
+    assert diff.kind is DiffKind.NEW_LOSES
+    assert OLD_COVERED_SHADOW_UNRESOLVED in diff.reasons
+
+
+def test_lexical_violation_still_blocks_coverage() -> None:
+    catalog = "Изготовление сувениров, масок, открыток к Новому году"
+    member = "Изготовление сувениров, масок"
+    atom = _atom(catalog)
+    frame = _frame(atom, status=ObjectStatus.UNRESOLVED, reason=LEXICAL_VIOLATION, result=catalog)
+    diff = classify_snapshots(
+        OldSnapshot(
+            result=member,
+            control="Просмотр рисунков.",
+            coverage=((member, "COVERED"),),
+            source=catalog,
+        ),
+        ShadowSnapshot(
+            result=catalog,
+            control="",
+            atoms=(atom,),
+            frames=(frame,),
+            bindings=(_binding(atom, frame),),
+        ),
+    )
+    assert diff.kind is DiffKind.NEW_LOSES
+    assert OLD_COVERED_SHADOW_UNRESOLVED in diff.reasons
+
+
+def test_missing_binding_still_blocks_coverage() -> None:
+    catalog = (
+        "Экскурсионные поездки: Стерлитамакские Шиханы, Нугушское водохранилище"
+    )
+    member = "Экскурсионные поездки: Нугушское водохранилище"
+    atom = _atom(catalog)
+    frame = _frame(atom, status=ObjectStatus.PROVEN, result=catalog, atom_id="")
+    diff = classify_snapshots(
+        OldSnapshot(
+            result=member,
+            control="Педагогическое наблюдение на экскурсии.",
+            coverage=((member, "COVERED"),),
+            source=catalog,
+        ),
+        ShadowSnapshot(
+            result=catalog,
+            control="Педагогическое наблюдение на экскурсии.",
+            atoms=(atom,),
+            frames=(frame,),
+            bindings=(),
+        ),
+    )
+    assert diff.kind is DiffKind.NEW_INVENTS
+    assert FRAME_WITHOUT_BINDING in diff.reasons
+    assert OLD_COVERED_SHADOW_UNRESOLVED in diff.reasons

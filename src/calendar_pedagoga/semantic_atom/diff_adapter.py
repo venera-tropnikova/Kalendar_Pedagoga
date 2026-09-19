@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable
 
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.control_adapter import compose_control
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
-from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
+from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations, tokenize
 from calendar_pedagoga.semantic_atom.models import ObjectStatus
 from calendar_pedagoga.semantic_atom.passthrough import DiffKind
 
@@ -32,6 +33,49 @@ SEVERITY_ORDER: tuple[DiffKind, ...] = (
 )
 
 _SEVERITY_INDEX = {kind: index for index, kind in enumerate(SEVERITY_ORDER)}
+_DASH_RE = re.compile(r"[\u002D\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+")
+_FUNCTION_WORDS = frozenset(
+    {
+        "а",
+        "без",
+        "в",
+        "во",
+        "да",
+        "для",
+        "до",
+        "за",
+        "и",
+        "из",
+        "или",
+        "их",
+        "к",
+        "ко",
+        "как",
+        "между",
+        "на",
+        "над",
+        "не",
+        "ни",
+        "о",
+        "об",
+        "обо",
+        "от",
+        "по",
+        "под",
+        "при",
+        "про",
+        "с",
+        "со",
+        "у",
+        "через",
+        "это",
+        "что",
+        "чтобы",
+    }
+)
+_MIN_TOKEN_LEN = 3
+_MIN_CONTENT_TOKENS = 2
+_MIN_SINGLE_TOKEN_LEN = 5
 
 
 @dataclass(frozen=True)
@@ -233,15 +277,13 @@ def _coverage_signals(old: OldSnapshot, shadow: ShadowSnapshot) -> tuple[bool, b
     lost = False
     for clause in old_covered:
         matched = [frame for frame in shadow.frames if _frame_matches_clause(clause, frame, shadow)]
-        if not matched or any(
-            getattr(frame, "status", None) is not ObjectStatus.PROVEN for frame in matched
-        ):
+        if not matched or any(_frame_blocks_coverage(frame, shadow) for frame in matched):
             lost = True
             break
     covered_more = False
     if not lost:
         if any(
-            getattr(frame, "status", None) is ObjectStatus.PROVEN
+            not _frame_blocks_coverage(frame, shadow)
             and _frame_matches_clause(clause, frame, shadow)
             for clause in old_holes
             for frame in shadow.frames
@@ -254,9 +296,73 @@ def _coverage_signals(old: OldSnapshot, shadow: ShadowSnapshot) -> tuple[bool, b
     return lost, covered_more
 
 
+def _frame_blocks_coverage(frame: object, shadow: ShadowSnapshot) -> bool:
+    if getattr(frame, "status", None) is not ObjectStatus.PROVEN:
+        return True
+    if canonicalize_text(getattr(frame, "reason", "")) == LEXICAL_VIOLATION:
+        return True
+    bound = {str(getattr(item, "frame_id", "") or "") for item in shadow.bindings}
+    atom_id = str(getattr(frame, "atom_id", "") or "")
+    frame_id = str(getattr(frame, "id", "") or "")
+    return not atom_id or frame_id not in bound
+
+
+def coverage_text_match(clause: str, candidate: str) -> bool:
+    """True when a covered clause is the same text, a dash variant, or a list member."""
+
+    left = _fold_match_text(clause)
+    right = _fold_match_text(candidate)
+    if not left or not right:
+        return False
+    if left.casefold() == right.casefold():
+        return True
+    if _safe_substring(left, right):
+        return True
+    return _clause_in_catalog(left, right)
+
+
+def _fold_match_text(value: str) -> str:
+    return canonicalize_text(_DASH_RE.sub(" ", value or ""))
+
+
+def _content_token_set(value: str) -> frozenset[str]:
+    tokens: set[str] = set()
+    for token in tokenize(_fold_match_text(value).casefold()):
+        if len(token) < _MIN_TOKEN_LEN or token in _FUNCTION_WORDS:
+            continue
+        tokens.add(token)
+    return frozenset(tokens)
+
+
+def _safe_substring(left: str, right: str) -> bool:
+    left_cf = left.casefold()
+    right_cf = right.casefold()
+    shorter, longer = (left_cf, right_cf) if len(left_cf) <= len(right_cf) else (right_cf, left_cf)
+    if shorter not in longer:
+        return False
+    tokens = _content_token_set(shorter)
+    if len(tokens) >= _MIN_CONTENT_TOKENS:
+        return True
+    if len(tokens) != 1:
+        return False
+    token = next(iter(tokens))
+    if len(token) < _MIN_SINGLE_TOKEN_LEN:
+        return False
+    return token in {item.casefold() for item in tokenize(longer)}
+
+
+def _clause_in_catalog(clause: str, candidate: str) -> bool:
+    if not any(mark in candidate for mark in (",", ":", " и ")):
+        return False
+    clause_toks = _content_token_set(clause)
+    candidate_toks = _content_token_set(candidate)
+    if len(clause_toks) < _MIN_CONTENT_TOKENS:
+        return False
+    return clause_toks <= candidate_toks and len(candidate_toks) > len(clause_toks)
+
+
 def _frame_matches_clause(clause: str, frame: object, shadow: ShadowSnapshot) -> bool:
-    needle = canonicalize_text(clause)
-    if not needle:
+    if not _fold_match_text(clause):
         return False
     atom_by_id = {getattr(atom, "id", ""): atom for atom in shadow.atoms}
     texts = [
@@ -267,11 +373,7 @@ def _frame_matches_clause(clause: str, frame: object, shadow: ShadowSnapshot) ->
     atom = atom_by_id.get(getattr(frame, "atom_id", ""))
     if atom is not None:
         texts.append(getattr(atom, "text", ""))
-    for raw in texts:
-        haystack = canonicalize_text(str(raw or ""))
-        if haystack and (needle == haystack or needle in haystack or haystack in needle):
-            return True
-    return False
+    return any(coverage_text_match(clause, str(raw or "")) for raw in texts)
 
 
 def _week_diff(
