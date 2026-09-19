@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from calendar_pedagoga import content_engine_v2 as _ce2
+from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.dispatcher import (
+    AMBIGUOUS_FRAME_CANDIDATES,
     NO_STRUCTURAL_MATCH,
     RegisteredBuilder,
 )
-from calendar_pedagoga.semantic_atom.frame_adapter import _c5_candidate
+from calendar_pedagoga.semantic_atom.frame_adapter import _c5_candidate, catalog_selector
 from calendar_pedagoga.semantic_atom.models import (
     CandidateConfidence,
     FrameCandidate,
@@ -18,12 +22,22 @@ from calendar_pedagoga.semantic_atom.models import (
 )
 
 MISSING_OBJECT = "unconfirmed_action_object"
+OPEN_ACTION_CATALOG = "open_action_catalog"
+_OPEN_CATALOG_RE = re.compile(
+    r"(?i)(?:\b(?:и\s+другие|и\s+прочее|и\s+прочие|и\s+др\.?|"
+    r"и\s+т\.?\s*д\.?|и\s+т\.?\s*п\.?|и\s+пр\.?)\b|\.\.\.|…)"
+)
+_DASH_RE = re.compile(r"[‐‑‒–—−\-]+")
 
 
 def _eligible_action_atom(text: str) -> bool:
     if not text or not str(text).strip():
         return False
     if _ce2._is_interrogative_clause(text):
+        return False
+    if _open_colon_catalog(text):
+        return False
+    if _selector_narrows_catalog(text):
         return False
     if _quoted_event_only(text):
         return False
@@ -225,6 +239,219 @@ def _exercise(text: str):
     return phrase, "упражнения", obj, cond
 
 
+def _open_colon_catalog(text: str) -> bool:
+    cleaned = _ce2._normalize_spaces(text)
+    if ":" not in cleaned:
+        return False
+    _head, tail = cleaned.split(":", 1)
+    return bool(_OPEN_CATALOG_RE.search(tail))
+
+
+def _action_catalog_head_ok(head: str) -> bool:
+    cleaned = _ce2._normalize_spaces(head).strip(" .")
+    if not cleaned or _ce2._is_interrogative_clause(cleaned):
+        return False
+    if _ce2._knowledge_clause_result(cleaned, theory_only=True):
+        return False
+    if _ce2._has_explicit_action_catalogue(f"{cleaned}: x, y"):
+        return True
+    token = _ce2._leading_activity_token(cleaned)
+    if not token:
+        return False
+    if _ce2._is_theory_knowledge_token(token) and not (
+        _ce2._is_explicit_action_head_token(token)
+        or _ce2._is_leading_form_activity(token)
+        or _ce2._is_action_head(token)
+    ):
+        return False
+    return bool(
+        _ce2._is_explicit_action_head_token(token)
+        or _ce2._is_action_head(token)
+        or _ce2._is_action_finite_token(token)
+        or _ce2._is_walk_word(token)
+        or _ce2._is_travel_word(token)
+        or _ce2._is_exercise_word(token)
+        or _ce2._is_leading_form_activity(token)
+        or _ce2._participation_lemma(token)
+        or _ce2._nominal_activity_lemma(token) in _ce2._NOMINAL_PERFORM_LEMMAS
+        or _ce2._nominal_activity_lemma(token) in {"помощь", "поездка"}
+        or _ce2._has_clause_initial_productive_head(cleaned)
+        or _ce2._starts_with_action_finite(cleaned)
+    )
+
+
+def _catalog_members(tail: str) -> list[str] | None:
+    cleaned = _ce2._normalize_spaces(tail).strip()
+    if not cleaned or _OPEN_CATALOG_RE.search(cleaned):
+        return None
+    if cleaned.endswith((",", ";", ":", "—", "–", "-", "…")):
+        return None
+    if cleaned.endswith("..."):
+        return None
+    if ";" in cleaned:
+        members = [part.strip(" .") for part in cleaned.split(";")]
+        if any(not part for part in members):
+            return None
+    else:
+        members = [
+            part.strip(" .")
+            for part in _ce2._split_coordinating_и_outside_quotes(cleaned)
+            if part.strip(" .")
+        ]
+    if len(members) < 2:
+        return None
+    if any(_ce2._FINITE_VERB_RE.search(part) or ":" in part for part in members):
+        return None
+    return members
+
+
+def _fold_span(text: str) -> str:
+    return canonicalize_text(_DASH_RE.sub("-", text)).casefold()
+
+
+def _selector_narrows_catalog(text: str) -> bool:
+    selector = catalog_selector()
+    if not selector.strip() or ":" not in text:
+        return False
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if ":" not in cleaned:
+        return False
+    head, tail = cleaned.split(":", 1)
+    head, tail = head.strip(), tail.strip()
+    if not _action_catalog_head_ok(head):
+        return False
+    members = _catalog_members(tail)
+    if members is None:
+        return False
+    selected = _select_catalog_members(head, members, selector)
+    return selected is not None and selected != members
+
+
+def _select_catalog_members(
+    head: str, members: list[str], selector: str
+) -> list[str] | None:
+    if not selector.strip():
+        return members
+    folded = _fold_span(selector)
+    hits = [
+        member
+        for member in members
+        if _fold_span(member) == folded or _fold_span(f"{head}: {member}") == folded
+    ]
+    if len(hits) == 1:
+        return hits
+    if len(hits) > 1:
+        return None
+    return members
+
+
+def _reconstruct_catalog_text(text: str):
+    for helper in (
+        _finite_produce,
+        _explicit_action,
+        _nominal_activity,
+        _closed_form,
+        _unconjugated_practice,
+        _care_and_repair,
+        _paired_shared_object,
+        _proven_finite,
+        _walk_travel,
+        _exercise,
+    ):
+        built = helper(text)
+        if built and built[0]:
+            return built
+    return None
+
+
+def _reconstruct_action_catalog(head: str, tail: str, original: str):
+    built = _reconstruct_catalog_text(original)
+    if built:
+        return built
+    built = _reconstruct_catalog_text(head)
+    if not built:
+        return None
+    phrase, action, obj, cond = built
+    phrase = _ce2._append_remainder(phrase, ": " + tail)
+    return phrase, action, obj or tail, cond
+
+
+def _reject_catalog(atom: SourceAtom, reason: str) -> FrameCandidate:
+    return FrameCandidate(
+        builder_id="action_catalog",
+        atom_id=atom.id,
+        span=atom.span,
+        source_fingerprint=atom.source_fingerprint,
+        proposed_kind=FrameKind.PROJECTED,
+        proposed_predicate="",
+        proposed_object="",
+        proposed_complement="",
+        proposed_result="",
+        proposed_control="",
+        structural_evidence=StructuralEvidence(notes=(reason,)),
+        lexical_check=LexicalCheckResult(passed=True),
+        confidence=CandidateConfidence.REJECTED,
+        rejection_reason=reason,
+    )
+
+
+def _action_catalog(atom: SourceAtom) -> FrameCandidate:
+    raw = _ce2._normalize_spaces(atom.text)
+    cleaned = raw.strip(" .")
+    if ":" not in cleaned:
+        return _no_match("action_catalog", atom)
+    if _ce2._is_interrogative_clause(cleaned):
+        return _no_match("action_catalog", atom)
+    if _ce2._knowledge_clause_result(cleaned, theory_only=True):
+        return _no_match("action_catalog", atom)
+    head, tail = cleaned.split(":", 1)
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail:
+        return _no_match("action_catalog", atom)
+    if not _action_catalog_head_ok(head):
+        return _no_match("action_catalog", atom)
+    if _open_colon_catalog(cleaned):
+        return _reject_catalog(atom, OPEN_ACTION_CATALOG)
+    members = _catalog_members(tail)
+    if members is None:
+        return _no_match("action_catalog", atom)
+    selected = _select_catalog_members(head, members, catalog_selector())
+    if selected is None:
+        return _reject_catalog(atom, AMBIGUOUS_FRAME_CANDIDATES)
+    if selected == members:
+        probe = raw
+        used_tail = tail
+    else:
+        used_tail = ", ".join(selected)
+        probe = _ce2._normalize_spaces(f"{head}: {used_tail}")
+    built = _reconstruct_action_catalog(head, used_tail, probe)
+    if not built:
+        return _no_match("action_catalog", atom)
+    _phrase, action, _obj, _comp = built
+    kind = _kind_for(probe, action, _phrase)
+    candidate = _c5_candidate(
+        "action_catalog", kind, lambda _text: built, atom
+    )
+    if candidate.is_valid and not _confirmed_object(candidate):
+        return FrameCandidate(
+            builder_id="action_catalog",
+            atom_id=atom.id,
+            span=atom.span,
+            source_fingerprint=atom.source_fingerprint,
+            proposed_kind=kind,
+            proposed_predicate=candidate.proposed_predicate,
+            proposed_object=candidate.proposed_object,
+            proposed_complement=candidate.proposed_complement,
+            proposed_result=candidate.proposed_result,
+            proposed_control=candidate.proposed_control,
+            structural_evidence=StructuralEvidence(notes=(MISSING_OBJECT,)),
+            lexical_check=candidate.lexical_check,
+            confidence=CandidateConfidence.REJECTED,
+            rejection_reason=MISSING_OBJECT,
+        )
+    return candidate
+
+
 def _register(builder_id: str, helper) -> RegisteredBuilder:
     def propose(atom: SourceAtom) -> FrameCandidate:
         return _propose(builder_id, helper, atom)
@@ -243,4 +470,5 @@ ACTION_REGISTRY: tuple[RegisteredBuilder, ...] = (
     _register("proven_finite", _proven_finite),
     _register("walk_travel", _walk_travel),
     _register("exercise", _exercise),
+    RegisteredBuilder(builder_id="action_catalog", propose=_action_catalog),
 )

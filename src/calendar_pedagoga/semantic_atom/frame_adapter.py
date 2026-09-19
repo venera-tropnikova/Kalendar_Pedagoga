@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Protocol
 
 from calendar_pedagoga import content_engine_v2 as _ce2
@@ -41,8 +42,26 @@ UNTRACED_COMPLEMENT = "untraced_object_or_complement"
 UNKNOWN_PREDICATE = "predicate_not_in_registry"
 
 _FRAME_ADAPTER_CALLS = 0
+_CATALOG_SELECTOR: ContextVar[str] = ContextVar(
+    "ce2_action_catalog_selector", default=""
+)
 
 _Helper = Callable[[str], tuple[str, str, str, str] | None]
+
+
+def catalog_selector() -> str:
+    """ScheduleRow title used only as a SOURCE-span member selector."""
+
+    return _CATALOG_SELECTOR.get()
+
+
+def _row_catalog_selector(row: object | None) -> str:
+    if row is None:
+        return ""
+    origin = getattr(row, "source", None)
+    if origin is not None:
+        return str(getattr(origin, "topic_title", "") or "")
+    return str(getattr(row, "topic_title", "") or "")
 
 
 class _IdentityRow(Protocol):
@@ -276,13 +295,20 @@ def project_frames(
     bindings = []
     candidates = []
     proven: list[str] = []
-    for index, atom in enumerate(atoms.atoms):
-        decision = active.dispatch_atom(atom, index)
-        frames.append(decision.frame)
-        bindings.append(decision.binding)
-        candidates.extend(decision.candidates)
-        if decision.frame.status is ObjectStatus.PROVEN and decision.frame.projected_result:
-            proven.append(decision.frame.projected_result.rstrip("."))
+    selector_token = _CATALOG_SELECTOR.set(_row_catalog_selector(row))
+    try:
+        for index, atom in enumerate(atoms.atoms):
+            decision = active.dispatch_atom(atom, index)
+            frames.append(decision.frame)
+            bindings.append(decision.binding)
+            candidates.extend(decision.candidates)
+            if (
+                decision.frame.status is ObjectStatus.PROVEN
+                and decision.frame.projected_result
+            ):
+                proven.append(decision.frame.projected_result.rstrip("."))
+    finally:
+        _CATALOG_SELECTOR.reset(selector_token)
     identity_type = identity_result = identity_control = ""
     if row is not None:
         identity_type, identity_result, identity_control = identity_fields(row)
