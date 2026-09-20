@@ -16,7 +16,8 @@ from calendar_pedagoga.semantic_atom.lexical import (
     shadow_lexical_violations,
     tokenize,
 )
-from calendar_pedagoga.semantic_atom.models import ObjectStatus
+from calendar_pedagoga.semantic_atom.models import FrameKind, ObjectStatus
+from calendar_pedagoga.semantic_atom.span_cover import action_cover_text
 from calendar_pedagoga.semantic_atom.passthrough import DiffKind
 
 ADAPTER_NAME = "diff_c10"
@@ -405,6 +406,8 @@ def _frame_cover_text(frame: object, shadow: ShadowSnapshot) -> str:
     if atom is None:
         return ""
     atom_text = str(getattr(atom, "text", "") or "")
+    if getattr(frame, "kind", None) is FrameKind.ACTION:
+        return action_cover_text(atom_text, frame)
     frame_span = getattr(frame, "span", None)
     atom_span = getattr(atom, "span", None)
     if frame_span is None or atom_span is None:

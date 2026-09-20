@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import replace
 from typing import Protocol
 
 from calendar_pedagoga import content_engine_v2 as _ce2
@@ -15,6 +16,7 @@ from calendar_pedagoga.semantic_atom.dispatcher import (
     UNSUPPORTED_ATOM_SHAPE,
     RegisteredBuilder,
 )
+from calendar_pedagoga.semantic_atom.span_cover import narrow_action_frame
 from calendar_pedagoga.semantic_atom.lexical import (
     TEMPLATE_FUNCTION_WORDS,
     _allowed_lemmas,
@@ -299,8 +301,14 @@ def project_frames(
     try:
         for index, atom in enumerate(atoms.atoms):
             decision = active.dispatch_atom(atom, index)
-            frames.append(decision.frame)
-            bindings.append(decision.binding)
+            frame = narrow_action_frame(atom, decision.frame)
+            binding = (
+                replace(decision.binding, span=frame.span)
+                if frame.span != decision.frame.span
+                else decision.binding
+            )
+            frames.append(frame)
+            bindings.append(binding)
             candidates.extend(decision.candidates)
             if (
                 decision.frame.status is ObjectStatus.PROVEN
