@@ -9,6 +9,7 @@ from calendar_pedagoga import content_engine_v2 as _ce2
 from calendar_pedagoga.morphology import (
     _nominal_parses,
     _object_head_indices,
+    inflect_heads_only,
     is_proven_acc,
     parse_head,
     repaired_heads_proven,
@@ -17,6 +18,7 @@ from calendar_pedagoga.semantic_atom.action_builders import (
     AMBIGUOUS_CATALOG_ASSIGNMENT,
     OPEN_TAIL_UNRESOLVED,
     _action_catalog_head_ok,
+    _open_list_member,
 )
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.dispatcher import (
@@ -443,6 +445,20 @@ def _coverage_span_for_part(atom: SourceAtom, part: str) -> SourceSpan | None:
     if _covers_full_atom(atom, located):
         return atom.span
     return _span_for_part(atom, located)
+
+
+def _coverage_span_for_parts(atom: SourceAtom, parts: list[str]) -> SourceSpan | None:
+    if not parts:
+        return None
+    located = [_coverage_span_for_part(atom, part) for part in parts]
+    found = [span for span in located if span is not None]
+    if not found:
+        return None
+    start = min(span.start for span in found)
+    end = max(span.end for span in found)
+    if start == atom.span.start and end == atom.span.end:
+        return atom.span
+    return replace(atom.span, start=start, end=end)
 
 
 def _catalog_phrase(head: str, used_tail: str, original: str | None = None) -> tuple[str, str, str, str] | None:
@@ -989,6 +1005,54 @@ def _bare_np_phrase(text: str) -> tuple[str, str, str, str] | None:
     return phrase, action, obj, cond
 
 
+def _bare_np_in_context(
+    part: str, anchor: tuple[str, str, str, str]
+) -> tuple[str, str, str, str] | None:
+    if _open_list_member(part) or _bare_np_blocked(part):
+        return None
+    built = _bare_np_phrase(part)
+    if built:
+        return built if built[1].casefold() == "характеризует" else None
+    if anchor[1].casefold() != "характеризует":
+        return None
+    inflected = inflect_heads_only(part) or _ce2._inflect_object_phrase(part, case="acc")
+    if not inflected:
+        return None
+    if not (
+        _characterize_object_proven(part, inflected)
+        or repaired_heads_proven(f"характеризует {inflected}")
+        or _object_heads_proven_acc(inflected)
+    ):
+        return None
+    for probe in (part, inflected):
+        checked = _ce2._characterize(probe)
+        if not (
+            checked[0]
+            and checked[1].casefold() == "характеризует"
+            and (
+                _characterize_object_proven(part, checked[2])
+                or _object_heads_proven_acc(checked[2])
+            )
+        ):
+            continue
+        return checked
+    tokens = part.split()
+    heads = _object_head_indices(tokens)
+    if not heads:
+        return None
+    head_built = _bare_np_phrase(tokens[heads[0]])
+    if not head_built or head_built[1].casefold() != "характеризует":
+        return None
+    phrase = _ce2._normalize_spaces(f"характеризует {inflected}")
+    if not (
+        repaired_heads_proven(phrase)
+        or _object_heads_proven_acc(inflected)
+        or _characterize_object_proven(part, inflected)
+    ):
+        return None
+    return phrase, "характеризует", inflected, ""
+
+
 def _propose_knowledge_bare_np(atom: SourceAtom) -> FrameCandidate:
     cleaned = _ce2._normalize_spaces(atom.text).strip(" .")
     if _bare_np_blocked(cleaned):
@@ -997,24 +1061,49 @@ def _propose_knowledge_bare_np(atom: SourceAtom) -> FrameCandidate:
     series = [part for part in parts if part] if len(parts) >= 2 else [cleaned]
     proven: list[tuple[str, tuple[str, str, str, str]]] = []
     for part in series:
-        if _bare_np_blocked(part):
+        if _open_list_member(part) or _bare_np_blocked(part):
             continue
         built = _bare_np_phrase(part)
         if built:
             proven.append((part, built))
+    if proven:
+        anchor = proven[0][1]
+        used = {item[0] for item in proven}
+        for part in series:
+            if part in used or _open_list_member(part) or _bare_np_blocked(part):
+                continue
+            checked = _bare_np_in_context(part, anchor)
+            if not checked or checked[1].casefold() != "характеризует":
+                continue
+            proven.append((part, checked))
+            used.add(part)
     if not proven:
         return _no_match("knowledge_bare_np", atom)
-    used_parts = [item[0] for item in proven]
-    if len(proven) == 1:
-        built = proven[0][1]
+    by_part = {item[0]: item[1] for item in proven}
+    contiguous: list[tuple[str, tuple[str, str, str, str]]] = []
+    run_broken = False
+    for part in series:
+        if _open_list_member(part):
+            run_broken = True
+            continue
+        item = by_part.get(part)
+        if item is None:
+            run_broken = True
+            continue
+        if not run_broken:
+            contiguous.append((part, item))
+    chosen = contiguous or proven[:1]
+    used_parts = [item[0] for item in chosen]
+    if len(chosen) == 1:
+        built = chosen[0][1]
     else:
-        predicates = {item[1][1].casefold() for item in proven}
+        predicates = {item[1][1].casefold() for item in chosen}
         if predicates != {"характеризует"}:
-            built = proven[0][1]
-            used_parts = [proven[0][0]]
+            built = chosen[0][1]
+            used_parts = [chosen[0][0]]
         else:
-            objects = [item[1][2] for item in proven if item[1][2].strip()]
-            conds = [item[1][3] for item in proven if item[1][3].strip()]
+            objects = [item[1][2] for item in chosen if item[1][2].strip()]
+            conds = [item[1][3] for item in chosen if item[1][3].strip()]
             obj = ", ".join(objects)
             cond = ", ".join(dict.fromkeys(conds))
             phrase = _ce2._normalize_spaces(
@@ -1026,10 +1115,15 @@ def _propose_knowledge_bare_np(atom: SourceAtom) -> FrameCandidate:
     )
     if not candidate.is_valid:
         return candidate
-    if len(used_parts) == len(series) and _covers_full_atom(atom, cleaned):
+    named = [part for part in series if not _open_list_member(part)]
+    if len(used_parts) == len(named) == len(series) and _covers_full_atom(atom, cleaned):
         return candidate
-    span = _coverage_span_for_part(atom, used_parts[0])
+    span = _coverage_span_for_parts(atom, used_parts)
     if span is None:
+        return _no_match("knowledge_bare_np", atom)
+    if (span.start, span.end) == (atom.span.start, atom.span.end) and len(
+        used_parts
+    ) < len(series):
         return _no_match("knowledge_bare_np", atom)
     return replace(candidate, span=span)
 

@@ -10,6 +10,11 @@ from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.lexical import _lemmas, tokenize
 from calendar_pedagoga.semantic_atom.models import FrameKind, ObjectStatus, SemanticFrame, SourceAtom
 
+_OPEN_TAIL_RE = re.compile(
+    r"(?i)(?:\b(?:и\s+другие|и\s+прочее|и\s+прочие|и\s+др\.?|"
+    r"и\s+т\.?\s*д\.?|и\s+т\.?\s*п\.?|и\s+пр\.?)\b|\.\.\.|…)"
+)
+
 _QUOTE_RE = re.compile(r"«([^»]+)»|\"([^\"]+)\"")
 _FUNCTION = frozenset(
     {
@@ -227,9 +232,38 @@ def narrow_action_frame(atom: SourceAtom, frame: SemanticFrame) -> SemanticFrame
         return frame
     parts = action_source_parts(atom.text)
     attested = [part for part in parts if part_attested_in_frame(part, frame)]
-    if not attested or len(attested) == len(parts):
+    open_tail = bool(_OPEN_TAIL_RE.search(atom.text or ""))
+    if not attested:
         return frame
-    span = _span_for_part(atom, attested[0])
-    if span is None:
+    if len(attested) == len(parts) and not open_tail:
         return frame
+    run: list[str] = []
+    for part in parts:
+        if _OPEN_TAIL_RE.search(part) or part.strip(" .") in {"...", "…"}:
+            break
+        if part in attested:
+            run.append(part)
+            continue
+        break
+    if not run:
+        run = [attested[0]]
+    start_span = _span_for_part(atom, run[0])
+    end_span = _span_for_part(atom, run[-1])
+    if start_span is None or end_span is None:
+        return frame
+    span = replace(atom.span, start=start_span.start, end=end_span.end)
+    if open_tail:
+        match = _OPEN_TAIL_RE.search(atom.text or "")
+        if match is not None:
+            cut = atom.span.start + match.start()
+            local = match.start()
+            while local > 0 and atom.text[local - 1] in " ,":
+                local -= 1
+                cut -= 1
+            if span.start < cut < span.end:
+                span = replace(span, end=cut)
+    if (span.start, span.end) == (atom.span.start, atom.span.end) and (
+        open_tail or len(run) < len(parts)
+    ):
+        return replace(frame, span=start_span)
     return replace(frame, span=span)

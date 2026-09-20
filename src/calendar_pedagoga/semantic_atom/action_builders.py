@@ -6,6 +6,12 @@ from dataclasses import replace
 import re
 
 from calendar_pedagoga import content_engine_v2 as _ce2
+from calendar_pedagoga.morphology import (
+    _nominal_parses,
+    _object_head_indices,
+    _restore,
+    parse_head,
+)
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.dispatcher import (
     AMBIGUOUS_FRAME_CANDIDATES,
@@ -142,6 +148,30 @@ _QUOTED_ONLY_RE = re.compile(r'^[«"„“][^«»"]+[»"“”]$')
 def _quoted_only_conjunct(part: str) -> bool:
     cleaned = _ce2._normalize_spaces(part).strip(" .")
     return bool(_QUOTED_ONLY_RE.fullmatch(cleaned))
+
+
+def _open_list_member(part: str) -> bool:
+    cleaned = _ce2._normalize_spaces(part).strip(" .,;:")
+    if not cleaned:
+        return True
+    if _OPEN_CATALOG_RE.search(part):
+        return True
+    folded = cleaned.casefold()
+    if folded in {
+        "другие",
+        "прочее",
+        "прочие",
+        "др",
+        "др.",
+        "т.д",
+        "т.д.",
+        "т.п",
+        "т.п.",
+        "...",
+        "…",
+    }:
+        return True
+    return "..." in part or "…" in part
 
 
 def _split_series_parts(text: str) -> list[str]:
@@ -315,13 +345,312 @@ def _merge_same_predicate_builts(
     return phrase, action, obj_joined, cond_joined
 
 
+def _is_proven_loct(word: str) -> bool:
+    nouns = [item for item in _nominal_parses(word) if item.tag.POS == "NOUN"]
+    if not nouns:
+        return False
+    best = max(nouns, key=lambda item: item.score)
+    if "loct" in best.tag:
+        return True
+    core = _ce2._token_core(word).casefold()
+    for item in nouns:
+        gram = {"loct"}
+        if item.tag.number:
+            gram.add(item.tag.number)
+        inflected = item.inflect(gram) or item.inflect({"loct"})
+        if inflected is not None and inflected.word.casefold() == core:
+            return True
+    return False
+
+
+def _inflect_loct_phrase(phrase: str) -> str | None:
+    tokens = _ce2._normalize_spaces(phrase).split()
+    if not tokens:
+        return None
+    heads = _object_head_indices(tokens)
+    if not heads:
+        return None
+    out = list(tokens)
+    for index in heads:
+        parsed = parse_head(tokens[index])
+        if parsed is None:
+            return None
+        gram = {"loct"}
+        if parsed.tag.number:
+            gram.add(parsed.tag.number)
+        inflected = parsed.inflect(gram) or parsed.inflect({"loct"})
+        if inflected is None:
+            return None
+        out[index] = _restore(tokens[index], inflected.word)
+    head = out[heads[0]]
+    if not _is_proven_loct(head):
+        return None
+    return _ce2._normalize_spaces(" ".join(out))
+
+
+def _governing_prep(built: tuple[str, str, str, str]) -> str:
+    rest = _ce2._drop_leading_verb(built[0]).strip(" .")
+    tokens = rest.split()
+    if tokens and _ce2._is_preposition(tokens[0]):
+        return tokens[0].casefold()
+    return ""
+
+
+def _other_activity_conjunct(part: str) -> bool:
+    if _eligible_action_atom(part):
+        return True
+    if _ce2._is_foreign_activity_np(part):
+        return True
+    if _ce2._leading_ways_catalogue(part):
+        return True
+    token = _ce2._leading_activity_token(part)
+    if token and _ce2._token_is_pupil_activity(token):
+        return True
+    tokens = _ce2._normalize_spaces(part).split()
+    if not tokens:
+        return True
+    head = token or tokens[0]
+    if _ce2._technique_catalogue_head(head):
+        return True
+    return bool(_ce2._conjugate_verbal_noun(head))
+
+
+def _part_used_in_built(part: str, built: tuple[str, str, str, str]) -> bool:
+    blob = _ce2._normalize_spaces(" ".join(built)).casefold()
+    cleaned = _ce2._normalize_spaces(part).strip(" .").casefold()
+    if cleaned and cleaned in blob:
+        return True
+    for token in cleaned.split():
+        core = _ce2._token_core(token).casefold()
+        if len(core) < 4 or core in {"при", "для", "без"}:
+            continue
+        if core in blob or core[:5] in blob:
+            return True
+    return False
+
+
+def _case_proven_in_built(built: tuple[str, str, str, str]) -> bool:
+    prep = _governing_prep(built)
+    rest = _ce2._drop_leading_verb(built[0]).strip(" .")
+    tokens = rest.split()
+    if prep:
+        if not tokens or tokens[0].casefold() != prep:
+            return False
+        obj_tokens = tokens[1:]
+        heads = _object_head_indices(obj_tokens)
+        if not heads:
+            return False
+        return _is_proven_loct(obj_tokens[heads[0]])
+    obj = (built[2] or rest).strip()
+    obj_tokens = obj.split()
+    heads = _object_head_indices(obj_tokens)
+    if not heads:
+        return False
+    from calendar_pedagoga.morphology import is_proven_acc
+
+    return is_proven_acc(obj_tokens[heads[0]])
+
+
+def _reconstruct_conjunct_in_context(
+    part: str, anchor: tuple[str, str, str, str]
+) -> str | None:
+    cleaned = _ce2._normalize_spaces(part).strip(" .")
+    if not cleaned:
+        return None
+    verb = _leading_built_predicate(anchor)
+    if not verb:
+        return None
+    noun = _ce2._VERB_TO_VERBAL_NOUN.get(verb, "")
+    prep = _governing_prep(anchor)
+    if prep:
+        governed = _inflect_loct_phrase(cleaned)
+        if not governed:
+            return None
+        if noun:
+            return f"{noun} {prep} {governed}"
+        return f"{verb} {prep} {governed}"
+    from calendar_pedagoga.morphology import inflect_heads_only
+
+    acc = inflect_heads_only(cleaned) or _ce2._inflect_object_phrase(cleaned, case="acc")
+    if not acc:
+        return None
+    if noun:
+        return f"{noun} {acc}"
+    return f"{verb} {acc}"
+
+
+def _tuple_from_phrase(phrase: str) -> tuple[str, str, str, str] | None:
+    cleaned = _ce2._normalize_spaces(phrase).strip(" .")
+    if not cleaned:
+        return None
+    verb = _ce2._leading_finite_verb(cleaned)
+    if not verb:
+        return None
+    rest = _ce2._drop_leading_verb(cleaned).strip(" .")
+    obj, cond = _ce2._split_object_and_conditions(rest)
+    action = _ce2._VERB_TO_VERBAL_NOUN.get(verb.casefold(), verb)
+    return cleaned, action, obj, cond
+
+
+def _same_construction(
+    anchor: tuple[str, str, str, str],
+    checked: tuple[str, str, str, str],
+    source: str,
+    reconstructed: str,
+) -> bool:
+    if _leading_built_predicate(anchor) != _leading_built_predicate(checked):
+        return False
+    if _governing_prep(anchor) != _governing_prep(checked):
+        return False
+    return _kind_for(source, anchor[1], anchor[0]) == _kind_for(
+        reconstructed, checked[1], checked[0]
+    )
+
+
+def _helper_check_conjunct(
+    helper, part: str, anchor: tuple[str, str, str, str], source: str
+):
+    reconstructed = _reconstruct_conjunct_in_context(part, anchor)
+    if not reconstructed:
+        return None
+    probes = [
+        helper(reconstructed),
+        _ce2._explicit_action_reconstruction(reconstructed, theory_only=False),
+        _ce2._closed_form_activity_result(reconstructed),
+        _tuple_from_phrase(_ce2._participatory_result_from_clause(reconstructed) or ""),
+    ]
+    for checked in probes:
+        if not checked or not checked[0].strip():
+            continue
+        if not _same_construction(anchor, checked, source, reconstructed):
+            continue
+        if not _case_proven_in_built(checked):
+            continue
+        return checked
+    return None
+
+
+def _can_anchor_list_member(part: str) -> bool:
+    if not _eligible_action_atom(part):
+        return False
+    token = _ce2._leading_activity_token(part)
+    return bool(
+        _ce2._starts_with_action_finite(part)
+        or _ce2._is_leading_form_activity(token)
+        or _ce2._is_walk_word(token)
+        or _ce2._is_travel_word(token)
+        or _ce2._is_exercise_word(token)
+        or _ce2._is_explicit_action_head_token(token)
+        or _ce2._participation_lemma(token)
+    )
+
+
+def _list_has_eligible_member(text: str) -> bool:
+    if _eligible_action_atom(text):
+        return True
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned:
+        return False
+    return any(
+        _can_anchor_list_member(part)
+        for part in _split_series_parts(cleaned)
+        if part and not _open_list_member(part)
+    )
+
+
+def _expand_homogeneous_list_conjuncts(helper, text: str, built_full):
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned:
+        return built_full
+    if ";" in cleaned and "(" not in cleaned:
+        return built_full
+    parts = _split_series_parts(cleaned)
+    if len(parts) < 2:
+        return built_full
+    series = _independent_activity_conjuncts(text)
+    proven: list[tuple[str, tuple[str, str, str, str]]] = []
+    if series:
+        for part in series:
+            built = helper(part)
+            if not built:
+                continue
+            if not _leading_built_predicate(built):
+                continue
+            proven.append((part, built))
+    if built_full and _finite_verb_count(built_full[0]) >= 2:
+        return built_full
+    if proven:
+        first_pred = _leading_built_predicate(proven[0][1])
+        proven = [
+            item for item in proven if _leading_built_predicate(item[1]) == first_pred
+        ]
+        anchor_part, anchor = proven[0]
+    elif built_full:
+        anchor = built_full
+        anchor_part = next(
+            (part for part in parts if _part_used_in_built(part, built_full)),
+            None,
+        )
+        if anchor_part is None:
+            return built_full
+        proven = [(anchor_part, anchor)]
+    else:
+        return None
+
+    used = {item[0] for item in proven}
+    if _has_own_complement(proven[0][0]):
+        chosen = [item[1] for item in proven]
+        if not chosen:
+            return built_full
+        if len(chosen) == 1:
+            return chosen[0]
+        return _merge_same_predicate_builts(chosen)
+    for part in parts:
+        if part in used or _open_list_member(part) or _quoted_only_conjunct(part):
+            continue
+        tokens = part.split()
+        if tokens and _ce2._is_preposition(tokens[0]):
+            continue
+        if _part_used_in_built(part, proven[0][1]):
+            continue
+        if _eligible_action_atom(part):
+            continue
+        if _other_activity_conjunct(part):
+            continue
+        checked = _helper_check_conjunct(helper, part, proven[0][1], text)
+        if not checked:
+            continue
+        proven.append((part, checked))
+        used.add(part)
+
+    by_part = {item[0]: item[1] for item in proven}
+    contiguous: list[tuple[str, str, str, str]] = []
+    run_broken = False
+    for part in parts:
+        if _open_list_member(part):
+            run_broken = True
+            continue
+        built = by_part.get(part)
+        if built is None:
+            run_broken = True
+            continue
+        if not run_broken:
+            contiguous.append(built)
+    chosen = contiguous
+    if not chosen:
+        return built_full
+    if len(chosen) == 1:
+        return chosen[0]
+    return _merge_same_predicate_builts(chosen)
+
+
 def _compatible_series_built(helper, text: str):
     if _bare_head_remainder_glue(helper, text):
         return None
     series = _independent_activity_conjuncts(text)
     built_full = helper(text)
     if not series:
-        return built_full
+        return _expand_homogeneous_list_conjuncts(helper, text, built_full)
     proven: list[tuple[str, str, tuple[str, str, str, str]]] = []
     for part in series:
         built = helper(part)
@@ -334,16 +663,15 @@ def _compatible_series_built(helper, text: str):
     if built_full and _finite_verb_count(built_full[0]) >= 2:
         return built_full
     if not proven:
-        return None
+        return _expand_homogeneous_list_conjuncts(helper, text, built_full)
     first_pred = proven[0][1]
     same = [item[2] for item in proven if item[1] == first_pred]
-    if len(same) == 1:
-        return same[0]
-    return _merge_same_predicate_builts(same)
+    merged = same[0] if len(same) == 1 else _merge_same_predicate_builts(same)
+    return _expand_homogeneous_list_conjuncts(helper, text, merged)
 
 
 def _propose(builder_id: str, helper, atom: SourceAtom) -> FrameCandidate:
-    if not _eligible_action_atom(atom.text):
+    if not _list_has_eligible_member(atom.text):
         return _no_match(builder_id, atom)
     built = _compatible_series_built(helper, atom.text)
     if not built:
