@@ -39,6 +39,8 @@ def _eligible_action_atom(text: str) -> bool:
         return False
     if _open_colon_catalog(text):
         return False
+    if _catalog_owned_atom(text):
+        return False
     if _generic_head_blocks_other_builders(text):
         return False
     if _selector_narrows_catalog(text):
@@ -413,16 +415,47 @@ def _reconstruct_catalog_text(text: str):
     return None
 
 
+def _catalog_owned_atom(text: str) -> bool:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if ":" not in cleaned:
+        return False
+    head, tail = cleaned.split(":", 1)
+    head, tail = head.strip(), tail.strip()
+    if not _action_catalog_head_ok(head):
+        return False
+    if _open_colon_catalog(cleaned):
+        return True
+    members = _catalog_members(tail)
+    return members is not None and len(members) >= 2
+
+
+def _tail_items_kept(phrase: str, tail: str) -> bool:
+    items = _split_catalog_members(tail) or _named_members_from_tail(tail)
+    if not items:
+        folded_tail = canonicalize_text(tail).casefold()
+        return bool(folded_tail) and folded_tail in canonicalize_text(phrase).casefold()
+    folded = canonicalize_text(phrase).casefold()
+    return all(canonicalize_text(item).casefold() in folded for item in items)
+
+
+def _with_catalog_tail(phrase: str, tail: str) -> str:
+    cleaned_tail = _ce2._normalize_spaces(tail).strip(" .")
+    if not cleaned_tail:
+        return phrase
+    if _tail_items_kept(phrase, cleaned_tail):
+        return phrase
+    return _ce2._append_remainder(phrase.rstrip(" ."), ": " + cleaned_tail)
+
+
 def _reconstruct_action_catalog(head: str, tail: str, original: str):
-    built = _reconstruct_catalog_text(original)
-    if built:
-        return built
-    built = _reconstruct_catalog_text(head)
+    built = _reconstruct_catalog_text(head) or _reconstruct_catalog_text(original)
     if not built:
         return None
     phrase, action, obj, cond = built
-    phrase = _ce2._append_remainder(phrase, ": " + tail)
-    return phrase, action, obj or tail, cond
+    phrase = _with_catalog_tail(phrase, tail)
+    if tail and not _tail_items_kept(obj or "", tail):
+        obj = tail
+    return phrase, action, obj, cond
 
 
 def _reject_catalog(atom: SourceAtom, reason: str) -> FrameCandidate:
