@@ -710,8 +710,85 @@ def _nominal_activity(text: str):
     return _ce2._nominal_activity_result(text)
 
 
+def _named_form_head(text: str) -> bool:
+    token = _ce2._leading_activity_token(text)
+    if not token:
+        return False
+    if _ce2._is_walk_word(token) or _ce2._is_travel_word(token) or _ce2._is_exercise_word(
+        token
+    ):
+        return False
+    return bool(
+        _ce2._is_leading_form_activity(token) or _ce2._participation_lemma(token)
+    )
+
+
+def _form_activity_from_ce2(text: str):
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned or ";" in cleaned:
+        return None
+    if _ce2._is_interrogative_clause(cleaned):
+        return None
+    if _ce2._knowledge_clause_result(cleaned, theory_only=True):
+        return None
+    if not _named_form_head(cleaned):
+        return None
+    phrase, action, obj, cond = _ce2._transform_segment(
+        cleaned, theory_only=False, full_source=cleaned
+    )
+    if not phrase or not _ce2._leading_finite_verb(phrase):
+        return None
+    if _ce2._knowledge_clause_result(phrase, theory_only=True):
+        return None
+    return phrase, action, obj, cond
+
+
+def _trailing_quoted_form_members(text: str) -> list[str]:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned or ";" in cleaned:
+        return []
+    if _OPEN_CATALOG_RE.search(cleaned):
+        return []
+    if not _named_form_head(cleaned):
+        return []
+    parts = _split_series_parts(cleaned)
+    if len(parts) < 2:
+        return []
+    rest = parts[1:]
+    if not rest or any(_open_list_member(part) for part in rest):
+        return []
+    members = []
+    for part in rest:
+        if not _quoted_only_conjunct(part) or not _is_closed_event_name(part):
+            return []
+        members.append(_ce2._normalize_spaces(part).strip(" ."))
+    return members
+
+
+def _keep_named_form_members(text: str, built):
+    if not built:
+        return built
+    members = _trailing_quoted_form_members(text)
+    if not members:
+        return built
+    phrase, action, obj, cond = built
+    folded = canonicalize_text(phrase).casefold()
+    missing = [
+        member
+        for member in members
+        if canonicalize_text(member).casefold() not in folded
+    ]
+    if not missing:
+        return built
+    extra = ", ".join(missing)
+    phrase = _ce2._normalize_spaces(f"{phrase.rstrip(' .')}, {extra}")
+    obj = _ce2._normalize_spaces(f"{(obj or '').rstrip(' .')}, {extra}".strip(" ,"))
+    return phrase, action, obj, cond
+
+
 def _closed_form(text: str):
-    return _ce2._closed_form_activity_result(text)
+    built = _ce2._closed_form_activity_result(text) or _form_activity_from_ce2(text)
+    return _keep_named_form_members(text, built)
 
 
 def _unconjugated_practice(text: str):
