@@ -307,7 +307,7 @@ def test_what_is_clause_stays_unresolved_in_c5() -> None:
 def test_permutation_and_neighbor_do_not_change_builder() -> None:
     locative = "Животные и птицы в рисунках детей."
     concept = "Понятия: ритм, темп, динамика."
-    leftover = "Памятники города."
+    leftover = "Флумбер."
     lone = project_frames(locative).frames[0]
     mixed = project_frames(f"{leftover} {locative} {concept}")
     swapped = project_frames(f"{concept} {locative} {leftover}")

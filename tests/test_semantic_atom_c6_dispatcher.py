@@ -310,7 +310,7 @@ def test_builder_exception_does_not_break_the_row() -> None:
 
 
 def test_neighbor_atoms_are_independent() -> None:
-    source = "Памятники города. Животные и птицы в рисунках детей."
+    source = "Флумбер. Животные и птицы в рисунках детей."
     projection = project_frames(source)
     assert [frame.status for frame in projection.frames] == [
         ObjectStatus.UNRESOLVED,

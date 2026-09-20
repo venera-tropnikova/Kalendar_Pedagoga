@@ -6,6 +6,13 @@ import re
 from dataclasses import replace
 
 from calendar_pedagoga import content_engine_v2 as _ce2
+from calendar_pedagoga.morphology import (
+    _nominal_parses,
+    _object_head_indices,
+    is_proven_acc,
+    parse_head,
+    repaired_heads_proven,
+)
 from calendar_pedagoga.semantic_atom.action_builders import (
     AMBIGUOUS_CATALOG_ASSIGNMENT,
     OPEN_TAIL_UNRESOLVED,
@@ -701,6 +708,332 @@ def _propose_knowledge_noun_phrase(atom: SourceAtom) -> FrameCandidate:
     return replace(candidate, span=span)
 
 
+def _has_theory_knowledge_token(text: str) -> bool:
+    return any(_ce2._is_theory_knowledge_token(token) for token in text.split())
+
+
+def _process_or_action_head(text: str) -> bool:
+    token = _ce2._leading_activity_token(text) or (text.split() or [""])[0]
+    if not token:
+        return False
+    lemma = _ce2._nominal_activity_lemma(token)
+    if lemma in _ce2._NOMINAL_PERFORM_LEMMAS or lemma in {"помощь", "поездка"}:
+        return True
+    if _ce2._conjugate_verbal_noun(token):
+        return True
+    if _ce2._looks_like_verbal_noun(token):
+        return True
+    return bool(
+        _ce2._is_explicit_action_head_token(token)
+        or _ce2._is_action_head(token)
+        or _ce2._is_walk_word(token)
+        or _ce2._is_travel_word(token)
+        or _ce2._is_exercise_word(token)
+        or _ce2._is_leading_form_activity(token)
+    )
+
+
+def _owned_by_c5_non_knowledge(text: str) -> bool:
+    return bool(
+        _ce2._symbol_clause_result(text) is not None
+        or _ce2._semiotic_object_result(text) is not None
+        or _ce2._locative_drawing_result(text) is not None
+        or _ce2._purpose_clause_result(text) is not None
+        or _ce2._concept_values_clause_result(text) is not None
+        or _ce2._classification_clause_result(text, theory_only=True) is not None
+    )
+
+
+def _calendar_observance_head(text: str) -> bool:
+    token = (text.split() or [""])[0]
+    core = _ce2._token_core(token).casefold()
+    lemma = _ce2._verbal_noun_lemma(token).casefold()
+    return core in {"день", "дня", "дни"} or lemma in {"день", "дня", "дни"}
+
+
+def _bare_np_blocked(text: str) -> bool:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned:
+        return True
+    if _is_knowledge_question(cleaned) or _definition_shape(cleaned):
+        return True
+    if _owned_by_c5_knowledge(cleaned) or _owned_by_c5_non_knowledge(cleaned):
+        return True
+    if _ce2._is_metadata_source_clause(cleaned):
+        return True
+    if _blocked_knowledge_atom(cleaned):
+        return True
+    if _action_helper_proves(cleaned):
+        return True
+    if _process_or_action_head(cleaned):
+        return True
+    if _calendar_observance_head(cleaned):
+        return True
+    if _has_theory_knowledge_token(cleaned):
+        return True
+    if _ce2._remainder_is_quoted_label(cleaned):
+        return True
+    return False
+
+
+def _comma_series_parts(text: str) -> list[str]:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned:
+        return []
+    if ";" in cleaned and "(" not in cleaned:
+        return [part.strip(" .") for part in cleaned.split(";") if part.strip(" .")]
+    parts: list[str] = []
+    buf: list[str] = []
+    quote_depth = 0
+    paren_depth = 0
+    index = 0
+    while index < len(cleaned):
+        ch = cleaned[index]
+        if ch == "(":
+            paren_depth += 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch == ")" and paren_depth:
+            paren_depth -= 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch in {"«", '"'} and quote_depth == 0:
+            quote_depth += 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch in {"»", '"'} and quote_depth:
+            quote_depth = max(0, quote_depth - 1)
+            buf.append(ch)
+            index += 1
+            continue
+        if paren_depth == 0 and quote_depth == 0 and cleaned[index : index + 2] == ", ":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            index += 2
+            continue
+        buf.append(ch)
+        index += 1
+    piece = "".join(buf).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
+def _has_following_genitive_owner(tokens: list[str], head_index: int) -> bool:
+    if head_index + 1 >= len(tokens):
+        return False
+    nxt = tokens[head_index + 1]
+    if _ce2._is_preposition(nxt):
+        return False
+    parsed = parse_head(nxt)
+    return bool(parsed is not None and parsed.tag.case == "gent")
+
+
+def _source_head_number_proven(source: str) -> bool:
+    """Reject heads whose singular/plural topic reading is morphologically ambiguous."""
+
+    tokens = source.split()
+    heads = _object_head_indices(tokens)
+    if not heads:
+        return False
+    head_index = heads[0]
+    head = tokens[head_index]
+    nouns = [item for item in _nominal_parses(head) if item.tag.POS == "NOUN"]
+    if not nouns:
+        return True
+    scores = {round(item.score, 6) for item in nouns}
+    best = max(item.score for item in nouns)
+    competitive = [item for item in nouns if item.score >= best * 0.4]
+    topic = [item for item in competitive if item.tag.case in {"nomn", "accs"}]
+    if not topic:
+        plur_topic = [
+            item
+            for item in nouns
+            if item.tag.number == "plur" and item.tag.case in {"nomn", "accs"}
+        ]
+        if (
+            plur_topic
+            and max(item.score for item in plur_topic) >= best * 0.15
+            and _has_following_genitive_owner(tokens, head_index)
+        ):
+            return True
+        return len(scores) == 1 and _ce2._characterize_head_ok(_ce2._token_core(head))
+    numbers = {item.tag.number for item in topic if item.tag.number}
+    if len(numbers) == 1:
+        return True
+    if len(scores) == 1:
+        return _ce2._characterize_head_ok(_ce2._token_core(head))
+    return False
+
+
+def _clear_animate_nominative(token: str) -> bool:
+    nouns = [item for item in _nominal_parses(token) if item.tag.POS == "NOUN"]
+    if not nouns:
+        return False
+    best = max(nouns, key=lambda item: item.score)
+    if best.tag.animacy != "anim" or "nomn" not in best.tag or "accs" in best.tag:
+        return False
+    best_score = round(best.score, 6)
+    tied = [item for item in nouns if round(item.score, 6) == best_score]
+    if len(tied) > 1:
+        return False
+    others = [item.score for item in nouns if round(item.score, 6) < best_score]
+    if not others:
+        return True
+    return best.score >= max(others) * 2.0
+
+
+def _object_heads_proven_acc(obj: str) -> bool:
+    tokens = obj.split()
+    if not tokens:
+        return False
+    if repaired_heads_proven(f"характеризует {obj}"):
+        return True
+    heads = _object_head_indices(tokens)
+    head_token = tokens[heads[0]] if heads else tokens[0]
+    if _clear_animate_nominative(head_token):
+        return False
+    parsed = parse_head(head_token)
+    if parsed is not None and parsed.tag.case in {"datv", "ablt", "loct"}:
+        return False
+    if (
+        parsed is not None
+        and parsed.tag.case == "gent"
+        and parsed.tag.number == "sing"
+        and "accs" not in parsed.tag
+        and parsed.tag.animacy != "anim"
+    ):
+        return False
+    if (
+        parsed is not None
+        and parsed.tag.POS == "NOUN"
+        and "accs" in parsed.tag
+        and is_proven_acc(head_token)
+    ):
+        return True
+    core = _ce2._token_core(head_token)
+    if _ce2._proven_feminine_acc(core) is not None and core.casefold() != head_token.casefold():
+        return is_proven_acc(head_token) or head_token.casefold().endswith(("у", "ю"))
+    if _ce2._characterize_head_ok(core):
+        return not _clear_animate_nominative(head_token)
+    if heads and all(is_proven_acc(tokens[index]) for index in heads):
+        return not any(_clear_animate_nominative(tokens[index]) for index in heads)
+    # Leading noun already in proven accusative; CE2 kept genitive dependents.
+    first = parse_head(tokens[0])
+    return bool(
+        first is not None
+        and first.tag.POS == "NOUN"
+        and "accs" in first.tag
+        and is_proven_acc(tokens[0])
+    )
+
+
+def _characterize_object_proven(source: str, obj: str) -> bool:
+    src_tokens = source.split()
+    obj_tokens = obj.split()
+    if not src_tokens or not obj_tokens:
+        return False
+    src_heads = _object_head_indices(src_tokens)
+    obj_heads = _object_head_indices(obj_tokens)
+    if not src_heads or not obj_heads:
+        return False
+    src_head = src_tokens[src_heads[0]]
+    obj_head = obj_tokens[obj_heads[0]]
+    src_core = _ce2._token_core(src_head).casefold()
+    obj_core = _ce2._token_core(obj_head).casefold()
+    if src_core != obj_core:
+        if not (
+            is_proven_acc(obj_head)
+            or (
+                obj_head.casefold().endswith(("у", "ю"))
+                and _ce2._proven_feminine_acc(src_core) is not None
+            )
+        ):
+            return False
+        src_parsed = parse_head(src_head)
+        obj_parsed = parse_head(obj_head)
+        if (
+            src_parsed is not None
+            and obj_parsed is not None
+            and src_parsed.tag.number
+            and obj_parsed.tag.number
+            and src_parsed.tag.number != obj_parsed.tag.number
+        ):
+            return False
+    if any(_clear_animate_nominative(obj_tokens[index]) for index in obj_heads):
+        return False
+    return _object_heads_proven_acc(obj)
+
+
+def _bare_np_phrase(text: str) -> tuple[str, str, str, str] | None:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or _bare_np_blocked(cleaned):
+        return None
+    if len(_comma_series_parts(cleaned)) >= 2:
+        return None
+    if not _source_head_number_proven(cleaned):
+        return None
+    phrase, action, obj, cond = _ce2._characterize(cleaned)
+    if not (
+        phrase
+        and action.casefold() == "характеризует"
+        and obj.strip()
+        and _characterize_object_proven(cleaned, obj)
+    ):
+        return None
+    return phrase, action, obj, cond
+
+
+def _propose_knowledge_bare_np(atom: SourceAtom) -> FrameCandidate:
+    cleaned = _ce2._normalize_spaces(atom.text).strip(" .")
+    if _bare_np_blocked(cleaned):
+        return _no_match("knowledge_bare_np", atom)
+    parts = _comma_series_parts(cleaned)
+    series = [part for part in parts if part] if len(parts) >= 2 else [cleaned]
+    proven: list[tuple[str, tuple[str, str, str, str]]] = []
+    for part in series:
+        if _bare_np_blocked(part):
+            continue
+        built = _bare_np_phrase(part)
+        if built:
+            proven.append((part, built))
+    if not proven:
+        return _no_match("knowledge_bare_np", atom)
+    used_parts = [item[0] for item in proven]
+    if len(proven) == 1:
+        built = proven[0][1]
+    else:
+        predicates = {item[1][1].casefold() for item in proven}
+        if predicates != {"характеризует"}:
+            built = proven[0][1]
+            used_parts = [proven[0][0]]
+        else:
+            objects = [item[1][2] for item in proven if item[1][2].strip()]
+            conds = [item[1][3] for item in proven if item[1][3].strip()]
+            obj = ", ".join(objects)
+            cond = ", ".join(dict.fromkeys(conds))
+            phrase = _ce2._normalize_spaces(
+                f"характеризует {obj} {cond}".strip()
+            )
+            built = (phrase, "характеризует", obj, cond)
+    candidate = _c5_candidate(
+        "knowledge_bare_np", FrameKind.KNOWLEDGE, lambda _text: built, atom
+    )
+    if not candidate.is_valid:
+        return candidate
+    if len(used_parts) == len(series) and _covers_full_atom(atom, cleaned):
+        return candidate
+    span = _coverage_span_for_part(atom, used_parts[0])
+    if span is None:
+        return _no_match("knowledge_bare_np", atom)
+    return replace(candidate, span=span)
+
+
 def _register(builder_id: str, helper_name: str, kind: FrameKind) -> RegisteredBuilder:
     def propose(atom: SourceAtom) -> FrameCandidate:
         helper = globals()[helper_name]
@@ -714,4 +1047,5 @@ KNOWLEDGE_REGISTRY: tuple[RegisteredBuilder, ...] = (
     _register("knowledge_definition", "_definition", FrameKind.DEFINITION),
     RegisteredBuilder(builder_id="knowledge_catalog", propose=_propose_knowledge_catalog),
     RegisteredBuilder(builder_id="knowledge_noun_phrase", propose=_propose_knowledge_noun_phrase),
+    RegisteredBuilder(builder_id="knowledge_bare_np", propose=_propose_knowledge_bare_np),
 )
