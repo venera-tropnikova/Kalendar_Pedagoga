@@ -193,6 +193,7 @@ def _atom_ranges(text: str, mask: list[bool]) -> list[tuple[int, int]]:
             ends.append(index)
         elif char == ";" and not _semicolon_inside_colon_list(text, mask, ends, index):
             ends.append(index)
+            ends.append(index + 1)
     if not ends or ends[-1] != length:
         ends.append(length)
 
@@ -216,18 +217,57 @@ def _atom_ranges(text: str, mask: list[bool]) -> list[tuple[int, int]]:
     return ranges
 
 
+_CATALOG_MEMBER_QUOTE_RE = re.compile(r"«[^»]+»|\"[^\"]+\"|„[^“]+“")
+_CATALOG_GLOSS_PREFIXES = ("их ", "его ", "её ", "ее ")
+
+
 def _semicolon_inside_colon_list(
     text: str,
     mask: list[bool],
     ends: list[int],
     index: int,
 ) -> bool:
-    """Keep ``NP: A; B; C`` as one atom; still split bare clause semicolons."""
+    """Keep closed ``Head: item1; item2``; split a later independent unit."""
 
     start = ends[-1] if ends else 0
-    return any(
-        text[cursor] == ":" and not mask[cursor] for cursor in range(start, index)
-    )
+    if not any(text[cursor] == ":" and not mask[cursor] for cursor in range(start, index)):
+        return False
+    return _is_colon_catalog_member(_right_semicolon_fragment(text, mask, index))
+
+
+def _right_semicolon_fragment(text: str, mask: list[bool], index: int) -> str:
+    length = len(text)
+    start = index + 1
+    while start < length and text[start].isspace():
+        start += 1
+    stop = start
+    while stop < length:
+        if mask[stop]:
+            stop += 1
+            continue
+        char = text[stop]
+        nxt = text[stop + 1] if stop + 1 < length else ""
+        if char in ".!?" and (nxt == "" or nxt.isspace()):
+            break
+        if char in ";\n":
+            break
+        stop += 1
+    return text[start:stop]
+
+
+def _is_colon_catalog_member(fragment: str) -> bool:
+    cleaned = " ".join(fragment.split()).strip(" .")
+    if not cleaned:
+        return False
+    leftover = _CATALOG_MEMBER_QUOTE_RE.sub(" ", cleaned)
+    leftover = " ".join(leftover.split()).strip(" ,.;:—–-")
+    if _CATALOG_MEMBER_QUOTE_RE.search(cleaned) and not leftover:
+        return True
+    folded = cleaned.casefold()
+    if folded.startswith(_CATALOG_GLOSS_PREFIXES):
+        return True
+    tokens = cleaned.split()
+    return 1 <= len(tokens) <= 4
 
 
 def _delimiter_only(fragment: str) -> bool:
