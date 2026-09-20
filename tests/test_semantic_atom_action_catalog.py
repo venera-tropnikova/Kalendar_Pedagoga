@@ -7,10 +7,7 @@ from types import SimpleNamespace
 
 from calendar_pedagoga.content_engine_v2 import derive_fields_v2
 from calendar_pedagoga.semantic_atom import USE_SEMANTIC_ATOM_ENGINE
-from calendar_pedagoga.semantic_atom.action_builders import (
-    ACTION_REGISTRY,
-    OPEN_ACTION_CATALOG,
-)
+from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
 from calendar_pedagoga.semantic_atom.control_adapter import compose_control
 from calendar_pedagoga.semantic_atom.dispatcher import (
     AMBIGUOUS_FRAME_CANDIDATES,
@@ -119,12 +116,10 @@ def test_does_not_generate_catalog_from_title() -> None:
     assert projection.candidate_result == ""
 
 
-def test_knowledge_role_and_open_catalog_are_not_action() -> None:
+def test_knowledge_role_and_unclear_head_are_not_action() -> None:
     sources = (
         "Птицы края: флумберы, квиллинги.",
         "Ответственные: за флумберы, за квиллинги.",
-        "Экскурсионные поездки: озеро Тишь, мыс Ветер и другие.",
-        "Игры на поляне: «Зигзаг», «Тихий шепот» и т. д.",
         "Тема занятия: флумберы, квиллинги.",
     )
     for source in sources:
@@ -132,15 +127,6 @@ def test_knowledge_role_and_open_catalog_are_not_action() -> None:
         assert projection.frames[0].kind is not FrameKind.ACTION or (
             projection.frames[0].status is ObjectStatus.UNRESOLVED
         ), source
-        if "и другие" in source or "т. д." in source:
-            assert projection.frames[0].status is ObjectStatus.UNRESOLVED, source
-            assert projection.candidate_result == ""
-            reasons = {
-                item.rejection_reason
-                for item in projection.candidates
-                if item.builder_id == "action_catalog"
-            }
-            assert OPEN_ACTION_CATALOG in reasons
 
 
 def test_type_hours_program_week_are_not_evidence() -> None:

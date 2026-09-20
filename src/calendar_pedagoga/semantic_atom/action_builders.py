@@ -23,6 +23,8 @@ from calendar_pedagoga.semantic_atom.models import (
 
 MISSING_OBJECT = "unconfirmed_action_object"
 OPEN_ACTION_CATALOG = "open_action_catalog"
+AMBIGUOUS_CATALOG_ASSIGNMENT = "ambiguous_catalog_assignment"
+OPEN_TAIL_UNRESOLVED = "open_tail_unresolved"
 _OPEN_CATALOG_RE = re.compile(
     r"(?i)(?:\b(?:и\s+другие|и\s+прочее|и\s+прочие|и\s+др\.?|"
     r"и\s+т\.?\s*д\.?|и\s+т\.?\s*п\.?|и\s+пр\.?)\b|\.\.\.|…)"
@@ -36,6 +38,8 @@ def _eligible_action_atom(text: str) -> bool:
     if _ce2._is_interrogative_clause(text):
         return False
     if _open_colon_catalog(text):
+        return False
+    if _generic_head_blocks_other_builders(text):
         return False
     if _selector_narrows_catalog(text):
         return False
@@ -280,13 +284,16 @@ def _action_catalog_head_ok(head: str) -> bool:
     )
 
 
-def _catalog_members(tail: str) -> list[str] | None:
+def _strip_open_catalog_marker(tail: str) -> str:
+    cleaned = _OPEN_CATALOG_RE.sub("", _ce2._normalize_spaces(tail))
+    return cleaned.strip(" ,.;…")
+
+
+def _split_catalog_members(tail: str) -> list[str] | None:
     cleaned = _ce2._normalize_spaces(tail).strip()
-    if not cleaned or _OPEN_CATALOG_RE.search(cleaned):
-        return None
-    if cleaned.endswith((",", ";", ":", "—", "–", "-", "…")):
-        return None
-    if cleaned.endswith("..."):
+    if not cleaned:
+        return []
+    if cleaned.endswith((",", ";", ":", "—", "–", "-")):
         return None
     if ";" in cleaned:
         members = [part.strip(" .") for part in cleaned.split(";")]
@@ -298,11 +305,51 @@ def _catalog_members(tail: str) -> list[str] | None:
             for part in _ce2._split_coordinating_и_outside_quotes(cleaned)
             if part.strip(" .")
         ]
-    if len(members) < 2:
-        return None
     if any(_ce2._FINITE_VERB_RE.search(part) or ":" in part for part in members):
         return None
     return members
+
+
+def _catalog_members(tail: str) -> list[str] | None:
+    cleaned = _ce2._normalize_spaces(tail).strip()
+    if not cleaned or _OPEN_CATALOG_RE.search(cleaned):
+        return None
+    if cleaned.endswith("..."):
+        return None
+    members = _split_catalog_members(cleaned)
+    if members is None or len(members) < 2:
+        return None
+    return members
+
+
+def _named_members_from_tail(tail: str) -> list[str]:
+    stripped = _strip_open_catalog_marker(tail)
+    members = _split_catalog_members(stripped) if stripped else []
+    return members or []
+
+
+def _is_generic_head_selector(head: str, selector: str) -> bool:
+    if not selector.strip():
+        return False
+    folded = _fold_span(selector)
+    return folded == _fold_span(head) or folded == _fold_span(f"{head}:")
+
+
+def _generic_head_blocks_other_builders(text: str) -> bool:
+    selector = catalog_selector()
+    if not selector.strip():
+        return False
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if ":" not in cleaned:
+        return False
+    head, tail = cleaned.split(":", 1)
+    head, tail = head.strip(), tail.strip()
+    if not _action_catalog_head_ok(head):
+        return False
+    if not _is_generic_head_selector(head, selector):
+        return False
+    members = _catalog_members(tail) or _named_members_from_tail(tail)
+    return len(members) >= 2 or _open_colon_catalog(cleaned)
 
 
 def _fold_span(text: str) -> str:
@@ -341,6 +388,8 @@ def _select_catalog_members(
     if len(hits) == 1:
         return hits
     if len(hits) > 1:
+        return None
+    if _is_generic_head_selector(head, selector):
         return None
     return members
 
@@ -410,28 +459,86 @@ def _action_catalog(atom: SourceAtom) -> FrameCandidate:
         return _no_match("action_catalog", atom)
     if not _action_catalog_head_ok(head):
         return _no_match("action_catalog", atom)
-    if _open_colon_catalog(cleaned):
-        return _reject_catalog(atom, OPEN_ACTION_CATALOG)
+    selector = catalog_selector()
+    opened = _open_colon_catalog(cleaned)
     members = _catalog_members(tail)
+    named = members if members is not None else _named_members_from_tail(tail)
+    if opened:
+        return _open_action_catalog(atom, head, named, selector)
     if members is None:
         return _no_match("action_catalog", atom)
-    selected = _select_catalog_members(head, members, catalog_selector())
+    selected = _select_catalog_members(head, members, selector)
     if selected is None:
-        return _reject_catalog(atom, AMBIGUOUS_FRAME_CANDIDATES)
+        reason = (
+            AMBIGUOUS_CATALOG_ASSIGNMENT
+            if _is_generic_head_selector(head, selector)
+            else AMBIGUOUS_FRAME_CANDIDATES
+        )
+        return _reject_catalog(atom, reason)
     if selected == members:
         probe = raw
         used_tail = tail
     else:
         used_tail = ", ".join(selected)
         probe = _ce2._normalize_spaces(f"{head}: {used_tail}")
+    return _emit_catalog_frame(atom, head, used_tail, probe)
+
+
+def _open_action_catalog(
+    atom: SourceAtom,
+    head: str,
+    named: list[str],
+    selector: str,
+) -> FrameCandidate:
+    selected = _select_catalog_members(head, named, selector) if named else None
+    if named and selected is None and _is_generic_head_selector(head, selector):
+        built = _reconstruct_catalog_text(head)
+        if not built:
+            return _reject_catalog(atom, AMBIGUOUS_CATALOG_ASSIGNMENT)
+        return _emit_built_catalog(atom, head, built, notes=(OPEN_TAIL_UNRESOLVED,))
+    if named and selected is None:
+        return _reject_catalog(atom, AMBIGUOUS_CATALOG_ASSIGNMENT)
+    if named and selected and selected != named:
+        used_tail = ", ".join(selected)
+        probe = _ce2._normalize_spaces(f"{head}: {used_tail}")
+        return _emit_catalog_frame(
+            atom, head, used_tail, probe, notes=(OPEN_TAIL_UNRESOLVED,)
+        )
+    if named and not selector.strip():
+        used_tail = ", ".join(named)
+        probe = _ce2._normalize_spaces(f"{head}: {used_tail}")
+        return _emit_catalog_frame(
+            atom, head, used_tail, probe, notes=(OPEN_TAIL_UNRESOLVED,)
+        )
+    built = _reconstruct_catalog_text(head)
+    if not built:
+        return _reject_catalog(atom, OPEN_ACTION_CATALOG)
+    return _emit_built_catalog(atom, head, built, notes=(OPEN_TAIL_UNRESOLVED,))
+
+
+def _emit_catalog_frame(
+    atom: SourceAtom,
+    head: str,
+    used_tail: str,
+    probe: str,
+    notes: tuple[str, ...] = (),
+) -> FrameCandidate:
     built = _reconstruct_action_catalog(head, used_tail, probe)
     if not built:
         return _no_match("action_catalog", atom)
+    return _emit_built_catalog(atom, probe, built, notes=notes)
+
+
+def _emit_built_catalog(
+    atom: SourceAtom,
+    probe: str,
+    built: tuple[str, str, str, str],
+    notes: tuple[str, ...] = (),
+) -> FrameCandidate:
     _phrase, action, _obj, _comp = built
     kind = _kind_for(probe, action, _phrase)
-    candidate = _c5_candidate(
-        "action_catalog", kind, lambda _text: built, atom
-    )
+    candidate = _c5_candidate("action_catalog", kind, lambda _text: built, atom)
+    extra = notes
     if candidate.is_valid and not _confirmed_object(candidate):
         return FrameCandidate(
             builder_id="action_catalog",
@@ -444,10 +551,29 @@ def _action_catalog(atom: SourceAtom) -> FrameCandidate:
             proposed_complement=candidate.proposed_complement,
             proposed_result=candidate.proposed_result,
             proposed_control=candidate.proposed_control,
-            structural_evidence=StructuralEvidence(notes=(MISSING_OBJECT,)),
+            structural_evidence=StructuralEvidence(notes=(MISSING_OBJECT, *extra)),
             lexical_check=candidate.lexical_check,
             confidence=CandidateConfidence.REJECTED,
             rejection_reason=MISSING_OBJECT,
+        )
+    if extra and candidate.is_valid:
+        return FrameCandidate(
+            builder_id=candidate.builder_id,
+            atom_id=candidate.atom_id,
+            span=candidate.span,
+            source_fingerprint=candidate.source_fingerprint,
+            proposed_kind=candidate.proposed_kind,
+            proposed_predicate=candidate.proposed_predicate,
+            proposed_object=candidate.proposed_object,
+            proposed_complement=candidate.proposed_complement,
+            proposed_result=candidate.proposed_result,
+            proposed_control=candidate.proposed_control,
+            structural_evidence=StructuralEvidence(
+                notes=(*candidate.structural_evidence.notes, *extra)
+            ),
+            lexical_check=candidate.lexical_check,
+            confidence=candidate.confidence,
+            rejection_reason=candidate.rejection_reason,
         )
     return candidate
 
