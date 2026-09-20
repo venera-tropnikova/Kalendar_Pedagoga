@@ -296,7 +296,6 @@ def project_frames(
     frames = []
     bindings = []
     candidates = []
-    proven: list[str] = []
     selector_token = _CATALOG_SELECTOR.set(_row_catalog_selector(row))
     try:
         for index, atom in enumerate(atoms.atoms):
@@ -310,11 +309,16 @@ def project_frames(
             frames.append(frame)
             bindings.append(binding)
             candidates.extend(decision.candidates)
-            if (
-                decision.frame.status is ObjectStatus.PROVEN
-                and decision.frame.projected_result
-            ):
-                proven.append(decision.frame.projected_result.rstrip("."))
+        from calendar_pedagoga.semantic_atom.action_builders import attach_event_tails
+
+        frames, bindings = attach_event_tails(
+            atoms.source, atoms.atoms, frames, bindings
+        )
+        proven = [
+            frame.projected_result.rstrip(".")
+            for frame in frames
+            if frame.status is ObjectStatus.PROVEN and frame.projected_result
+        ]
     finally:
         _CATALOG_SELECTOR.reset(selector_token)
     identity_type = identity_result = identity_control = ""

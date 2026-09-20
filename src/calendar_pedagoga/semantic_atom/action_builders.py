@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 
 from calendar_pedagoga import content_engine_v2 as _ce2
@@ -12,11 +13,16 @@ from calendar_pedagoga.semantic_atom.dispatcher import (
     RegisteredBuilder,
 )
 from calendar_pedagoga.semantic_atom.frame_adapter import _c5_candidate, catalog_selector
+from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
 from calendar_pedagoga.semantic_atom.models import (
     CandidateConfidence,
+    CoverageBinding,
     FrameCandidate,
     FrameKind,
     LexicalCheckResult,
+    ObjectStatus,
+    Provenance,
+    SemanticFrame,
     SourceAtom,
     StructuralEvidence,
 )
@@ -30,6 +36,7 @@ _OPEN_CATALOG_RE = re.compile(
     r"и\s+т\.?\s*д\.?|и\s+т\.?\s*п\.?|и\s+пр\.?)\b|\.\.\.|…)"
 )
 _DASH_RE = re.compile(r"[‐‑‒–—−\-]+")
+_EVENT_NAME_QUOTE_RE = re.compile(r"«[^»]+»|\"[^\"]+\"|„[^“]+“")
 
 
 def _eligible_action_atom(text: str) -> bool:
@@ -815,6 +822,115 @@ def _emit_built_catalog(
             rejection_reason=candidate.rejection_reason,
         )
     return candidate
+
+
+def _is_closed_event_name(member: str) -> bool:
+    cleaned = _ce2._normalize_spaces(member).strip(" .")
+    if not cleaned:
+        return False
+    if ":" in cleaned or ";" in cleaned:
+        return False
+    if _ce2._unit_has_action_head(cleaned) or _ce2._FINITE_VERB_RE.search(cleaned):
+        return False
+    quoted = list(_EVENT_NAME_QUOTE_RE.finditer(cleaned))
+    leftover = _EVENT_NAME_QUOTE_RE.sub(" ", cleaned)
+    leftover = _ce2._normalize_spaces(leftover).strip(" ,.;:—–-")
+    if quoted:
+        return not leftover
+    tokens = [token for token in cleaned.split() if token]
+    if not (1 <= len(tokens) <= 4):
+        return False
+    first = tokens[0]
+    if _ce2._is_preposition(first):
+        return False
+    return first[:1].isupper()
+
+
+def _closed_event_tail(text: str) -> str | None:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned or ";" in cleaned:
+        return None
+    if _OPEN_CATALOG_RE.search(cleaned):
+        return None
+    if _ce2._unit_has_action_head(cleaned):
+        return None
+    if not _ce2._is_dependent_catalog_unit(cleaned):
+        return None
+    members = _split_catalog_members(cleaned)
+    if not members:
+        return None
+    for member in members:
+        if not member or member not in cleaned:
+            return None
+        if not _is_closed_event_name(member):
+            return None
+    return cleaned
+
+
+def attach_event_tails(
+    source: str,
+    atoms: tuple[SourceAtom, ...],
+    frames: list[SemanticFrame],
+    bindings: list[CoverageBinding],
+) -> tuple[list[SemanticFrame], list[CoverageBinding]]:
+    """Join a following closed event-name list onto a proven activity-head."""
+
+    if len(atoms) != len(frames) or len(frames) != len(bindings):
+        return frames, bindings
+    body = source or ""
+    for index, atom in enumerate(atoms[:-1]):
+        frame = frames[index]
+        nxt = atoms[index + 1]
+        if frame.status is not ObjectStatus.PROVEN:
+            continue
+        if frame.kind is not FrameKind.ACTION:
+            continue
+        if frames[index + 1].status is ObjectStatus.PROVEN:
+            continue
+        if ":" in atom.text or ";" in atom.text:
+            continue
+        if not canonicalize_text(atom.text).endswith("."):
+            continue
+        gap = body[atom.span.end : nxt.span.start]
+        if ";" in gap or ":" in gap or (gap and not gap.isspace()):
+            continue
+        tail = _closed_event_tail(nxt.text)
+        if not tail:
+            continue
+        phrase = (frame.projected_result or "").rstrip(" .")
+        if not phrase:
+            continue
+        folded = phrase.casefold()
+        members = _split_catalog_members(tail) or ()
+        if members and all(member.casefold() in folded for member in members):
+            continue
+        result = _ce2._cap_sentence(_ce2._append_remainder(phrase, ": " + tail))
+        violations = shadow_lexical_violations(
+            source=body,
+            result=result,
+            control=frame.projected_control,
+        )
+        if violations:
+            continue
+        head_src = _ce2._normalize_spaces(atom.text).rstrip(" .")
+        source_clause = f"{head_src}: {tail}"
+        span = replace(frame.span, end=nxt.span.end)
+        note = frame.provenance.note
+        extra = "event_tail:" + tail
+        frames[index] = replace(
+            frame,
+            span=span,
+            projected_result=result,
+            object=source_clause,
+            provenance=Provenance(
+                adapter=frame.provenance.adapter,
+                role=frame.provenance.role,
+                clause_index=frame.provenance.clause_index,
+                note=f"{note};{extra}" if note else extra,
+            ),
+        )
+        bindings[index] = replace(bindings[index], span=span)
+    return frames, bindings
 
 
 def _register(builder_id: str, helper) -> RegisteredBuilder:
