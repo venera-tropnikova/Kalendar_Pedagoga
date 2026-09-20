@@ -220,18 +220,39 @@ def test_closed_catalog_comma_and_semicolon() -> None:
         assert "кварц" in folded and "слюда" in folded and "шпат" in folded
 
 
-def test_open_catalog_is_unresolved() -> None:
+def test_open_catalog_proves_named_members_only() -> None:
+    from calendar_pedagoga.semantic_atom.action_builders import OPEN_TAIL_UNRESOLVED
+
     sources = (
         "Составляющие: кварц, слюда и другие.",
         "Составляющие: кварц, слюда и т. д.",
         "Составляющие: кварц, слюда и прочее.",
         "Составляющие: кварц, слюда…",
-        "Составляющие: кварц, слюда,",
     )
     for source in sources:
         projection = project_frames(source)
-        assert projection.frames[0].status is ObjectStatus.UNRESOLVED, source
-        assert projection.candidate_result == ""
+        frame = projection.frames[0]
+        assert frame.status is ObjectStatus.PROVEN, (source, frame.reason)
+        assert frame.kind is FrameKind.KNOWLEDGE
+        folded = frame.projected_result.casefold()
+        assert folded.startswith("называет")
+        assert "кварц" in folded and "слюда" in folded
+        assert "другие" not in folded
+        assert "прочее" not in folded
+        assert "и т" not in folded
+        notes = {
+            note
+            for item in projection.candidates
+            if item.builder_id == "knowledge_catalog"
+            for note in item.structural_evidence.notes
+        }
+        assert OPEN_TAIL_UNRESOLVED in notes
+
+
+def test_truncated_catalog_stays_unresolved() -> None:
+    projection = project_frames("Составляющие: кварц, слюда,")
+    assert projection.frames[0].status is ObjectStatus.UNRESOLVED
+    assert projection.candidate_result == ""
 
 
 def test_action_catalog_is_not_knowledge() -> None:
@@ -366,6 +387,7 @@ def test_full_dispatcher_contains_c5_actions_and_knowledge() -> None:
     assert "knowledge_question" in ids
     assert "knowledge_definition" in ids
     assert "knowledge_catalog" in ids
+    assert "knowledge_noun_phrase" in ids
     assert tuple(item.builder_id for item in ACTION_REGISTRY)
     assert tuple(item.builder_id for item in KNOWLEDGE_REGISTRY)
 

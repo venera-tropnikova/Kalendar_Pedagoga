@@ -175,7 +175,7 @@ def _proven(
         id=make_object_id(
             "frame", atom.id, chosen.proposed_result, "proven", builder_ids
         ),
-        span=atom.span,
+        span=chosen.span,
         source_fingerprint=atom.source_fingerprint,
         provenance=Provenance(
             adapter=ADAPTER_NAME,
@@ -225,7 +225,7 @@ def _binding_for(atom: SourceAtom, frame: SemanticFrame, index: int) -> Coverage
     covered = frame.status is ObjectStatus.PROVEN
     return CoverageBinding(
         id=make_object_id("binding", atom.id, frame.id),
-        span=atom.span,
+        span=frame.span,
         source_fingerprint=atom.source_fingerprint,
         provenance=Provenance(
             adapter=ADAPTER_NAME,

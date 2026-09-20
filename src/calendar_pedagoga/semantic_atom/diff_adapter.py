@@ -373,13 +373,12 @@ def _content_token_set(value: str) -> frozenset[str]:
     return frozenset(tokens)
 
 
-def _safe_substring(left: str, right: str) -> bool:
-    left_cf = left.casefold()
-    right_cf = right.casefold()
-    shorter, longer = (left_cf, right_cf) if len(left_cf) <= len(right_cf) else (right_cf, left_cf)
-    if shorter not in longer:
+def _safe_substring(clause: str, candidate: str) -> bool:
+    left_cf = clause.casefold()
+    right_cf = candidate.casefold()
+    if left_cf not in right_cf:
         return False
-    tokens = _content_token_set(shorter)
+    tokens = _content_token_set(clause)
     if len(tokens) >= _MIN_CONTENT_TOKENS:
         return True
     if len(tokens) != 1:
@@ -387,7 +386,7 @@ def _safe_substring(left: str, right: str) -> bool:
     token = next(iter(tokens))
     if len(token) < _MIN_SINGLE_TOKEN_LEN:
         return False
-    return token in {item.casefold() for item in tokenize(longer)}
+    return token in {item.casefold() for item in tokenize(candidate)}
 
 
 def _clause_in_catalog(clause: str, candidate: str) -> bool:
@@ -400,18 +399,38 @@ def _clause_in_catalog(clause: str, candidate: str) -> bool:
     return clause_toks <= candidate_toks and len(candidate_toks) > len(clause_toks)
 
 
+def _frame_cover_text(frame: object, shadow: ShadowSnapshot) -> str:
+    atom_by_id = {getattr(atom, "id", ""): atom for atom in shadow.atoms}
+    atom = atom_by_id.get(getattr(frame, "atom_id", ""))
+    if atom is None:
+        return ""
+    atom_text = str(getattr(atom, "text", "") or "")
+    frame_span = getattr(frame, "span", None)
+    atom_span = getattr(atom, "span", None)
+    if frame_span is None or atom_span is None:
+        return atom_text
+    start = int(getattr(frame_span, "start", 0) or 0)
+    end = int(getattr(frame_span, "end", 0) or 0)
+    atom_start = int(getattr(atom_span, "start", 0) or 0)
+    atom_end = int(getattr(atom_span, "end", 0) or 0)
+    if start == atom_start and end == atom_end:
+        return atom_text
+    rel_start = start - atom_start
+    rel_end = end - atom_start
+    if 0 <= rel_start < rel_end <= len(atom_text):
+        return atom_text[rel_start:rel_end]
+    return atom_text
+
+
 def _frame_matches_clause(clause: str, frame: object, shadow: ShadowSnapshot) -> bool:
     if not _fold_match_text(clause):
         return False
-    atom_by_id = {getattr(atom, "id", ""): atom for atom in shadow.atoms}
     texts = [
         getattr(frame, "projected_result", ""),
         getattr(frame, "object", ""),
         getattr(frame, "complement", ""),
+        _frame_cover_text(frame, shadow),
     ]
-    atom = atom_by_id.get(getattr(frame, "atom_id", ""))
-    if atom is not None:
-        texts.append(getattr(atom, "text", ""))
     return any(coverage_text_match(clause, str(raw or "")) for raw in texts)
 
 
