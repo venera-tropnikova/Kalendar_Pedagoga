@@ -129,10 +129,216 @@ def _no_match(builder_id: str, atom: SourceAtom) -> FrameCandidate:
     )
 
 
+_QUOTED_ONLY_RE = re.compile(r'^[«"„“][^«»"]+[»"“”]$')
+
+
+def _quoted_only_conjunct(part: str) -> bool:
+    cleaned = _ce2._normalize_spaces(part).strip(" .")
+    return bool(_QUOTED_ONLY_RE.fullmatch(cleaned))
+
+
+def _split_series_parts(text: str) -> list[str]:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned:
+        return []
+    if ";" in cleaned and "(" not in cleaned:
+        return [part.strip(" .") for part in cleaned.split(";") if part.strip(" .")]
+    parts: list[str] = []
+    buf: list[str] = []
+    quote_depth = 0
+    paren_depth = 0
+    index = 0
+    while index < len(cleaned):
+        ch = cleaned[index]
+        if ch == "(":
+            paren_depth += 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch == ")" and paren_depth:
+            paren_depth -= 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch in {"«", '"'} and quote_depth == 0:
+            quote_depth += 1
+            buf.append(ch)
+            index += 1
+            continue
+        if ch in {"»", '"'} and quote_depth:
+            quote_depth = max(0, quote_depth - 1)
+            buf.append(ch)
+            index += 1
+            continue
+        if paren_depth == 0 and quote_depth == 0 and cleaned[index : index + 2] == ", ":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            index += 2
+            continue
+        if paren_depth == 0 and quote_depth == 0 and cleaned[index : index + 3].casefold() == " и ":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            index += 3
+            continue
+        buf.append(ch)
+        index += 1
+    piece = "".join(buf).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
+def _ends_with_prepositional_object(part: str) -> bool:
+    tokens = part.split()
+    last_prep = max(
+        (index for index, token in enumerate(tokens) if _ce2._is_preposition(token)),
+        default=-1,
+    )
+    return last_prep >= 0 and last_prep >= len(tokens) - 3
+
+
+def _independent_activity_conjuncts(text: str) -> list[str] | None:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned:
+        return None
+    parts = _split_series_parts(cleaned)
+    if len(parts) < 2:
+        return None
+    heads = []
+    for part in parts:
+        tokens = part.split()
+        if not tokens or _ce2._is_preposition(tokens[0]) or _quoted_only_conjunct(part):
+            continue
+        if _eligible_action_atom(part):
+            heads.append(part)
+    if len(heads) < 2:
+        return None
+    if " и " in cleaned and (
+        _ends_with_prepositional_object(heads[0])
+        or _coordinates_trailing_object(heads[0], heads[1])
+    ):
+        return None
+    return heads
+
+
+def _has_own_complement(part: str) -> bool:
+    tokens = part.split()
+    _mods, rest = _ce2._leading_modifiers(tokens)
+    if not rest:
+        return False
+    _head, remainder = _ce2._head_core_and_remainder(rest)
+    return bool(remainder.strip())
+
+
+def _coordinates_trailing_object(first: str, second: str) -> bool:
+    if not _has_own_complement(first):
+        return False
+    tokens = second.split()
+    return 1 <= len(tokens) <= 2 and not _ce2._is_preposition(tokens[0])
+
+
+def _bare_head_remainder_glue(helper, text: str) -> bool:
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned:
+        return False
+    parts = _split_series_parts(cleaned)
+    if len(parts) < 2:
+        return False
+    first, *rest = parts
+    if not _eligible_action_atom(first):
+        return False
+    tokens = first.split()
+    _mods, after_mods = _ce2._leading_modifiers(tokens)
+    if after_mods:
+        _head, remainder = _ce2._head_core_and_remainder(after_mods)
+        if remainder.strip():
+            return False
+    leftovers = [
+        part
+        for part in rest
+        if part.split()
+        and not _ce2._is_preposition(part.split()[0])
+        and not _quoted_only_conjunct(part)
+        and not _eligible_action_atom(part)
+    ]
+    if not leftovers:
+        return False
+    built_full = helper(text)
+    if not built_full or _finite_verb_count(built_full[0]) >= 2:
+        return False
+    folded = built_full[0].casefold()
+    return any(part.casefold() in folded for part in leftovers)
+
+
+def _leading_built_predicate(built: tuple[str, str, str, str]) -> str:
+    verb = _ce2._leading_finite_verb(built[0])
+    return (verb or "").casefold()
+
+
+def _finite_verb_count(phrase: str) -> int:
+    found = _ce2._FINITE_VERB_RE.findall(phrase or "")
+    pieces = _ce2._split_coordinating_и_outside_quotes(phrase or "")
+    leading = sum(1 for piece in pieces if _ce2._leading_finite_verb(piece))
+    return max(len(found), leading)
+
+
+def _merge_same_predicate_builts(
+    builts: list[tuple[str, str, str, str]],
+) -> tuple[str, str, str, str]:
+    verb = _leading_built_predicate(builts[0])
+    remnants: list[str] = []
+    objects: list[str] = []
+    conds: list[str] = []
+    action = builts[0][1]
+    for phrase, _action, obj, cond in builts:
+        rest = _ce2._drop_leading_verb(phrase).strip(" .")
+        if rest:
+            remnants.append(rest)
+        if obj.strip():
+            objects.append(obj.strip())
+        if cond.strip():
+            conds.append(cond.strip())
+    obj_joined = ", ".join(objects) if objects else ", ".join(remnants)
+    cond_joined = ", ".join(dict.fromkeys(conds))
+    phrase = _ce2._normalize_spaces(f"{verb} {', '.join(remnants)}".strip())
+    return phrase, action, obj_joined, cond_joined
+
+
+def _compatible_series_built(helper, text: str):
+    if _bare_head_remainder_glue(helper, text):
+        return None
+    series = _independent_activity_conjuncts(text)
+    built_full = helper(text)
+    if not series:
+        return built_full
+    proven: list[tuple[str, str, tuple[str, str, str, str]]] = []
+    for part in series:
+        built = helper(part)
+        if not built:
+            continue
+        predicate = _leading_built_predicate(built)
+        if not predicate:
+            continue
+        proven.append((part, predicate, built))
+    if built_full and _finite_verb_count(built_full[0]) >= 2:
+        return built_full
+    if not proven:
+        return None
+    first_pred = proven[0][1]
+    same = [item[2] for item in proven if item[1] == first_pred]
+    if len(same) == 1:
+        return same[0]
+    return _merge_same_predicate_builts(same)
+
+
 def _propose(builder_id: str, helper, atom: SourceAtom) -> FrameCandidate:
     if not _eligible_action_atom(atom.text):
         return _no_match(builder_id, atom)
-    built = helper(atom.text)
+    built = _compatible_series_built(helper, atom.text)
     if not built:
         return _no_match(builder_id, atom)
     _phrase, action, _obj, _comp = built
