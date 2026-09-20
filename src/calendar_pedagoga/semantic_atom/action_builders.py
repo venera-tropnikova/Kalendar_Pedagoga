@@ -540,7 +540,6 @@ def _can_anchor_list_member(part: str) -> bool:
         or _ce2._is_walk_word(token)
         or _ce2._is_travel_word(token)
         or _ce2._is_exercise_word(token)
-        or _ce2._is_explicit_action_head_token(token)
         or _ce2._participation_lemma(token)
     )
 
