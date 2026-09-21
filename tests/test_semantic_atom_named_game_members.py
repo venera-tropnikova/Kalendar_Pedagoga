@@ -27,6 +27,7 @@ def test_action_catalog_registry_unchanged() -> None:
         "nominal_activity",
         "closed_form_activity",
         "unconjugated_practice",
+        "grounded_process_np",
         "care_and_repair",
         "paired_shared_object",
         "proven_finite",

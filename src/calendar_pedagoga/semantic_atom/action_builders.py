@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 import re
 
 from calendar_pedagoga import content_engine_v2 as _ce2
@@ -10,6 +11,8 @@ from calendar_pedagoga.morphology import (
     _nominal_parses,
     _object_head_indices,
     _restore,
+    inflect_heads_only,
+    is_proven_acc,
     parse_head,
 )
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
@@ -20,6 +23,7 @@ from calendar_pedagoga.semantic_atom.dispatcher import (
 )
 from calendar_pedagoga.semantic_atom.frame_adapter import _c5_candidate, catalog_selector
 from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
+from calendar_pedagoga.semantic_atom.span_cover import part_attested_in_frame
 from calendar_pedagoga.semantic_atom.models import (
     CandidateConfidence,
     CoverageBinding,
@@ -667,6 +671,191 @@ def _compatible_series_built(helper, text: str):
     same = [item[2] for item in proven if item[1] == first_pred]
     merged = same[0] if len(same) == 1 else _merge_same_predicate_builts(same)
     return _expand_homogeneous_list_conjuncts(helper, text, merged)
+
+
+def _governed_process_object(built: tuple[str, str, str, str]) -> bool:
+    phrase, _action, obj, cond = built
+    if not _ce2._leading_finite_verb(phrase or ""):
+        return False
+    return bool(obj.strip(" .") or cond.strip(" ."))
+
+
+def _source_head_morphology_proven(word: str) -> bool:
+    core = _ce2._token_core(word)
+    if not core:
+        return False
+    if is_proven_acc(core):
+        return True
+    nouns = [item for item in _nominal_parses(core) if item.tag.POS == "NOUN"]
+    if not nouns:
+        return False
+    best = max(item.score for item in nouns)
+    competitive = [item for item in nouns if item.score >= best * 0.4]
+    numbers = {item.tag.number for item in competitive if item.tag.number}
+    if len(numbers) > 1:
+        return False
+    cases = {
+        item.tag.case
+        for item in competitive
+        if item.tag.case in {"nomn", "gent", "accs"}
+    }
+    if "gent" in cases and "nomn" in cases:
+        return False
+    return True
+
+
+def _agree_prehead_adjectives(tokens: list[str], head_index: int) -> list[str] | None:
+    parsed = parse_head(tokens[head_index])
+    if parsed is None:
+        return None
+    plural = parsed.tag.number == "plur"
+    gender = parsed.tag.gender or "m"
+    out = list(tokens)
+    for index in range(head_index):
+        token = tokens[index]
+        if not _ce2._is_adjective(token):
+            continue
+        inflected = _ce2._decap_lexical(
+            _ce2._adj_to_acc(token, plural=bool(plural), gender=gender)
+        )
+        if not inflected or not is_proven_acc(inflected):
+            return None
+        out[index] = _restore(token, inflected)
+    return out
+
+
+def _repair_transitive_process_object(
+    built: tuple[str, str, str, str],
+) -> tuple[str, str, str, str] | None:
+    phrase, action, _obj, _cond = built
+    verb = _ce2._leading_finite_verb(phrase or "")
+    if not verb:
+        return None
+    rest = _ce2._drop_leading_verb(phrase).strip(" .")
+    if not rest:
+        return None
+    rest_obj, rest_cond = _ce2._split_object_and_conditions(rest)
+    if not rest_obj.strip():
+        return built
+    inflected = inflect_heads_only(rest_obj)
+    if not inflected:
+        return None
+    tokens = inflected.split()
+    heads = _object_head_indices(tokens)
+    src_heads = _object_head_indices(rest_obj.split())
+    if not heads or src_heads != heads:
+        return None
+    src_tokens = rest_obj.split()
+    if not all(_source_head_morphology_proven(src_tokens[index]) for index in heads):
+        return None
+    if not all(is_proven_acc(tokens[index]) for index in heads):
+        return None
+    agreed = _agree_prehead_adjectives(tokens, heads[0])
+    if agreed is None:
+        return None
+    governed = _ce2._normalize_spaces(" ".join(agreed))
+    rebuilt = _ce2._normalize_spaces(f"{verb} {governed} {rest_cond}".strip())
+    if not _ce2._leading_finite_verb(rebuilt):
+        return None
+    return rebuilt, action, governed, rest_cond
+
+
+def _ce2_process_np_helpers(text: str):
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned:
+        return None
+    for helper in (
+        _ce2._embedded_aid_result,
+        _ce2._unconjugated_practice_activity_result,
+        _ce2._reconstruct_unconjugated_process_with_object,
+    ):
+        built = helper(cleaned)
+        if not built or not _governed_process_object(built):
+            continue
+        repaired = _repair_transitive_process_object(built)
+        if repaired and _governed_process_object(repaired):
+            return repaired
+    return None
+
+
+def _built_view(built: tuple[str, str, str, str]) -> SimpleNamespace:
+    phrase, action, obj, cond = built
+    predicate = _ce2._leading_finite_verb(phrase) or action
+    return SimpleNamespace(
+        projected_result=phrase,
+        predicate=predicate,
+        object=obj,
+        complement=cond,
+    )
+
+
+def _bind_source_cover(
+    built: tuple[str, str, str, str], cover: str
+) -> tuple[str, str, str, str]:
+    phrase, action, obj, cond = built
+    extra = _ce2._normalize_spaces(cover).strip(" .")
+    if not extra or part_attested_in_frame(extra, _built_view(built)):
+        return built
+    merged = _ce2._normalize_spaces(f"{cond} {extra}".strip())
+    return phrase, action, obj, merged
+
+
+def _grounded_process_built(text: str):
+    cleaned = _ce2._normalize_spaces(text).strip(" .")
+    if not cleaned or ":" in cleaned or ";" in cleaned:
+        return None
+    if _ce2._is_interrogative_clause(cleaned):
+        return None
+    if _ce2._knowledge_clause_result(cleaned, theory_only=True):
+        return None
+    parts = _split_series_parts(cleaned)
+    first = parts[0] if parts else cleaned
+    if _eligible_action_atom(first):
+        return None
+    first_built = _ce2_process_np_helpers(first)
+    if not first_built:
+        return None
+    return _bind_source_cover(first_built, first)
+
+
+def _grounded_process_np(atom: SourceAtom) -> FrameCandidate:
+    raw = atom.text
+    if not raw or not str(raw).strip():
+        return _no_match("grounded_process_np", atom)
+    if _ce2._is_interrogative_clause(raw):
+        return _no_match("grounded_process_np", atom)
+    if _open_colon_catalog(raw) or _catalog_owned_atom(raw):
+        return _no_match("grounded_process_np", atom)
+    if _quoted_event_only(raw) or _selector_narrows_catalog(raw):
+        return _no_match("grounded_process_np", atom)
+    if _generic_head_blocks_other_builders(raw):
+        return _no_match("grounded_process_np", atom)
+    built = _grounded_process_built(raw)
+    if not built:
+        return _no_match("grounded_process_np", atom)
+    phrase, action, _obj, _comp = built
+    kind = _kind_for(raw, action, phrase)
+    candidate = _c5_candidate(
+        "grounded_process_np", kind, lambda _text: built, atom
+    )
+    if candidate.is_valid and not _confirmed_object(candidate):
+        return FrameCandidate(
+            builder_id="grounded_process_np",
+            atom_id=atom.id,
+            span=atom.span,
+            source_fingerprint=atom.source_fingerprint,
+            proposed_kind=kind,
+            proposed_predicate=candidate.proposed_predicate,
+            proposed_object=candidate.proposed_object,
+            proposed_complement=candidate.proposed_complement,
+            proposed_result=candidate.proposed_result,
+            proposed_control=candidate.proposed_control,
+            structural_evidence=StructuralEvidence(notes=(MISSING_OBJECT,)),
+            lexical_check=candidate.lexical_check,
+            confidence=CandidateConfidence.REJECTED,
+            rejection_reason=MISSING_OBJECT,
+        )
+    return candidate
 
 
 def _propose(builder_id: str, helper, atom: SourceAtom) -> FrameCandidate:
@@ -1350,6 +1539,7 @@ ACTION_REGISTRY: tuple[RegisteredBuilder, ...] = (
     _register("nominal_activity", _nominal_activity),
     _register("closed_form_activity", _closed_form),
     _register("unconjugated_practice", _unconjugated_practice),
+    RegisteredBuilder(builder_id="grounded_process_np", propose=_grounded_process_np),
     _register("care_and_repair", _care_and_repair),
     _register("paired_shared_object", _paired_shared_object),
     _register("proven_finite", _proven_finite),
