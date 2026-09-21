@@ -15,6 +15,7 @@ from calendar_pedagoga.semantic_atom.dispatcher import (
     SemanticFrameDispatcher,
     UNSUPPORTED_ATOM_SHAPE,
     RegisteredBuilder,
+    _leading_finite,
 )
 from calendar_pedagoga.semantic_atom.span_cover import narrow_action_frame
 from calendar_pedagoga.semantic_atom.lexical import (
@@ -269,6 +270,38 @@ C5_REGISTRY: tuple[RegisteredBuilder, ...] = (
 )
 
 
+def _prove_added_segment(
+    builders: tuple[RegisteredBuilder, ...],
+    segment: str,
+    expected_finite: str,
+    expected_kind: str,
+) -> bool:
+    """Run existing builders on an isolated SOURCE segment. No token ownership."""
+
+    text = (segment or "").strip(" .")
+    if not text or not expected_finite:
+        return False
+    atoms = atomize(text).atoms
+    if len(atoms) != 1:
+        return False
+    atom = atoms[0]
+    matched = False
+    expected = expected_finite.casefold()
+    for item in builders:
+        try:
+            proposed = item.propose(atom)
+        except Exception:
+            continue
+        if not proposed.is_valid or not proposed.lexical_check.passed:
+            continue
+        finite = _leading_finite(proposed.proposed_result)
+        kind = str(proposed.proposed_kind)
+        if kind != expected_kind or finite != expected:
+            return False
+        matched = True
+    return matched
+
+
 def default_dispatcher() -> SemanticFrameDispatcher:
     return SemanticFrameDispatcher(C5_REGISTRY)
 
@@ -277,9 +310,12 @@ def full_dispatcher() -> SemanticFrameDispatcher:
     from calendar_pedagoga.semantic_atom.action_builders import ACTION_REGISTRY
     from calendar_pedagoga.semantic_atom.knowledge_builders import KNOWLEDGE_REGISTRY
 
-    return SemanticFrameDispatcher(
-        (*C5_REGISTRY, *ACTION_REGISTRY, *KNOWLEDGE_REGISTRY)
-    )
+    builders = (*C5_REGISTRY, *ACTION_REGISTRY, *KNOWLEDGE_REGISTRY)
+
+    def prove_segment(segment: str, expected_finite: str, expected_kind: str) -> bool:
+        return _prove_added_segment(builders, segment, expected_finite, expected_kind)
+
+    return SemanticFrameDispatcher(builders, prove_segment=prove_segment)
 
 
 def project_frames(
