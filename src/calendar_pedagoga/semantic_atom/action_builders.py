@@ -15,13 +15,21 @@ from calendar_pedagoga.morphology import (
     is_proven_acc,
     parse_head,
 )
+from calendar_pedagoga.semantic_atom.action_morphology import (
+    lemma_bound_to_source,
+    proven_action_object_acc,
+)
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.dispatcher import (
     AMBIGUOUS_FRAME_CANDIDATES,
     NO_STRUCTURAL_MATCH,
     RegisteredBuilder,
 )
-from calendar_pedagoga.semantic_atom.frame_adapter import _c5_candidate, catalog_selector
+from calendar_pedagoga.semantic_atom.frame_adapter import (
+    _c5_candidate,
+    _traces_to_source,
+    catalog_selector,
+)
 from calendar_pedagoga.semantic_atom.lexical import shadow_lexical_violations
 from calendar_pedagoga.semantic_atom.span_cover import part_attested_in_frame
 from calendar_pedagoga.semantic_atom.models import (
@@ -891,8 +899,99 @@ def _finite_produce(text: str):
     return _ce2._finite_produce_result(text)
 
 
+def _source_assigns_genitive_object(text: str) -> bool:
+    token = _ce2._leading_activity_token(text) or (text.split() or [""])[0]
+    if not token:
+        return False
+    if _ce2._conjugate_verbal_noun(token):
+        return True
+    if _ce2._is_explicit_action_head_token(token):
+        return True
+    return bool(_ce2._looks_like_verbal_noun(token))
+
+
+def _object_source_bound(fragment: str, source: str) -> bool:
+    if not fragment.strip():
+        return True
+    source_tokens = source.split()
+    for token in fragment.split():
+        core = _ce2._token_core(token)
+        if not core:
+            continue
+        if any(lemma_bound_to_source(core, item) for item in source_tokens):
+            continue
+        return False
+    return True
+
+
+def _single_conjugated_action_head(source: str, phrase: str) -> bool:
+    """True when CE2 replaced one SOURCE verbal noun with its finite, leaving the patient."""
+
+    cleaned = _ce2._normalize_spaces(source).strip(" .")
+    tokens = cleaned.split()
+    _mods, rest = _ce2._leading_modifiers(tokens)
+    if not rest:
+        return False
+    head, remainder = _ce2._head_core_and_remainder(rest)
+    mapped = _ce2._conjugate_explicit_action_head(head)
+    if not mapped:
+        return False
+    rem = remainder.split()
+    if rem and rem[0].casefold() == "и" and len(rem) > 1:
+        nxt = rem[1]
+        if _ce2._conjugate_explicit_action_head(nxt) or _ce2._is_explicit_action_head_token(
+            nxt
+        ):
+            return False
+    verb = _ce2._leading_finite_verb(phrase or "")
+    if not verb or verb.casefold() != mapped.casefold():
+        return False
+    dropped = _ce2._drop_leading_verb(phrase).strip()
+    if dropped[:2].casefold() == "и " and _ce2._leading_finite_verb(dropped[2:]):
+        return False
+    return True
+
+
+def _repair_action_object_acc(
+    source: str,
+    built: tuple[str, str, str, str] | None,
+) -> tuple[str, str, str, str] | None:
+    if not built:
+        return None
+    phrase, action, obj, cond = built
+    raw = (obj or "").strip(" .")
+    if not raw or ":" in raw or ";" in raw:
+        return built
+    if _traces_to_source(phrase, source):
+        return built
+    if not _single_conjugated_action_head(source, phrase):
+        return built
+    verb = _ce2._leading_finite_verb(phrase or "")
+    if not verb:
+        return built
+    work, rest_cond = _ce2._split_object_and_conditions(raw)
+    work = work or raw
+    proven = proven_action_object_acc(
+        work, governed_genitive=_source_assigns_genitive_object(source)
+    )
+    if proven is None:
+        if _traces_to_source(phrase, source):
+            return built
+        return None
+    if not _object_source_bound(proven, source):
+        return None
+    tail = rest_cond or cond
+    rebuilt = _ce2._normalize_spaces(f"{verb} {proven} {tail}".strip())
+    if phrase.rstrip().endswith("."):
+        rebuilt = rebuilt.rstrip(".") + "."
+    if not _ce2._leading_finite_verb(rebuilt):
+        return None
+    return rebuilt, action, proven, tail
+
+
 def _explicit_action(text: str):
-    return _ce2._explicit_action_reconstruction(text, theory_only=False)
+    built = _ce2._explicit_action_reconstruction(text, theory_only=False)
+    return _repair_action_object_acc(text, built)
 
 
 def _nominal_activity(text: str):
