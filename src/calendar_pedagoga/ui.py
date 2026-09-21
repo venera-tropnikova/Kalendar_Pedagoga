@@ -125,6 +125,44 @@ from calendar_pedagoga.confirmed_study_plan import (
     confirmed_plan_from_manual_rows,
     hour_value_from_input,
 )
+from calendar_pedagoga.program_structure_confirmation import (
+    CONTENT_ORIGIN_EXCERPT,
+    CONTENT_ORIGIN_MANUAL,
+    DISPOSITION_EXCLUDED,
+    DISPOSITION_MAPPED,
+    DISPOSITION_UNRESOLVED,
+    TOPIC_STATUS_DRAFT_READY,
+    TOPIC_STATUS_UNRESOLVED,
+    TOPIC_STATUS_USER_CONFIRMED,
+    EXCLUSION_REASON_LABELS,
+    STRUCTURE_CONFIRM_BUTTON,
+    STRUCTURE_EXCERPT_LABEL,
+    STRUCTURE_ORIGIN_EXCERPT_LABEL,
+    STRUCTURE_ORIGIN_MANUAL_LABEL,
+    STRUCTURE_PRACTICE_CONTENT_LABEL,
+    STRUCTURE_SOURCE_ITEM_LABEL,
+    STRUCTURE_THEORY_CONTENT_LABEL,
+    ProgramStructureConfirmationError,
+    StructureConfirmation,
+    catalog_source_items,
+    confirm_program_structure,
+    draft_source_ledger,
+    draft_structure_rows,
+    embedded_utp_candidates,
+    exclusion_reason_label,
+    file_digest,
+    matches_for_draft,
+    merge_source_ledger,
+    needs_structure_confirmation,
+    normalize_structure_rows,
+    overlay_confirmed_program,
+    overlay_unresolved_topic_edits,
+    select_embedded_utp,
+    schedule_topics_from_candidate,
+    source_disposition_counts,
+    structure_confirmation_scope,
+    unresolved_schedule_rows,
+)
 from calendar_pedagoga.transient_documents import TransientDocumentSession
 from calendar_pedagoga.upload_validation import (
     UploadPurpose,
@@ -255,10 +293,23 @@ def _reset_analysis_state() -> None:
         "semantic_review_issues",
         "semantic_review_pipeline_cases",
         "calendar_show_semantic_review",
+        "structure_confirmation_pending",
+        "structure_confirmation_draft",
+        "structure_confirmation_result",
+        "structure_confirmation_error",
+        "structure_confirmation_scope",
+        "structure_confirmation_meta",
+        "structure_confirmation_accepted_rows",
+        "structure_confirmation_draft_ledger",
+        "structure_confirmation_accepted_ledger",
+        "program_structure_rows",
+        "program_structure_ledger",
     ):
         st.session_state.pop(key, None)
     for key in tuple(st.session_state):
-        if str(key).startswith(("semantic_review_input_", "semantic_review_read_")):
+        if str(key).startswith(
+            ("semantic_review_input_", "semantic_review_read_", "structure_topic_")
+        ):
             st.session_state.pop(key, None)
 
 
@@ -2963,6 +3014,343 @@ def _render_manual_plan_table() -> tuple[dict[str, str], ...]:
     return _manual_rows_from_editor(edited)
 
 
+def _structure_scope_from_inputs(
+    program_file,
+    utp_file,
+    study_year: int | None,
+    rows: tuple[dict[str, str], ...] = (),
+    ledger: tuple[dict[str, str], ...] = (),
+) -> str:
+    return structure_confirmation_scope(
+        program_name=getattr(program_file, "name", None),
+        program_digest=file_digest(
+            program_file.getvalue() if program_file is not None else None
+        ),
+        utp_name=getattr(utp_file, "name", None),
+        utp_digest=file_digest(utp_file.getvalue() if utp_file is not None else None),
+        study_year=study_year,
+        rows=rows,
+        ledger=ledger,
+    )
+
+
+def _structure_rows_from_editor(value: object) -> tuple[dict[str, str], ...]:
+    if hasattr(value, "to_dict"):
+        records = value.to_dict(orient="records")
+    else:
+        records = value
+    return normalize_structure_rows(records or ())
+
+
+def _ledger_rows_from_editor(value: object) -> tuple[dict[str, str], ...]:
+    if hasattr(value, "to_dict"):
+        records = value.to_dict(orient="records")
+    else:
+        records = value
+    return tuple(dict(row) for row in (records or ()))
+
+
+def _render_source_ledger(
+    draft: tuple[dict[str, str], ...],
+    *,
+    source_items=(),
+) -> tuple[dict[str, str], ...]:
+    catalog = catalog_source_items(source_items)
+    visible = merge_source_ledger(catalog, draft) if catalog else draft
+    counts = source_disposition_counts(visible)
+    st.markdown(
+        f"**mapped:** {counts[DISPOSITION_MAPPED]} · "
+        f"**excluded:** {counts[DISPOSITION_EXCLUDED]} · "
+        f"**unresolved:** {counts[DISPOSITION_UNRESOLVED]}"
+    )
+    edited = st.data_editor(
+        list(visible),
+        key="program_structure_ledger",
+        num_rows="fixed",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "item_id": st.column_config.TextColumn("SOURCE-id", disabled=True),
+            "title": st.column_config.TextColumn("SOURCE-item", disabled=True),
+            "number": st.column_config.TextColumn("№", disabled=True),
+            "section": st.column_config.TextColumn("Раздел", disabled=True),
+            "study_year": st.column_config.TextColumn("Год", disabled=True),
+            "content": st.column_config.TextColumn("Содержание", disabled=True),
+            "disposition": st.column_config.SelectboxColumn(
+                "Статус",
+                options=[
+                    DISPOSITION_UNRESOLVED,
+                    DISPOSITION_MAPPED,
+                    DISPOSITION_EXCLUDED,
+                ],
+                required=True,
+            ),
+            "exclusion_reason": st.column_config.SelectboxColumn(
+                "Причина исключения",
+                options=["", *EXCLUSION_REASON_LABELS.values()],
+            ),
+            "mapped_topic": st.column_config.TextColumn(
+                "Тема/строка",
+                help="Не используется для broadcast; mapping задаётся у темы УТП.",
+            ),
+        },
+    )
+    merged = merge_source_ledger(catalog, _ledger_rows_from_editor(edited))
+    mapped_rows = [
+        row for row in merged if row["disposition"] == DISPOSITION_MAPPED
+    ]
+    excluded_rows = [
+        row for row in merged if row["disposition"] == DISPOSITION_EXCLUDED
+    ]
+    unresolved_rows = [
+        row for row in merged if row["disposition"] == DISPOSITION_UNRESOLVED
+    ]
+    st.markdown("**mapped**")
+    if mapped_rows:
+        for row in mapped_rows:
+            st.caption(f"{row['title']} → {row['mapped_topic'] or row['title']}")
+    else:
+        st.caption("нет")
+    st.markdown("**excluded**")
+    if excluded_rows:
+        for row in excluded_rows:
+            reason = exclusion_reason_label(row.get("exclusion_reason"))
+            st.caption(f"{row['title']} — {reason or 'без причины'}")
+    else:
+        st.caption("нет")
+    st.markdown("**unresolved**")
+    if unresolved_rows:
+        for row in unresolved_rows:
+            st.caption(row["title"])
+    else:
+        st.caption("нет")
+    return merged
+
+
+def _hours_positive(value: object) -> bool:
+    token = "" if value is None else str(value).strip().replace(",", ".")
+    if not token:
+        return False
+    try:
+        return hour_value_from_input(token, field_name="Часы") > 0
+    except ConfirmedStudyPlanError:
+        return False
+
+
+def _unresolved_topic_card_title(row: Mapping[str, object]) -> str:
+    number = _cell_topic({"topic": row.get("number")})
+    topic = _cell_topic(row)
+    if number and topic:
+        return f"Тема №{number}. {topic}"
+    return topic or number or "Тема"
+
+
+def _render_unresolved_topic_card(
+    row: Mapping[str, str],
+    *,
+    source_records,
+) -> dict[str, str]:
+    schedule_id = row.get("schedule_id") or ""
+    title = _unresolved_topic_card_title(row)
+    st.markdown(f"**{title}**")
+    st.caption(
+        f"Теория: {row.get('theory_hours') or '0'} ч · "
+        f"Практика: {row.get('practice_hours') or '0'} ч"
+    )
+    has_theory = _hours_positive(row.get("theory_hours"))
+    has_practice = _hours_positive(row.get("practice_hours"))
+    origin = STRUCTURE_ORIGIN_MANUAL_LABEL
+    if source_records:
+        origin = st.radio(
+            "Как заполнить содержание",
+            (STRUCTURE_ORIGIN_MANUAL_LABEL, STRUCTURE_ORIGIN_EXCERPT_LABEL),
+            key=f"structure_topic_{schedule_id}_origin",
+            horizontal=True,
+        )
+    theory_content = ""
+    practice_content = ""
+    source_item_id = ""
+    excerpt = ""
+    content_origin = ""
+    if origin == STRUCTURE_ORIGIN_EXCERPT_LABEL:
+        options = [""] + [record.item_id for record in source_records]
+        labels = {"": "не выбран"}
+        labels.update(
+            {
+                record.item_id: f"{record.item_id} · {record.title}"
+                for record in source_records
+            }
+        )
+        source_item_id = st.selectbox(
+            STRUCTURE_SOURCE_ITEM_LABEL,
+            options,
+            format_func=lambda item_id: labels.get(item_id, item_id),
+            key=f"structure_topic_{schedule_id}_source",
+        )
+        excerpt = st.text_area(
+            STRUCTURE_EXCERPT_LABEL,
+            key=f"structure_topic_{schedule_id}_excerpt",
+        )
+        if source_item_id and excerpt:
+            content_origin = CONTENT_ORIGIN_EXCERPT
+    else:
+        if has_theory:
+            theory_content = st.text_area(
+                STRUCTURE_THEORY_CONTENT_LABEL,
+                key=f"structure_topic_{schedule_id}_theory",
+            )
+        if has_practice:
+            practice_content = st.text_area(
+                STRUCTURE_PRACTICE_CONTENT_LABEL,
+                key=f"structure_topic_{schedule_id}_practice",
+            )
+        if theory_content or practice_content:
+            content_origin = CONTENT_ORIGIN_MANUAL
+    return {
+        **row,
+        "theory_content": theory_content,
+        "practice_content": practice_content,
+        "source_item_id": source_item_id or "",
+        "excerpt": excerpt or "",
+        "content_origin": content_origin,
+    }
+
+
+def _render_structure_confirmation_table(
+    draft: tuple[dict[str, str], ...],
+    *,
+    source_items=(),
+) -> tuple[dict[str, str], ...]:
+    st.markdown(
+        '<p class="kp-status-lead">Программа распознана неполностью. '
+        "Проверьте структуру и подтвердите её перед генерацией.</p>",
+        unsafe_allow_html=True,
+    )
+    unresolved = unresolved_schedule_rows(draft)
+    mapped_count = len(draft) - len(unresolved)
+    if draft and any(_cell_topic(row) for row in draft):
+        st.markdown(
+            f"**Темы УТП:** {len(draft)} · "
+            f"**связаны автоматически:** {mapped_count} · "
+            f"**нерешённые:** {len(unresolved)}"
+        )
+    named_unresolved = [row for row in unresolved if _cell_topic(row)]
+    if not named_unresolved:
+        st.caption("Нерешённых тем нет.")
+        return draft
+    st.markdown("**Нерешённые темы**")
+    source_records = catalog_source_items(source_items) if source_items else ()
+    edited: list[dict[str, str]] = []
+    for row in named_unresolved:
+        with st.container():
+            edited.append(
+                _render_unresolved_topic_card(row, source_records=source_records)
+            )
+    return overlay_unresolved_topic_edits(draft, edited)
+
+
+def _cell_topic(row: Mapping[str, object]) -> str:
+    value = row.get("topic")
+    return "" if value is None else str(value).strip()
+
+
+def _clear_structure_confirmation_result() -> None:
+    st.session_state.pop("structure_confirmation_result", None)
+    st.session_state.pop("structure_confirmation_error", None)
+
+
+def _begin_structure_confirmation(
+    *,
+    draft: tuple[dict[str, str], ...],
+    scope: str,
+    meta: dict,
+    ledger: tuple[dict[str, str], ...] = (),
+) -> None:
+    previous = st.session_state.get("structure_confirmation_scope")
+    if previous != scope:
+        st.session_state.pop("program_structure_rows", None)
+        st.session_state.pop("program_structure_ledger", None)
+        for key in tuple(st.session_state):
+            if str(key).startswith("structure_topic_"):
+                st.session_state.pop(key, None)
+        _clear_structure_confirmation_result()
+    st.session_state["structure_confirmation_pending"] = True
+    st.session_state["structure_confirmation_draft"] = draft
+    st.session_state["structure_confirmation_draft_ledger"] = ledger
+    st.session_state["structure_confirmation_scope"] = scope
+    st.session_state["structure_confirmation_meta"] = meta
+    st.session_state["analysis_ready"] = False
+    st.session_state.pop("calendar_generate_after_check", None)
+
+
+def _apply_structure_confirmation_to_context(confirmation: StructureConfirmation) -> None:
+    meta = st.session_state.get("structure_confirmation_meta") or {}
+    program = overlay_confirmed_program(meta.get("program"), confirmation.program_items)
+    validated_program = meta.get("validated_program")
+    if validated_program is not None:
+        validated_program = ValidatedUpload(
+            validated_program.purpose,
+            validated_program.filename,
+            validated_program.content,
+            program,
+        )
+    plan_filename = str(meta.get("plan_filename") or "Подтверждённая структура программы")
+    plan_content = json.dumps(
+        {
+            "study_year": confirmation.plan.study_year,
+            "study_weeks": confirmation.plan.study_weeks,
+            "hours_per_week": str(confirmation.plan.hours_per_week),
+            "source": confirmation.plan.source,
+            "rows": [
+                {
+                    "topic": topic.title,
+                    "total": str(topic.hours.total),
+                    "theory": str(topic.hours.theory),
+                    "practice": str(topic.hours.practice),
+                }
+                for topic in confirmation.plan.topics
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    validated_utp = ValidatedUpload(
+        UploadPurpose.UTP,
+        plan_filename,
+        plan_content,
+        confirmation.plan,
+    )
+    _store_analysis_context(
+        validated_utp=validated_utp,
+        validated_program=validated_program,
+        template_selection=meta["template_selection"],
+        academic_year=meta["academic_year"],
+    )
+    scope_id = _match_review_scope_from_uploads(
+        validated_utp,
+        validated_program,
+        confirmation.plan.study_year,
+    )
+    reviews = _reviews_for_scope(scope_id)
+    reviews.clear()
+    reviews.update(confirmation.match_reviews)
+    st.session_state["analysis_ready"] = True
+    st.session_state["structure_confirmation_pending"] = False
+    st.session_state["structure_confirmation_result"] = confirmation
+    st.session_state["calendar_generate_after_check"] = True
+    st.session_state["ui_edit_inputs"] = False
+    st.session_state.pop("analysis_warnings", None)
+    st.session_state.pop("calendar_download", None)
+    st.session_state.pop("calendar_warnings", None)
+    st.session_state.pop("calendar_generation_pending", None)
+    st.session_state.pop("calendar_generation_error", None)
+    st.session_state.pop("calendar_generation_succeeded", None)
+    st.session_state.pop("calendar_resolved_lessons", None)
+    st.session_state.pop("calendar_plan_snapshot", None)
+    st.session_state.pop("calendar_generation_invalidated", None)
+    st.session_state.pop("calendar_check_error", None)
+
+
 def _render_workload_inputs(
     *,
     mode: str,
@@ -4742,6 +5130,84 @@ def run_app() -> None:
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
 
+    if st.session_state.get("structure_confirmation_pending"):
+        live_scope = _structure_scope_from_inputs(
+            program_file,
+            utp_file,
+            study_plan_input.study_year,
+        )
+        stored_scope = st.session_state.get("structure_confirmation_scope")
+        if stored_scope != live_scope:
+            _reset_analysis_state()
+        else:
+            draft = tuple(st.session_state.get("structure_confirmation_draft") or ())
+            draft_ledger = tuple(
+                st.session_state.get("structure_confirmation_draft_ledger") or ()
+            )
+            meta = st.session_state.get("structure_confirmation_meta") or {}
+            program = meta.get("program")
+            source_items = (
+                program.content_items if program is not None else ()
+            )
+            ledger_counts = source_disposition_counts(draft_ledger)
+            st.markdown(
+                f"**SOURCE mapped:** {ledger_counts[DISPOSITION_MAPPED]} · "
+                f"**excluded:** {ledger_counts[DISPOSITION_EXCLUDED]} · "
+                f"**unresolved:** {ledger_counts[DISPOSITION_UNRESOLVED]}"
+            )
+            edited_rows = _render_structure_confirmation_table(
+                draft, source_items=source_items
+            )
+            if source_items:
+                with st.expander("Журнал SOURCE — полный аудит", expanded=False):
+                    edited_ledger = _render_source_ledger(
+                        draft_ledger, source_items=source_items
+                    )
+            else:
+                edited_ledger = ()
+            accepted = tuple(st.session_state.get("structure_confirmation_accepted_rows") or ())
+            accepted_ledger = tuple(
+                st.session_state.get("structure_confirmation_accepted_ledger") or ()
+            )
+            if (accepted and accepted != edited_rows) or (
+                accepted_ledger and accepted_ledger != edited_ledger
+            ):
+                _clear_structure_confirmation_result()
+                st.session_state.pop("structure_confirmation_accepted_rows", None)
+                st.session_state.pop("structure_confirmation_accepted_ledger", None)
+            confirm_error = st.session_state.get("structure_confirmation_error")
+            if confirm_error:
+                st.error(confirm_error)
+            if st.button(STRUCTURE_CONFIRM_BUTTON, type="primary"):
+                try:
+                    confirmation = confirm_program_structure(
+                        rows=edited_rows,
+                        study_year=int(meta["study_year"]),
+                        study_weeks=int(meta["study_weeks"]),
+                        hours_per_week=meta["hours_per_week"],
+                        scope=_structure_scope_from_inputs(
+                            program_file,
+                            utp_file,
+                            study_plan_input.study_year,
+                            rows=edited_rows,
+                            ledger=edited_ledger,
+                        ),
+                        existing_plan=meta.get("plan"),
+                        source_items=source_items,
+                        ledger=edited_ledger,
+                        selected_utp=meta.get("selected_utp"),
+                        embedded=tuple(meta.get("embedded") or ()),
+                    )
+                except (ProgramStructureConfirmationError, ConfirmedStudyPlanError) as error:
+                    st.session_state["structure_confirmation_error"] = str(error)
+                    st.rerun()
+                    return
+                st.session_state["structure_confirmation_accepted_rows"] = edited_rows
+                st.session_state["structure_confirmation_accepted_ledger"] = edited_ledger
+                _apply_structure_confirmation_to_context(confirmation)
+                st.rerun()
+                return
+
     if check_clicked and st.session_state.get("calendar_busy"):
         check_clicked = False
 
@@ -4812,22 +5278,25 @@ def run_app() -> None:
                         if transient_template is not None
                         else None
                     )
+                    resolved_utp = None
                     if study_plan_input.mode == _PLAN_MODE_FILE:
-                        if validated_utp_upload is None:
-                            raise UtpResolutionError(
-                                "Загрузите УТП или выберите ручной ввод тем и часов."
+                        if validated_utp_upload is not None:
+                            weekly = hour_value_from_input(
+                                study_plan_input.hours_per_week,
+                                field_name="Количество часов в неделю",
                             )
-                        weekly = hour_value_from_input(
-                            study_plan_input.hours_per_week,
-                            field_name="Количество часов в неделю",
-                        )
-                        resolved_utp = resolve_utp(
-                            validated_utp_upload,
-                            validated_program,
-                            program_study_year=study_plan_input.study_year,
-                            study_weeks=study_plan_input.study_weeks,
-                            hours_per_week=weekly,
-                        )
+                            try:
+                                resolved_utp = resolve_utp(
+                                    validated_utp_upload,
+                                    validated_program,
+                                    program_study_year=study_plan_input.study_year,
+                                    study_weeks=study_plan_input.study_weeks,
+                                    hours_per_week=weekly,
+                                )
+                            except UtpResolutionError as error:
+                                if "противоречат" in str(error):
+                                    raise
+                                resolved_utp = None
                     else:
                         resolved_utp = confirmed_plan_from_manual_rows(
                             study_year=study_plan_input.study_year,
@@ -4853,6 +5322,110 @@ def run_app() -> None:
                     _abort_document_check(ORG_TEMPLATE_UNSUPPORTED_MESSAGE)
                     return
 
+            matching_year = (
+                study_year_for_matching(resolved_utp)
+                if resolved_utp is not None
+                else study_plan_input.study_year
+            )
+            program_structure = parse_program(
+                validated_program.content,
+                validated_program.filename,
+            )
+            program = parse_program(
+                validated_program.content,
+                validated_program.filename,
+                study_year=matching_year,
+            )
+            validated_program = ValidatedUpload(
+                validated_program.purpose,
+                validated_program.filename,
+                validated_program.content,
+                program,
+            )
+            embedded = embedded_utp_candidates(
+                validated_program.content,
+                validated_program.filename,
+            )
+            resolved_plan = (
+                resolved_utp if isinstance(resolved_utp, ConfirmedStudyPlan) else None
+            )
+            draft_matches = matches_for_draft(
+                resolved_plan,
+                program,
+                embedded,
+                study_year=study_plan_input.study_year,
+            )
+            if (
+                resolved_plan is None
+                and needs_structure_confirmation(
+                    plan=resolved_plan,
+                    program=program_structure,
+                    embedded_utp_count=len(embedded),
+                    has_external_utp=validated_utp_upload is not None,
+                    study_year=study_plan_input.study_year,
+                    matches=draft_matches,
+                )
+            ):
+                draft = draft_structure_rows(
+                    plan=resolved_plan,
+                    program=program,
+                    matches=draft_matches,
+                    embedded=embedded,
+                    study_year=study_plan_input.study_year,
+                )
+                selected_utp = select_embedded_utp(
+                    embedded,
+                    study_plan_input.study_year,
+                )
+                ledger = draft_source_ledger(
+                    program,
+                    matches=draft_matches,
+                    study_year=study_plan_input.study_year,
+                    topics=(
+                        resolved_plan.topics
+                        if resolved_plan is not None
+                        else schedule_topics_from_candidate(selected_utp)
+                        if selected_utp is not None
+                        else ()
+                    ),
+                )
+                scope = _structure_scope_from_inputs(
+                    program_file,
+                    utp_file,
+                    study_plan_input.study_year,
+                )
+                _begin_structure_confirmation(
+                    draft=draft,
+                    ledger=ledger,
+                    scope=scope,
+                    meta={
+                        "program": program,
+                        "validated_program": validated_program,
+                        "template_selection": template_selection,
+                        "academic_year": academic_year,
+                        "plan_filename": (
+                            validated_utp_upload.filename
+                            if validated_utp_upload is not None
+                            else "Подтверждённая структура программы"
+                        ),
+                        "study_year": study_plan_input.study_year,
+                        "study_weeks": study_plan_input.study_weeks,
+                        "hours_per_week": study_plan_input.hours_per_week,
+                        "plan": resolved_plan,
+                        "selected_utp": selected_utp,
+                        "embedded": embedded,
+                    },
+                )
+                st.session_state.pop("calendar_check_pending", None)
+                st.session_state.pop("calendar_busy", None)
+                st.session_state.pop("calendar_work_status", None)
+                st.rerun()
+                return
+            if resolved_utp is None:
+                _abort_document_check(
+                    "Загрузите УТП или выберите ручной ввод тем и часов."
+                )
+                return
             if validated_utp_upload is not None:
                 plan_filename = validated_utp_upload.filename
                 plan_content = validated_utp_upload.content
@@ -4873,17 +5446,6 @@ def run_app() -> None:
                 plan_filename,
                 plan_content,
                 resolved_utp,
-            )
-            program = parse_program(
-                validated_program.content,
-                validated_program.filename,
-                study_year=study_year_for_matching(resolved_utp),
-            )
-            validated_program = ValidatedUpload(
-                validated_program.purpose,
-                validated_program.filename,
-                validated_program.content,
-                program,
             )
             utp = resolved_utp
 

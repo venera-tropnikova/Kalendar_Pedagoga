@@ -118,10 +118,13 @@ def apply_match_reviews(
         return matches
     applied: list[ContentMatch] = []
     for match in matches:
-        if not is_disputed_match(match):
+        review = reviews.get(topic_key(match.utp_position))
+        user_confirmed = (
+            isinstance(review, Mapping) and review.get("decision") == "USER_CONFIRMED"
+        )
+        if not is_disputed_match(match) and not user_confirmed:
             applied.append(match)
             continue
-        review = reviews.get(topic_key(match.utp_position))
         if not isinstance(review, Mapping):
             applied.append(match)
             continue
