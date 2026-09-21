@@ -260,10 +260,10 @@ def test_fragment_draft_ready_shows_plain_download_and_review_notes() -> None:
     assert state["calendar_download"].content == b"PK\x03\x04draft"
     widgets.warning.assert_not_called()
     assert widgets.download_button.call_args.args[0] == (
-        "Скачать календарный план за 2026–2027 учебный год"
+        "Скачать черновик календарного плана за 2026–2027 учебный год"
     )
     assert any(
-        "Календарный план готов. Есть замечания: 18 недель" in str(call.args[0])
+        "Календарный план не готов к выдаче. Есть замечания: 18 недель" in str(call.args[0])
         for call in widgets.markdown.call_args_list
     )
     widgets.button.assert_called()

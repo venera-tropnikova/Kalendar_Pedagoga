@@ -46,6 +46,17 @@ class ActionFrame:
     conditions: str
 
 
+PROVENANCE_GENERIC_ONLY = "GENERIC_ONLY"
+
+
+def _stamp_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*codes, PROVENANCE_GENERIC_ONLY)))
+
+
+def _drop_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    return tuple(code for code in codes if code != PROVENANCE_GENERIC_ONLY)
+
+
 @dataclass(frozen=True)
 class ContentEngineV2Result:
     frame: ActionFrame
@@ -58,6 +69,7 @@ class ContentEngineV2Result:
     type_result: str | None = None
     clause_coverage: tuple[tuple[str, str], ...] = ()
     clause_roles: tuple[tuple[str, str], ...] = ()
+    provenance_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,7 @@ class LessonContentV2Row:
     warnings: tuple[str, ...]
     clause_coverage: tuple[tuple[str, str], ...] = ()
     clause_roles: tuple[tuple[str, str], ...] = ()
+    provenance_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -7738,6 +7751,7 @@ def _derive_fields_candidate(
     """Цепочка: source → action/object/conditions → RESULT → CONTROL → TYPE."""
 
     warnings: list[str] = []
+    provenance_codes: list[str] = []
     units = _coalesce_activity_units(practice_units_from_text(practice_text))
     if (
         practice_hours
@@ -7811,6 +7825,7 @@ def _derive_fields_candidate(
     )
     if not (theory_text.strip() or practice_text.strip() or program_content.strip()):
         warnings.append("Недостаточно данных источника; использован безопасный fallback.")
+        provenance_codes.append(PROVENANCE_GENERIC_ONLY)
         clause = clause or topic_title
         theory_only = bool(theory_hours and not practice_hours)
         source_pool = source_pool or [clause]
@@ -7894,6 +7909,7 @@ def _derive_fields_candidate(
         theory_text=theory_text,
         practice_text=practice_text,
         warnings=tuple(warnings),
+        provenance_codes=tuple(provenance_codes),
     )
 
 
@@ -8447,6 +8463,7 @@ def _derive_selected_fields_v2(
         candidate, frame=ActionFrame(candidate.frame.clause, "", "", ""),
         lesson_type=lesson_type, planned_result=result, assessment_method=control,
         warnings=(*candidate.warnings, f"Безопасный шаблон CE2: {issue}."),
+        provenance_codes=_stamp_generic_only(candidate.provenance_codes),
     )
 
 
@@ -8950,6 +8967,7 @@ def _derive_week_fields_v2(
     if retained:
         uncovered = [c for c in uncovered if not _retained_complement_covered(c, original)]
     warnings = tuple(w for w in original.warnings if not w.startswith("Безопасный шаблон CE2:"))
+    provenance_codes = _drop_generic_only(original.provenance_codes)
     warnings += tuple("NEEDS_REVIEW: не подтверждено полное покрытие клаузы: " + c for c in uncovered)
     merged_result = _merge_independent_part_results(results)
     assessment = _unified_process_performance_control(
@@ -8967,6 +8985,7 @@ def _derive_week_fields_v2(
         planned_result=merged_result,
         assessment_method=assessment,
         warnings=tuple(dict.fromkeys(warnings)),
+        provenance_codes=provenance_codes,
         type_result=original.planned_result,
         clause_coverage=tuple(
             (c, "NEEDS_REVIEW" if c in uncovered else "COVERED") for c in clauses
@@ -12260,6 +12279,7 @@ def build_lesson_content_v2(
                 warnings=tuple(dict.fromkeys((*warnings, *final.warnings))),
                 clause_coverage=final.clause_coverage,
                 clause_roles=final.clause_roles,
+                provenance_codes=final.provenance_codes,
             )
         )
     return tuple(result)

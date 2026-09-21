@@ -88,6 +88,11 @@ from calendar_pedagoga.remote_generation import (
     remote_job_progress_label,
     submit_remote_calendar_job,
 )
+from calendar_pedagoga.production_readiness import (
+    missing_fields_for_codes,
+    readiness_codes_from_reasons,
+    user_action_for_codes,
+)
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -3319,7 +3324,10 @@ def _empty_review_week_count(cases: object | None = None) -> int:
 
 def _ready_plan_message(review_weeks: int) -> str:
     if review_weeks:
-        return f"{_STATUS_READY}. Есть замечания: {review_weeks} {_count_weeks_word(review_weeks)}"
+        return (
+            "Календарный план не готов к выдаче. "
+            f"Есть замечания: {review_weeks} {_count_weeks_word(review_weeks)}"
+        )
     return _STATUS_READY
 
 
@@ -3546,9 +3554,23 @@ def _render_review_case_facts(case: SemanticReviewCase) -> None:
     st.markdown(f"**Тема:** {case.topic_title}")
     st.markdown("**SOURCE:**")
     st.code(case.program_source or "SOURCE из программы отсутствует")
-    st.markdown("**Причины NEEDS_REVIEW:**")
-    for reason in case.reasons:
-        st.markdown(f"- {reason}")
+    codes = readiness_codes_from_reasons(case.reasons)
+    other_reasons = tuple(
+        reason for reason in case.reasons if reason not in codes
+    )
+    if codes:
+        missing = missing_fields_for_codes(codes)
+        st.markdown("**Неделя заблокирована.**")
+        if missing:
+            st.markdown(f"**Отсутствует:** {', '.join(missing)}")
+        st.markdown(f"**Причина:** {', '.join(codes)}")
+        action = user_action_for_codes(codes)
+        if action:
+            st.markdown(f"**Что сделать:** {action}")
+    if other_reasons:
+        st.markdown("**Причины NEEDS_REVIEW:**")
+        for reason in other_reasons:
+            st.markdown(f"- {reason}")
     st.markdown("**Предложенный RESULT:**")
     st.code(case.proposed_result or "—")
     st.markdown("**Предложенный CONTROL:**")
@@ -4484,12 +4506,22 @@ def _render_generation_result(*, show_status: bool = True) -> None:
         context = st.session_state.get("calendar_context") or {}
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
         review_weeks = _review_week_count()
+        status = st.session_state.get("calendar_document_status")
+        is_draft = (
+            status == CalendarDocumentStatus.DRAFT_READY.value
+            or bool(review_weeks)
+        )
         st.markdown(_ready_plan_message(review_weeks))
         empty_weeks = _empty_review_week_count()
         if empty_weeks:
             st.markdown(_fill_required_message(empty_weeks))
+        download_label = (
+            f"Скачать черновик календарного плана за {academic_year} учебный год"
+            if is_draft
+            else f"Скачать календарный план за {academic_year} учебный год"
+        )
         st.download_button(
-            f"Скачать календарный план за {academic_year} учебный год",
+            download_label,
             data=download.content,
             file_name=download.filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

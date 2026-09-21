@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -218,9 +219,20 @@ def test_oracle_manifest_covers_all_runnable_fixtures() -> None:
     assert extra == set(), f"{ORACLE_COVERAGE_MISSING}: {sorted(extra)}"
 
 
+def _without_production_readiness(payload: dict) -> dict:
+    """Keep C1 semantic identity; drop new production-gate readiness fields."""
+
+    data = deepcopy(payload)
+    for corpus in data.get("corpora", []):
+        corpus.pop("review_weeks", None)
+        for row in corpus.get("rows", []):
+            row.pop("review", None)
+    return data
+
+
 def test_oracle_matches_live_production_and_docx() -> None:
-    expected = load_baseline_oracle()
-    actual = capture_baseline_oracle()
+    expected = _without_production_readiness(load_baseline_oracle())
+    actual = _without_production_readiness(capture_baseline_oracle())
     mismatches = compare_oracle_payloads(expected, actual)
     assert mismatches == [], "\n".join(mismatches)
 

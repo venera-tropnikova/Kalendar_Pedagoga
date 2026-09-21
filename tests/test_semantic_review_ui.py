@@ -356,10 +356,10 @@ def test_pending_review_allows_draft_docx_generation() -> None:
 def test_ready_plan_message_keeps_review_count_in_ui() -> None:
     assert ui._ready_plan_message(0) == "Календарный план готов"
     assert ui._ready_plan_message(1) == (
-        "Календарный план готов. Есть замечания: 1 неделя"
+        "Календарный план не готов к выдаче. Есть замечания: 1 неделя"
     )
     assert ui._ready_plan_message(18) == (
-        "Календарный план готов. Есть замечания: 18 недель"
+        "Календарный план не готов к выдаче. Есть замечания: 18 недель"
     )
     assert ui._fill_required_message(1) == "Требуется заполнить: 1 неделя"
     assert ui._fill_required_message(2) == "Требуется заполнить: 2 недели"
@@ -407,3 +407,43 @@ def test_no_cases_do_not_render_review_ui() -> None:
             scope="climb", cases=(), rows=()
         )
     markdown.assert_not_called()
+
+
+def test_readiness_block_shows_codes_missing_fields_and_action() -> None:
+    source = replace(
+        _source(4, ""),
+        match_status=MatchStatus.NOT_MATCHED,
+        program_content_full="",
+        program_content_preview="",
+    )
+    row = replace(
+        _empty_review_row(4),
+        source=source,
+        theory_text="",
+        practice_text="",
+        warnings=("Недостаточно данных источника; использован безопасный fallback.",),
+        clause_coverage=(),
+        clause_roles=(),
+    )
+    cases = build_semantic_review_cases((row,), context_fingerprint="scope")
+    markdown: list[str] = []
+    with (
+        patch.object(ui.st, "session_state", {}),
+        patch.object(ui.st, "markdown", side_effect=lambda text, **_: markdown.append(text)),
+        patch.object(ui.st, "write"),
+        patch.object(ui.st, "code"),
+        patch.object(ui.st, "text_area", return_value=""),
+        patch.object(ui.st, "button", return_value=False),
+        patch.object(ui.st, "error"),
+        patch.object(ui.st, "success"),
+    ):
+        ui._render_semantic_review_section(scope="scope", cases=cases, rows=(row,))
+    text = "\n".join(markdown)
+    assert "Неделя №4" in text
+    assert "Неделя заблокирована" in text
+    assert "SOURCE_NOT_MATCHED" in text
+    assert "EMPTY_RESULT" in text
+    assert "Отсутствует:" in text
+    assert "SOURCE" in text
+    assert "Что сделать:" in text
+    assert "Сопоставьте фрагмент содержания программы" in text

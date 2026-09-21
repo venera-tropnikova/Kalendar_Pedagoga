@@ -31,6 +31,7 @@ from calendar_pedagoga.content_engine_v2 import (
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
 )
+from calendar_pedagoga.production_readiness import production_readiness_codes
 from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import ScheduleResult
 
@@ -319,14 +320,21 @@ def review_context_fingerprint_from_rows(
     return _digest("semantic-review-v1-rows", rows, semantic_revision)
 
 
+def _week_needs_semantic_review(row: LessonContentV2Row) -> bool:
+    return week_has_unresolved_mandatory_review(row) or bool(
+        production_readiness_codes(row)
+    )
+
+
 def _case_reasons(row: LessonContentV2Row) -> tuple[str, ...]:
     role_map = dict(row.clause_roles)
-    reasons = [
+    reasons = list(production_readiness_codes(row))
+    reasons.extend(
         clause
         for clause, status in row.clause_coverage
         if status == "NEEDS_REVIEW"
         and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
-    ]
+    )
     if (
         row.planned_result.strip()
         and not _control_covers_all_result_items(
@@ -350,7 +358,7 @@ def build_semantic_review_cases(
 ) -> tuple[SemanticReviewCase, ...]:
     cases: list[SemanticReviewCase] = []
     for row in rows:
-        if not week_has_unresolved_mandatory_review(row):
+        if not _week_needs_semantic_review(row):
             continue
         role_map = dict(row.clause_roles)
         required = tuple(
@@ -436,10 +444,17 @@ def apply_manual_semantic_confirmations(
         output.append(validation.row)
 
     output_rows = tuple(output)
+    accepted_weeks = {
+        case.week_number for case in cases if case.review_id in accepted
+    }
     pending_weeks = {
         row.source.week_number
         for row in output_rows
         if week_has_unresolved_mandatory_review(row)
+        or (
+            row.source.week_number not in accepted_weeks
+            and production_readiness_codes(row)
+        )
     }
     return SemanticReviewApplication(
         rows=output_rows,

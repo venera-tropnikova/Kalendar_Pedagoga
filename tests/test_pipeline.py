@@ -17,6 +17,7 @@ from calendar_pedagoga.pipeline import (
 from calendar_pedagoga.docx_qa import has_blocking_qa_issues, validate_calendar_docx
 from calendar_pedagoga.organization_template import select_calendar_template
 from calendar_pedagoga.parsing import parse_utp
+from calendar_pedagoga.production_readiness import SOURCE_NOT_MATCHED
 from calendar_pedagoga.program_parsing import infer_study_year_number, parse_program
 from calendar_pedagoga.resolve_utp import resolve_utp
 from calendar_pedagoga.scheduling import build_schedule
@@ -194,7 +195,10 @@ def test_key_y1_draft_uses_ordinary_calendar_filename(monkeypatch) -> None:
     rows = captured["rows"]
     assert len(rows) == 36
     review_weeks = {case.week_number for case in result.review_cases}
-    assert len(review_weeks) == 16
+    assert len(review_weeks) == 15
+    assert 23 in review_weeks
+    week23 = next(case for case in result.review_cases if case.week_number == 23)
+    assert SOURCE_NOT_MATCHED in week23.reasons
     empty_review = [
         row.source.source.week_number
         for row in rows

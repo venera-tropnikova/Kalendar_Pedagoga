@@ -44,6 +44,7 @@ from calendar_pedagoga.pipeline import (
     PipelineError,
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
+    _build_pipeline_lesson_content_outcome,
 )
 from calendar_pedagoga.scheduling import build_schedule
 from docx import Document
@@ -57,10 +58,10 @@ SEMANTIC_PASS_UTP_PATH = REFERENCES / "УТП ТП 3г. 2ч.docx"
 
 def _resolved_lessons(content):
     return resolve_lesson_content(
-        _build_pipeline_lesson_content(
+        _build_pipeline_lesson_content_outcome(
             content,
             use_content_engine_v2=USE_CONTENT_ENGINE_V2,
-        )
+        ).rows
     )
 
 
@@ -140,7 +141,8 @@ def test_standard_template_exists() -> None:
 def test_docx_helpers_use_production_lesson_engine() -> None:
     helper_src = inspect.getsource(_resolved_lessons)
     ce1_call = "build_lesson_content" + "("
-    assert "_build_pipeline_lesson_content" in helper_src
+    assert "_build_pipeline_lesson_content_outcome" in helper_src
+    assert "_build_pipeline_lesson_content(" not in helper_src
     assert "USE_CONTENT_ENGINE_V2" in helper_src
     assert ce1_call not in helper_src
     assert ce1_call not in inspect.getsource(_semantic_pass_fixture)

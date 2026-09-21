@@ -44,6 +44,9 @@ from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import build_schedule
 from calendar_pedagoga.generator_revision import generator_revision
 from calendar_pedagoga.knowledge_case_repair import try_repair_review_candidate
+from calendar_pedagoga.production_readiness import (
+    rows_have_production_readiness_gaps,
+)
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -150,7 +153,8 @@ def _build_pipeline_lesson_content_outcome(
 
     v2_rows = build_lesson_content_v2(content_rows)
     blocks = unresolved_mandatory_review_blocks(v2_rows)
-    if not blocks:
+    readiness_gaps = rows_have_production_readiness_gaps(v2_rows)
+    if not blocks and not readiness_gaps:
         return _LessonContentBuild(
             rows=_lesson_rows_from_v2(v2_rows),
             v2_rows=v2_rows,
