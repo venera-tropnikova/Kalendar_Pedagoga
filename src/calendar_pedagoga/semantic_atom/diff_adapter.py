@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Iterable
 
+from calendar_pedagoga import content_engine_v2 as _ce2
 from calendar_pedagoga.semantic_atom.canonicalize import canonicalize_text
 from calendar_pedagoga.semantic_atom.control_adapter import compose_control
 from calendar_pedagoga.semantic_atom.frame_adapter import project_frames
@@ -15,9 +16,10 @@ from calendar_pedagoga.semantic_atom.lexical import (
     lookup_approved_control_template,
     shadow_lexical_violations,
     tokenize,
+    _lemmas,
 )
 from calendar_pedagoga.semantic_atom.models import FrameKind, ObjectStatus
-from calendar_pedagoga.semantic_atom.span_cover import action_cover_text
+from calendar_pedagoga.semantic_atom.span_cover import action_cover_text, attested_action_parts
 from calendar_pedagoga.semantic_atom.passthrough import DiffKind
 
 ADAPTER_NAME = "diff_c10"
@@ -434,7 +436,117 @@ def _frame_matches_clause(clause: str, frame: object, shadow: ShadowSnapshot) ->
         getattr(frame, "complement", ""),
         _frame_cover_text(frame, shadow),
     ]
-    return any(coverage_text_match(clause, str(raw or "")) for raw in texts)
+    if any(coverage_text_match(clause, str(raw or "")) for raw in texts):
+        return True
+    return _conjugated_action_head_covers_clause(clause, frame, shadow)
+
+
+def _atom_for_frame(frame: object, shadow: ShadowSnapshot) -> object | None:
+    atom_id = str(getattr(frame, "atom_id", "") or "")
+    if not atom_id:
+        return None
+    for atom in shadow.atoms:
+        if str(getattr(atom, "id", "") or "") == atom_id:
+            return atom
+    return None
+
+
+def _span_inside_atom(span: object | None, atom: object) -> bool:
+    if span is None:
+        return False
+    atom_span = getattr(atom, "span", None)
+    if atom_span is None:
+        return False
+    start = int(getattr(span, "start", 0) or 0)
+    end = int(getattr(span, "end", 0) or 0)
+    atom_start = int(getattr(atom_span, "start", 0) or 0)
+    atom_end = int(getattr(atom_span, "end", 0) or 0)
+    return atom_start <= start < end <= atom_end
+
+
+def _binding_on_same_atom(frame: object, atom: object, shadow: ShadowSnapshot) -> bool:
+    frame_id = str(getattr(frame, "id", "") or "")
+    atom_id = str(getattr(atom, "id", "") or "")
+    if not frame_id or not atom_id:
+        return False
+    for binding in shadow.bindings:
+        if str(getattr(binding, "frame_id", "") or "") != frame_id:
+            continue
+        if str(getattr(binding, "atom_id", "") or "") != atom_id:
+            return False
+        return _span_inside_atom(getattr(binding, "span", None), atom)
+    return False
+
+
+def _token_lemma_set(token: str) -> frozenset[str]:
+    core = token.casefold()
+    found = {core}
+    found.update(_lemmas(token))
+    return frozenset(item for item in found if item)
+
+
+def _haystack_lemma_set(haystack: str) -> frozenset[str]:
+    found: set[str] = set()
+    for token in _content_token_set(haystack):
+        found.update(_token_lemma_set(token))
+    return frozenset(found)
+
+
+def _token_attested_in_haystack(token: str, haystack: str, hay_lemmas: frozenset[str]) -> bool:
+    core = token.casefold()
+    if core in _content_token_set(haystack):
+        return True
+    return bool(_token_lemma_set(token) & hay_lemmas)
+
+
+def _conjugated_action_head_covers_clause(
+    clause: str,
+    frame: object,
+    shadow: ShadowSnapshot,
+) -> bool:
+    if getattr(frame, "kind", None) is not FrameKind.ACTION:
+        return False
+    if getattr(frame, "status", None) is not ObjectStatus.PROVEN:
+        return False
+    atom = _atom_for_frame(frame, shadow)
+    if atom is None:
+        return False
+    atom_text = str(getattr(atom, "text", "") or "")
+    if not coverage_text_match(clause, atom_text):
+        return False
+    if not _span_inside_atom(getattr(frame, "span", None), atom):
+        return False
+    if not _binding_on_same_atom(frame, atom, shadow):
+        return False
+    result = str(getattr(frame, "projected_result", "") or "")
+    finite = _ce2._leading_finite_verb(result)
+    head = _ce2._leading_activity_token(clause)
+    expected = _ce2._conjugate_explicit_action_head(head)
+    if not finite or not expected:
+        return False
+    if finite.casefold() != expected.casefold():
+        return False
+    cover = ", ".join(attested_action_parts(atom_text, frame))
+    haystack = _ce2._normalize_spaces(f"{result} {cover}".strip())
+    if not haystack:
+        return False
+    hay_lemmas = _haystack_lemma_set(haystack)
+    head_tokens = _content_token_set(head)
+    clause_tokens = _content_token_set(clause)
+    other_tokens = clause_tokens - head_tokens
+    if any(
+        not _token_attested_in_haystack(token, haystack, hay_lemmas)
+        for token in other_tokens
+    ):
+        return False
+    if not head_tokens:
+        return False
+    missing_head = [
+        token
+        for token in head_tokens
+        if not _token_attested_in_haystack(token, haystack, hay_lemmas)
+    ]
+    return bool(missing_head)
 
 
 def _week_diff(
