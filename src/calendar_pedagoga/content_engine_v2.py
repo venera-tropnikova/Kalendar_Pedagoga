@@ -332,6 +332,45 @@ def _apply_unresolved_confirmed_slot_generic(
     )
 
 
+def _apply_user_confirmed_sentence_frames(
+    candidate: ContentEngineV2Result,
+    row: CalendarContentRow,
+    parts: tuple[WeekTopicPart, ...],
+) -> ContentEngineV2Result:
+    """Replace overlay RESULT/CONTROL with one SentenceFrame render. Auto-path unchanged."""
+
+    from calendar_pedagoga.sentence_frame import (
+        frames_for_confirmed_row,
+        render_frames,
+        row_uses_sentence_frame,
+    )
+
+    if not row_uses_sentence_frame(row, parts):
+        return candidate
+    frames = frames_for_confirmed_row(row, parts)
+    planned_result, assessment_method, week_fallback = render_frames(frames)
+    if not planned_result.strip() or not assessment_method.strip():
+        return candidate
+    first = frames[0] if frames else None
+    codes = (
+        _stamp_generic_only(candidate.provenance_codes)
+        if week_fallback
+        else _drop_generic_only(candidate.provenance_codes)
+    )
+    return replace(
+        candidate,
+        frame=ActionFrame(
+            first.source_span if first else candidate.frame.clause,
+            first.action if first else candidate.frame.action,
+            first.object if first else candidate.frame.object,
+            "",
+        ),
+        planned_result=planned_result,
+        assessment_method=assessment_method,
+        provenance_codes=codes,
+    )
+
+
 def _row_is_unresolved_confirmed_slot(
     row: CalendarContentRow,
     parts: tuple[WeekTopicPart, ...],
@@ -12594,6 +12633,7 @@ def build_lesson_content_v2(
                 practice_hours=row.practice_hours,
             )
             final = _apply_unresolved_confirmed_slot_generic(final, slot)
+        final = _apply_user_confirmed_sentence_frames(final, row, parts)
         result.append(
             LessonContentV2Row(
                 source=row,
