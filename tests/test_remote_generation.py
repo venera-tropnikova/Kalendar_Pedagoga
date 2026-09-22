@@ -230,7 +230,15 @@ def test_build_payload_uses_contract_and_json_safe_reviews() -> None:
     assert payload["pipeline_contract"] == PIPELINE_CONTRACT
     assert payload["generator_revision"] == REVISION
     assert "template" not in payload
-    assert list(payload["match_reviews"]) == ['["1", "Тема", null]']
+    assert "program_overlay" not in payload
+    assert payload["match_reviews"] == [
+        {
+            "topic_number": "1",
+            "topic_title": "Тема",
+            "parent_section": None,
+            "review": {"decision": "USER_CONFIRMED"},
+        }
+    ]
     encoded = payload["program"]["content_base64"]
     assert base64.b64decode(encoded) == PROGRAM_PATH.read_bytes()
 

@@ -31,6 +31,8 @@ from calendar_pedagoga.generation_contract import (
     ManualSemanticConfirmationDTO,
     SemanticReviewCaseDTO,
     current_generator_revision,
+    decode_match_reviews,
+    decode_program_overlay,
 )
 from calendar_pedagoga.organization_template import select_calendar_template
 from calendar_pedagoga.pipeline import (
@@ -40,6 +42,7 @@ from calendar_pedagoga.pipeline import (
     run_calendar_pipeline,
 )
 from calendar_pedagoga.program_parsing import parse_program
+from calendar_pedagoga.program_structure_confirmation import overlay_confirmed_program
 
 
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
@@ -187,6 +190,11 @@ def _decode_generation_payload(payload: Mapping[str, Any]) -> _GenerationInputs:
         program_filename,
         study_year=plan.study_year,
     )
+    overlay_value = payload.get("program_overlay")
+    if overlay_value is not None:
+        program = overlay_confirmed_program(
+            program, decode_program_overlay(overlay_value)
+        )
     template_value = payload.get("template")
     if template_value is None:
         template = select_calendar_template()
@@ -207,9 +215,7 @@ def _decode_generation_payload(payload: Mapping[str, Any]) -> _GenerationInputs:
         raise GenerationContractError(
             "Ключ confirmation должен совпадать с его review_id."
         )
-    match_reviews = payload.get("match_reviews", {})
-    if not isinstance(match_reviews, Mapping):
-        raise GenerationContractError("Поле «match_reviews» должно быть объектом.")
+    match_reviews = decode_match_reviews(payload.get("match_reviews", []))
     academic_year = str(payload.get("academic_year") or "").strip()
     source_plan_name = str(payload.get("source_plan_name") or "").strip()
     if not academic_year or not source_plan_name:
@@ -226,7 +232,7 @@ def _decode_generation_payload(payload: Mapping[str, Any]) -> _GenerationInputs:
         group_number=_optional_text(payload.get("group_number")),
         class_name=_optional_text(payload.get("class_name")),
         teacher_name=_optional_text(payload.get("teacher_name")),
-        match_reviews=dict(match_reviews),
+        match_reviews=match_reviews,
         confirmations=confirmations,
     )
 

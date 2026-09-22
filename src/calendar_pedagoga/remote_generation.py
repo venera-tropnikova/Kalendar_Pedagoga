@@ -20,9 +20,12 @@ from calendar_pedagoga.confirmed_study_plan import (
 from calendar_pedagoga.generation_contract import (
     PIPELINE_CONTRACT,
     ConfirmedStudyPlanDTO,
+    GenerationContractError,
     ManualSemanticConfirmationDTO,
     SemanticReviewCaseDTO,
     current_generator_revision,
+    encode_match_reviews,
+    encode_program_overlay,
 )
 from calendar_pedagoga.organization_template import (
     CalendarTemplateSelection,
@@ -176,17 +179,61 @@ def _wire_file(filename: str, content: bytes) -> dict[str, str]:
     }
 
 
-def _wire_match_reviews(reviews: Mapping | None) -> dict[str, Any]:
-    if not reviews:
-        return {}
-    encoded: dict[str, Any] = {}
-    for key, value in reviews.items():
-        if isinstance(key, tuple):
-            wire_key = json.dumps(list(key), ensure_ascii=False)
-        else:
-            wire_key = str(key)
-        encoded[wire_key] = value
-    return encoded
+def build_generation_payload(
+    plan: ConfirmedStudyPlan | UtpParseResult,
+    *,
+    academic_year: str,
+    source_plan_name: str,
+    program_filename: str,
+    program_content: bytes,
+    template: CalendarTemplateSelection | None = None,
+    group_number: str | None = None,
+    class_name: str | None = None,
+    teacher_name: str | None = None,
+    match_reviews: Mapping | None = None,
+    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
+    generator_revision: str | None = None,
+    program: ProgramData | None = None,
+) -> dict[str, Any]:
+    if not program_filename.strip() or not program_content:
+        raise PipelineError("Для удалённой генерации нужна образовательная программа.")
+    try:
+        reviews = encode_match_reviews(match_reviews)
+        overlay = (
+            encode_program_overlay(program.content_items)
+            if program is not None and program.content_items
+            else None
+        )
+    except GenerationContractError as error:
+        raise PipelineError(str(error)) from error
+    payload: dict[str, Any] = {
+        "pipeline_contract": PIPELINE_CONTRACT,
+        "generator_revision": generator_revision or current_generator_revision(),
+        "plan": ConfirmedStudyPlanDTO.from_model(
+            _confirmed_plan(plan, source_plan_name=source_plan_name)
+        ).to_dict(),
+        "program": _wire_file(program_filename, program_content),
+        "academic_year": academic_year,
+        "source_plan_name": source_plan_name,
+        "confirmations": _wire_confirmations(manual_confirmations),
+        "match_reviews": reviews,
+    }
+    if overlay is not None:
+        payload["program_overlay"] = overlay
+    if group_number:
+        payload["group_number"] = group_number
+    if class_name:
+        payload["class_name"] = class_name
+    if teacher_name:
+        payload["teacher_name"] = teacher_name
+    if (
+        template is not None
+        and template.source is CalendarTemplateSource.ORGANIZATION
+        and template.filename
+        and template.content
+    ):
+        payload["template"] = _wire_file(template.filename, template.content)
+    return payload
 
 
 def _wire_confirmations(
@@ -215,51 +262,6 @@ def _confirmed_plan(
     if isinstance(plan, ConfirmedStudyPlan):
         return plan
     return confirmed_plan_from_external_utp(plan, source_name=source_plan_name)
-
-
-def build_generation_payload(
-    plan: ConfirmedStudyPlan | UtpParseResult,
-    *,
-    academic_year: str,
-    source_plan_name: str,
-    program_filename: str,
-    program_content: bytes,
-    template: CalendarTemplateSelection | None = None,
-    group_number: str | None = None,
-    class_name: str | None = None,
-    teacher_name: str | None = None,
-    match_reviews: Mapping | None = None,
-    manual_confirmations: Mapping[str, ManualSemanticConfirmation] | None = None,
-    generator_revision: str | None = None,
-) -> dict[str, Any]:
-    if not program_filename.strip() or not program_content:
-        raise PipelineError("Для удалённой генерации нужна образовательная программа.")
-    payload: dict[str, Any] = {
-        "pipeline_contract": PIPELINE_CONTRACT,
-        "generator_revision": generator_revision or current_generator_revision(),
-        "plan": ConfirmedStudyPlanDTO.from_model(
-            _confirmed_plan(plan, source_plan_name=source_plan_name)
-        ).to_dict(),
-        "program": _wire_file(program_filename, program_content),
-        "academic_year": academic_year,
-        "source_plan_name": source_plan_name,
-        "confirmations": _wire_confirmations(manual_confirmations),
-        "match_reviews": _wire_match_reviews(match_reviews),
-    }
-    if group_number:
-        payload["group_number"] = group_number
-    if class_name:
-        payload["class_name"] = class_name
-    if teacher_name:
-        payload["teacher_name"] = teacher_name
-    if (
-        template is not None
-        and template.source is CalendarTemplateSource.ORGANIZATION
-        and template.filename
-        and template.content
-    ):
-        payload["template"] = _wire_file(template.filename, template.content)
-    return payload
 
 
 def _confirmation_errors(
@@ -404,7 +406,7 @@ def submit_remote_calendar_job(
 ) -> dict[str, Any]:
     """POST /v1/calendar-jobs and return the created job. Does not poll."""
 
-    del program, ai_provider
+    del ai_provider
     if use_ai:
         raise PipelineError("Удалённая генерация работает только в режиме CE2 без AI.")
     if on_progress is not None:
@@ -422,6 +424,7 @@ def submit_remote_calendar_job(
         match_reviews=match_reviews,
         manual_confirmations=manual_confirmations,
         generator_revision=semantic_revision,
+        program=program,
     )
     base_url, request = _authorized_request(http_request, api_url)
     status, _headers, body = request(

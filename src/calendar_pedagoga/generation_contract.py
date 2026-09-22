@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any
 
 from calendar_pedagoga.confirmed_study_plan import (
     ConfirmedStudyPlan,
@@ -12,6 +13,7 @@ from calendar_pedagoga.confirmed_study_plan import (
 )
 from calendar_pedagoga.generator_revision import generator_revision
 from calendar_pedagoga.parsing import HourValue, Hours, Topic, UtpMetadata
+from calendar_pedagoga.program_parsing import ProgramContentItem
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
@@ -19,6 +21,10 @@ from calendar_pedagoga.semantic_review import (
 
 
 PIPELINE_CONTRACT = 1
+MAX_PROGRAM_OVERLAY_ITEMS = 500
+MAX_PROGRAM_ITEM_CONTENT_CHARS = 200_000
+MAX_PROGRAM_OVERLAY_TOTAL_CHARS = 2_000_000
+MAX_MATCH_REVIEW_RECORDS = 500
 
 
 class GenerationContractError(ValueError):
@@ -304,3 +310,184 @@ class SemanticReviewCaseDTO:
             reasons=tuple(reasons),
             status="REVIEW_REQUIRED",
         )
+
+
+def _optional_identity_text(value: object, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise GenerationContractError(f"Поле «{field}» должно быть строкой или null.")
+    text = value.strip()
+    return text or None
+
+
+def _optional_study_year(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GenerationContractError("Поле «study_year» должно быть целым числом или null.")
+    return value
+
+
+@dataclass(frozen=True)
+class ProgramContentItemDTO:
+    """JSON projection of one confirmed SOURCE item."""
+
+    number: str | None
+    title: str
+    content: str
+    parent_section: str | None
+    study_year: int | None
+
+    @classmethod
+    def from_model(cls, item: ProgramContentItem) -> "ProgramContentItemDTO":
+        return cls(
+            number=item.number,
+            title=item.title,
+            content=item.content,
+            parent_section=item.parent_section,
+            study_year=item.study_year,
+        )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ProgramContentItemDTO":
+        item = _required_mapping(value, field="program_overlay.item")
+        title = _required_text(item.get("title"), field="title")
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise GenerationContractError("Поле «content» должно быть строкой.")
+        if len(content) > MAX_PROGRAM_ITEM_CONTENT_CHARS:
+            raise GenerationContractError(
+                "Содержание пункта overlay превышает допустимый размер."
+            )
+        return cls(
+            number=_optional_identity_text(item.get("number"), field="number"),
+            title=title,
+            content=content,
+            parent_section=_optional_identity_text(
+                item.get("parent_section"), field="parent_section"
+            ),
+            study_year=_optional_study_year(item.get("study_year")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "number": self.number,
+            "title": self.title,
+            "content": self.content,
+            "parent_section": self.parent_section,
+            "study_year": self.study_year,
+        }
+
+    def to_model(self) -> ProgramContentItem:
+        return ProgramContentItem(
+            number=self.number,
+            title=self.title,
+            content=self.content,
+            parent_section=self.parent_section,
+            study_year=self.study_year,
+        )
+
+
+def encode_program_overlay(items: Sequence[ProgramContentItem]) -> dict[str, Any]:
+    encoded = [ProgramContentItemDTO.from_model(item).to_dict() for item in items]
+    if len(encoded) > MAX_PROGRAM_OVERLAY_ITEMS:
+        raise GenerationContractError("Слишком много пунктов program_overlay.")
+    return {"items": encoded}
+
+
+def decode_program_overlay(value: object) -> tuple[ProgramContentItem, ...]:
+    payload = _required_mapping(value, field="program_overlay")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raise GenerationContractError("Поле «program_overlay.items» должно быть массивом.")
+    if len(raw_items) > MAX_PROGRAM_OVERLAY_ITEMS:
+        raise GenerationContractError("Слишком много пунктов program_overlay.")
+    items: list[ProgramContentItem] = []
+    titles: set[str] = set()
+    total_chars = 0
+    for raw in raw_items:
+        dto = ProgramContentItemDTO.from_dict(raw)
+        if dto.title in titles:
+            raise GenerationContractError(
+                "Пункты program_overlay не должны повторять название."
+            )
+        titles.add(dto.title)
+        total_chars += len(dto.content)
+        if total_chars > MAX_PROGRAM_OVERLAY_TOTAL_CHARS:
+            raise GenerationContractError(
+                "Суммарный размер program_overlay превышает допустимый."
+            )
+        items.append(dto.to_model())
+    if not items:
+        raise GenerationContractError("program_overlay.items не должен быть пустым.")
+    return tuple(items)
+
+
+def encode_match_reviews(reviews: Mapping | None) -> list[dict[str, Any]]:
+    if not reviews:
+        return []
+    if len(reviews) > MAX_MATCH_REVIEW_RECORDS:
+        raise GenerationContractError("Слишком много match_reviews.")
+    encoded: list[dict[str, Any]] = []
+    for key, value in reviews.items():
+        if not (isinstance(key, tuple) and len(key) == 3):
+            raise GenerationContractError(
+                "Ключ match_reviews должен быть составным (number, title, parent_section)."
+            )
+        if not isinstance(value, Mapping):
+            raise GenerationContractError("Значение match_reviews должно быть объектом.")
+        number, title, parent_section = key
+        if title is None or not str(title).strip():
+            raise GenerationContractError("Поле «topic_title» обязательно.")
+        if number is not None and not isinstance(number, str):
+            raise GenerationContractError("Поле «topic_number» должно быть строкой или null.")
+        if parent_section is not None and not isinstance(parent_section, str):
+            raise GenerationContractError(
+                "Поле «parent_section» должно быть строкой или null."
+            )
+        encoded.append(
+            {
+                "topic_number": number,
+                "topic_title": str(title),
+                "parent_section": parent_section,
+                "review": dict(value),
+            }
+        )
+    return encoded
+
+
+def decode_match_reviews(value: object) -> dict[tuple[str | None, str, str | None], dict[str, Any]]:
+    """Restore apply_match_reviews keys; keep a legacy mapping as-is."""
+
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, list):
+        raise GenerationContractError(
+            "Поле «match_reviews» должно быть массивом записей или объектом."
+        )
+    if len(value) > MAX_MATCH_REVIEW_RECORDS:
+        raise GenerationContractError("Слишком много match_reviews.")
+    restored: dict[tuple[str | None, str, str | None], dict[str, Any]] = {}
+    for raw in value:
+        record = _required_mapping(raw, field="match_reviews[]")
+        title = _required_text(record.get("topic_title"), field="topic_title")
+        key = (
+            _optional_identity_text(record.get("topic_number"), field="topic_number"),
+            title,
+            _optional_identity_text(
+                record.get("parent_section"), field="parent_section"
+            ),
+        )
+        if key in restored:
+            raise GenerationContractError("Повторяющийся ключ match_reviews.")
+        review = record.get("review")
+        if not isinstance(review, Mapping):
+            raise GenerationContractError("Поле «review» должно быть объектом.")
+        item_ref = review.get("item_ref")
+        if item_ref is not None and not isinstance(item_ref, Mapping):
+            raise GenerationContractError("Поле «item_ref» должно быть объектом или null.")
+        restored[key] = dict(review)
+    return restored
