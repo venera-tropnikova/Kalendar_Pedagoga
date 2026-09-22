@@ -271,7 +271,7 @@ def test_holdout_overlay_and_w9_survive_api_decode() -> None:
     )
     week9_before = next(row for row in before if row.week_number == 9)
     assert week9_before.match_status is MatchStatus.USER_CONFIRMED
-    assert (week9_before.program_content_full or "").strip()
+    assert any(part.weekly_content_assigned for part in week9_before.week_parts)
     decoded = _decode_generation_payload(_roundtrip_payload(wire))
     assert tuple(_item_tuple(item) for item in decoded.program.content_items) == encoded_items
     assert set(decoded.match_reviews) == set(confirmation.match_reviews)
@@ -288,7 +288,7 @@ def test_holdout_overlay_and_w9_survive_api_decode() -> None:
     )
     week9 = next(row for row in content if row.week_number == 9)
     assert week9.match_status is MatchStatus.USER_CONFIRMED
-    assert (week9.program_content_full or "").strip()
+    assert any(part.weekly_content_assigned for part in week9.week_parts)
     assert week9.match_status is week9_before.match_status
     assert week9.program_content_full == week9_before.program_content_full
 

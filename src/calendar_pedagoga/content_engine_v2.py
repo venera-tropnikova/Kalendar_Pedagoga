@@ -241,7 +241,10 @@ def calendar_row_has_confirmed_source(
         theory_text,
         practice_text,
         row.program_content_full or "",
-    ) or any((part.program_content_full or "").strip() for part in bearing)
+    ) or any(
+        (part.program_content_full or "").strip() or part.weekly_content_assigned
+        for part in bearing
+    )
 
 
 def _ce2_pair_is_proven(candidate: ContentEngineV2Result) -> bool:
@@ -297,6 +300,55 @@ def _maybe_apply_generic_lesson_fallback(
         # Generic text is not SOURCE-backed coverage; keep P0 GENERIC_ONLY active.
         clause_coverage=(),
         clause_roles=(),
+    )
+
+
+def _apply_unresolved_confirmed_slot_generic(
+    candidate: ContentEngineV2Result,
+    part: WeekTopicPart,
+) -> ContentEngineV2Result:
+    """Keep GenericLessonFrame on an overlay slot that received no SOURCE units."""
+
+    if part.match_status is not MatchStatus.USER_CONFIRMED:
+        return candidate
+    if not part.weekly_content_assigned:
+        return candidate
+    if (part.program_content_full or "").strip():
+        return candidate
+    frame = generic_lesson_fallback_frame(
+        _weekly_source_topic(part),
+        theory_hours=part.theory_hours,
+        practice_hours=part.practice_hours,
+    )
+    planned_result, assessment_method = generic_lesson_fields_from_frame(frame)
+    return replace(
+        candidate,
+        frame=ActionFrame(frame.topic, frame.action, frame.object, ""),
+        planned_result=planned_result,
+        assessment_method=assessment_method,
+        provenance_codes=_stamp_generic_only(candidate.provenance_codes),
+        clause_coverage=(),
+        clause_roles=(),
+    )
+
+
+def _row_is_unresolved_confirmed_slot(
+    row: CalendarContentRow,
+    parts: tuple[WeekTopicPart, ...],
+) -> bool:
+    bearing = tuple(
+        part
+        for part in parts
+        if _positive_workload(part.theory_hours)
+        or _positive_workload(part.practice_hours)
+    ) or parts
+    if not bearing:
+        return False
+    return all(
+        part.match_status is MatchStatus.USER_CONFIRMED
+        and part.weekly_content_assigned
+        and not (part.program_content_full or "").strip()
+        for part in bearing
     )
 
 
@@ -12374,8 +12426,10 @@ def _derive_week_part(
         practice_appearance_count=practice_appearance_count,
     )
     if finalize:
-        return derive_fields_v2(**kwargs)
-    return _derive_fields_before_final_gate(**kwargs)
+        derived = derive_fields_v2(**kwargs)
+    else:
+        derived = _derive_fields_before_final_gate(**kwargs)
+    return _apply_unresolved_confirmed_slot_generic(derived, part)
 
 
 def _weekly_source_topic(part: WeekTopicPart | CalendarContentRow) -> str:
@@ -12487,15 +12541,12 @@ def build_lesson_content_v2(
             if row.practice_hours:
                 occurrence_index = practice_occurrences.get(key, 0)
                 practice_occurrences[key] = occurrence_index + 1
-            prepared = _derive_fields_before_final_gate(
-                topic_title=_weekly_source_topic(row),
-                theory_text=theory_text,
-                practice_text=practice_text,
-                program_content=row.program_content_full or "",
-                theory_hours=row.theory_hours,
-                practice_hours=row.practice_hours,
-                occurrence_index=occurrence_index,
-                practice_appearance_count=count if row.practice_hours else 0,
+            prepared = _derive_week_part(
+                parts[0],
+                _topic_hour_totals(parts),
+                occurrence_index,
+                count if row.practice_hours else 0,
+                finalize=False,
             )
             lesson_type = _aggregate_week_lesson_type(
                 parts,
@@ -12536,6 +12587,13 @@ def build_lesson_content_v2(
                 row, theory_text=theory_text, practice_text=practice_text
             ),
         )
+        if _row_is_unresolved_confirmed_slot(row, parts):
+            slot = replace(
+                parts[0],
+                theory_hours=row.theory_hours,
+                practice_hours=row.practice_hours,
+            )
+            final = _apply_unresolved_confirmed_slot_generic(final, slot)
         result.append(
             LessonContentV2Row(
                 source=row,

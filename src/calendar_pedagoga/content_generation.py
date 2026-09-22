@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
+
+from calendar_pedagoga.confirmed_slot_allocation import assign_confirmed_topic_slots
 
 from calendar_pedagoga.match_review import (
     MISSING_PROGRAM_CONTENT_NOTICE,
@@ -313,6 +315,48 @@ def _preview(text: str, limit: int = 320) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _allocate_confirmed_overlay_parts(
+    topic_rows: list[tuple[int, WeekTopicPart, object]],
+) -> list[tuple[int, WeekTopicPart, object]]:
+    """Replace broadcast overlay SOURCE with weekly slot segments."""
+
+    grouped: dict[tuple[str | None, str, str], list[int]] = {}
+    for index, (_week, part, _element) in enumerate(topic_rows):
+        key = (part.topic_number, part.topic_title, part.section)
+        grouped.setdefault(key, []).append(index)
+
+    allocated = list(topic_rows)
+    for indexes in grouped.values():
+        ordered = sorted(indexes, key=lambda item: (topic_rows[item][0], item))
+        parts = [topic_rows[index][1] for index in ordered]
+        source = next(
+            (part.program_content_full for part in parts if (part.program_content_full or "").strip()),
+            parts[0].program_content_full if parts else "",
+        )
+        assignments = assign_confirmed_topic_slots(
+            source_content=source,
+            match_statuses=tuple(part.match_status for part in parts),
+            already_assigned=tuple(part.weekly_content_assigned for part in parts),
+            theory_hours=tuple(part.theory_hours for part in parts),
+            practice_hours=tuple(part.practice_hours for part in parts),
+        )
+        if assignments is None:
+            continue
+        for index, assignment in zip(ordered, assignments):
+            week, part, element = allocated[index]
+            allocated[index] = (
+                week,
+                replace(
+                    part,
+                    program_content_full=assignment.content,
+                    warnings=tuple(dict.fromkeys((*part.warnings, *assignment.warnings))),
+                    weekly_content_assigned=assignment.weekly_content_assigned,
+                ),
+                element,
+            )
+    return allocated
+
+
 def study_year_for_matching(utp: UtpParseResult) -> int | None:
     """Тот же год обучения, что analysis и pipeline передают в matching."""
 
@@ -449,6 +493,8 @@ def build_content_model(
             for part_type in ("theory", "practice")
             if (group_key, part_type) in section_content
         ]
+        if match_status is MatchStatus.USER_CONFIRMED:
+            assigned_parts = []
         warnings = tuple(dict.fromkeys((
             *warnings,
             *(warning for item in assigned_parts for warning in item.warnings),
@@ -488,6 +534,8 @@ def build_content_model(
                 element,
             )
         )
+
+    topic_rows = _allocate_confirmed_overlay_parts(topic_rows)
 
     by_week: dict[int, list[tuple[WeekTopicPart, object]]] = {}
     for week_number, part, element in topic_rows:
