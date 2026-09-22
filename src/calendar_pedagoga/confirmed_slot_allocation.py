@@ -45,6 +45,7 @@ _SKIP_UNITS = frozenset(
         "практические работы",
         "практические занятия",
         "темы",
+        "продолжение",
     }
 )
 
@@ -107,6 +108,12 @@ def _join_units(units: tuple[str, ...]) -> str:
     return body if body.endswith((".", "!", "?")) else body + "."
 
 
+def format_allocated_units(units: tuple[str, ...]) -> str:
+    """Join allocated weekly units for SOURCE display and SentenceFrame."""
+
+    return _join_units(units)
+
+
 def _quoted_titles(text: str) -> tuple[str, ...]:
     titles: list[str] = []
     for match in _QUOTED_RE.finditer(text):
@@ -116,31 +123,81 @@ def _quoted_titles(text: str) -> tuple[str, ...]:
     return tuple(titles)
 
 
-def _expand_channel_units(text: str) -> tuple[str, ...]:
-    from calendar_pedagoga.lesson_content import _clause_units
+_EMPTY_UNIT_RE = re.compile(r"^[\s,;:.\-–—/]*$")
+
+
+def _skip_structural_unit(text: str) -> bool:
+    cleaned = _normalize_spaces(text)
+    if not cleaned or _EMPTY_UNIT_RE.match(cleaned):
+        return True
+    folded = cleaned.casefold().strip(" .:;,-")
+    if not folded or folded in _SKIP_UNITS:
+        return True
+    if not re.search(r"[0-9a-zа-яё]", folded, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _catalog_item_units(text: str) -> tuple[str, ...] | None:
     from calendar_pedagoga.practice_slots import (
         format_catalog_part,
         parse_splittable_catalog,
     )
 
+    catalog = parse_splittable_catalog(text)
+    if catalog is None:
+        return None
+    head, separator, items = catalog
+    return tuple(format_catalog_part(head, separator, (item,)) for item in items)
+
+
+def _expand_segment(segment: str) -> tuple[str, ...]:
+    from calendar_pedagoga.lesson_content import _clause_units
+
+    cleaned = _normalize_spaces(segment)
+    if not cleaned or _skip_structural_unit(cleaned):
+        return ()
+    catalog_units = _catalog_item_units(cleaned)
+    if catalog_units is not None:
+        return catalog_units
+    quoted = _quoted_titles(cleaned)
+    if quoted:
+        remainder = _QUOTED_RE.sub(" ", cleaned)
+        extra: list[str] = []
+        for raw in _clause_units(remainder):
+            if _skip_structural_unit(raw):
+                continue
+            nested = _catalog_item_units(raw)
+            if nested is not None:
+                extra.extend(nested)
+                continue
+            extra.append(raw)
+        return tuple((*quoted, *extra))
     units: list[str] = []
-    for raw in _clause_units(text):
-        folded = raw.casefold().strip(" .:")
-        if folded in _SKIP_UNITS:
+    for raw in _clause_units(cleaned):
+        if _skip_structural_unit(raw):
             continue
-        catalog = parse_splittable_catalog(raw)
-        if catalog is not None:
-            head, separator, items = catalog
-            units.extend(
-                format_catalog_part(head, separator, (item,)) for item in items
-            )
+        nested = _catalog_item_units(raw)
+        if nested is not None:
+            units.extend(nested)
             continue
-        quoted = _quoted_titles(raw)
-        if len(quoted) >= 2:
-            units.extend(quoted)
+        nested_quoted = _quoted_titles(raw)
+        if nested_quoted:
+            units.extend(nested_quoted)
             continue
         units.append(raw)
-    return tuple(dict.fromkeys(units))
+    return tuple(units)
+
+
+def _expand_channel_units(text: str) -> tuple[str, ...]:
+    """Catalog and quoted titles first; a period inside quotes is not a boundary."""
+
+    units: list[str] = []
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    segments = lines or [_normalize_spaces(text or "")]
+    for segment in segments:
+        units.extend(_expand_segment(segment))
+    return tuple(dict.fromkeys(unit for unit in units if unit.strip()))
 
 
 def split_confirmed_source(

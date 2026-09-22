@@ -145,6 +145,7 @@ from calendar_pedagoga.program_structure_confirmation import (
     ProgramStructureConfirmationError,
     StructureConfirmation,
     catalog_source_items,
+    confirm_embedded_utp_structure,
     confirm_program_structure,
     draft_source_ledger,
     draft_structure_rows,
@@ -3150,70 +3151,14 @@ def _render_unresolved_topic_card(
     *,
     source_records,
 ) -> dict[str, str]:
-    schedule_id = row.get("schedule_id") or ""
+    del source_records
     title = _unresolved_topic_card_title(row)
     st.markdown(f"**{title}**")
     st.caption(
         f"Теория: {row.get('theory_hours') or '0'} ч · "
         f"Практика: {row.get('practice_hours') or '0'} ч"
     )
-    has_theory = _hours_positive(row.get("theory_hours"))
-    has_practice = _hours_positive(row.get("practice_hours"))
-    origin = STRUCTURE_ORIGIN_MANUAL_LABEL
-    if source_records:
-        origin = st.radio(
-            "Как заполнить содержание",
-            (STRUCTURE_ORIGIN_MANUAL_LABEL, STRUCTURE_ORIGIN_EXCERPT_LABEL),
-            key=f"structure_topic_{schedule_id}_origin",
-            horizontal=True,
-        )
-    theory_content = ""
-    practice_content = ""
-    source_item_id = ""
-    excerpt = ""
-    content_origin = ""
-    if origin == STRUCTURE_ORIGIN_EXCERPT_LABEL:
-        options = [""] + [record.item_id for record in source_records]
-        labels = {"": "не выбран"}
-        labels.update(
-            {
-                record.item_id: f"{record.item_id} · {record.title}"
-                for record in source_records
-            }
-        )
-        source_item_id = st.selectbox(
-            STRUCTURE_SOURCE_ITEM_LABEL,
-            options,
-            format_func=lambda item_id: labels.get(item_id, item_id),
-            key=f"structure_topic_{schedule_id}_source",
-        )
-        excerpt = st.text_area(
-            STRUCTURE_EXCERPT_LABEL,
-            key=f"structure_topic_{schedule_id}_excerpt",
-        )
-        if source_item_id and excerpt:
-            content_origin = CONTENT_ORIGIN_EXCERPT
-    else:
-        if has_theory:
-            theory_content = st.text_area(
-                STRUCTURE_THEORY_CONTENT_LABEL,
-                key=f"structure_topic_{schedule_id}_theory",
-            )
-        if has_practice:
-            practice_content = st.text_area(
-                STRUCTURE_PRACTICE_CONTENT_LABEL,
-                key=f"structure_topic_{schedule_id}_practice",
-            )
-        if theory_content or practice_content:
-            content_origin = CONTENT_ORIGIN_MANUAL
-    return {
-        **row,
-        "theory_content": theory_content,
-        "practice_content": practice_content,
-        "source_item_id": source_item_id or "",
-        "excerpt": excerpt or "",
-        "content_origin": content_origin,
-    }
+    return dict(row)
 
 
 def _render_structure_confirmation_table(
@@ -3222,8 +3167,8 @@ def _render_structure_confirmation_table(
     source_items=(),
 ) -> tuple[dict[str, str], ...]:
     st.markdown(
-        '<p class="kp-status-lead">Программа распознана неполностью. '
-        "Проверьте структуру и подтвердите её перед генерацией.</p>",
+        '<p class="kp-status-lead">Нужно устранить структурную ошибку '
+        "учебного плана перед генерацией.</p>",
         unsafe_allow_html=True,
     )
     unresolved = unresolved_schedule_rows(draft)
@@ -4071,7 +4016,40 @@ def _render_semantic_review_section(
             "Ручное подтверждение не требуется."
         )
         for case in notices:
+            row = row_by_id[case.review_id]
             _render_review_case_facts(case)
+            widget_suffix = case.review_id.rsplit(":", 1)[-1][:16]
+            edit_key = f"semantic_review_edit_{widget_suffix}"
+            result_key = f"semantic_review_input_result_{widget_suffix}"
+            control_key = f"semantic_review_input_control_{widget_suffix}"
+            if st.session_state.get(edit_key):
+                result = st.text_area(
+                    "Результат педагога",
+                    key=result_key,
+                )
+                control = st.text_area(
+                    "Контроль педагога",
+                    key=control_key,
+                )
+                if st.button("Сохранить формулировку", key=f"semantic_review_save_{widget_suffix}"):
+                    _store_semantic_confirmation(
+                        scope=scope,
+                        case=case,
+                        row=row,
+                        planned_result=result,
+                        assessment_method=control,
+                    )
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+                continue
+            if st.button(
+                "Изменить формулировку",
+                key=f"semantic_review_override_{widget_suffix}",
+            ):
+                st.session_state[edit_key] = True
+                st.session_state[result_key] = row.planned_result
+                st.session_state[control_key] = row.assessment_method
+                st.rerun()
 
     if fill_required:
         st.markdown(f"## {_fill_required_message(len(fill_required))}")
@@ -4097,7 +4075,7 @@ def _render_semantic_review_section(
                     key=f"semantic_review_read_control_{widget_suffix}",
                 )
                 st.success("Содержание подтверждено.")
-                if st.button("Изменить", key=f"semantic_review_change_{widget_suffix}"):
+                if st.button("Изменить формулировку", key=f"semantic_review_change_{widget_suffix}"):
                     confirmations.pop(case.review_id, None)
                     issues_by_id.pop(case.review_id, None)
                     st.session_state[result_key] = confirmation.planned_result
@@ -5349,12 +5327,58 @@ def run_app() -> None:
             resolved_plan = (
                 resolved_utp if isinstance(resolved_utp, ConfirmedStudyPlan) else None
             )
+            selected_utp = select_embedded_utp(
+                embedded,
+                study_plan_input.study_year,
+            )
             draft_matches = matches_for_draft(
                 resolved_plan,
                 program,
                 embedded,
                 study_year=study_plan_input.study_year,
             )
+            if resolved_plan is None and selected_utp is not None:
+                scope = _structure_scope_from_inputs(
+                    program_file,
+                    utp_file,
+                    study_plan_input.study_year,
+                )
+                try:
+                    confirmation = confirm_embedded_utp_structure(
+                        program=program,
+                        embedded=embedded,
+                        study_year=int(study_plan_input.study_year),
+                        study_weeks=int(study_plan_input.study_weeks),
+                        hours_per_week=study_plan_input.hours_per_week,
+                        scope=scope,
+                        source_items=program.content_items,
+                    )
+                except (ProgramStructureConfirmationError, ConfirmedStudyPlanError) as error:
+                    _abort_document_check(str(error))
+                    return
+                st.session_state["structure_confirmation_meta"] = {
+                    "program": program,
+                    "validated_program": validated_program,
+                    "template_selection": template_selection,
+                    "academic_year": academic_year,
+                    "plan_filename": (
+                        validated_utp_upload.filename
+                        if validated_utp_upload is not None
+                        else "Подтверждённая структура программы"
+                    ),
+                    "study_year": study_plan_input.study_year,
+                    "study_weeks": study_plan_input.study_weeks,
+                    "hours_per_week": study_plan_input.hours_per_week,
+                    "plan": confirmation.plan,
+                    "selected_utp": selected_utp,
+                    "embedded": embedded,
+                }
+                st.session_state.pop("calendar_check_pending", None)
+                st.session_state.pop("calendar_busy", None)
+                st.session_state.pop("calendar_work_status", None)
+                _apply_structure_confirmation_to_context(confirmation)
+                st.rerun()
+                return
             if (
                 resolved_plan is None
                 and needs_structure_confirmation(
@@ -5364,6 +5388,7 @@ def run_app() -> None:
                     has_external_utp=validated_utp_upload is not None,
                     study_year=study_plan_input.study_year,
                     matches=draft_matches,
+                    has_unique_embedded_utp=selected_utp is not None,
                 )
             ):
                 draft = draft_structure_rows(

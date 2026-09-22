@@ -389,14 +389,17 @@ def test_empty_fields_are_rejected() -> None:
             "practice_content": "",
         },
     )
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=empty_source,
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope=scope,
-        )
+    empty_confirmation = confirm_program_structure(
+        rows=empty_source,
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope=scope,
+    )
+    assert empty_confirmation.program_items[0].content == ""
+    assert empty_confirmation.match_reviews[("1", "Лепка", "Лепка")]["decision"] == (
+        "USER_CONFIRMED"
+    )
 
 
 def test_wrong_hours_are_rejected() -> None:
@@ -638,7 +641,7 @@ def test_tourists_program_stays_on_auto_path_when_plan_is_confirmed() -> None:
         has_external_utp=True,
         study_year=plan.study_year,
         matches=matches,
-    ) is bool(unmatched_source_topics(plan, matches))
+    ) is False
 
 
 def test_source_items_never_disappear() -> None:
@@ -681,16 +684,16 @@ def test_unresolved_source_items_block_confirmation() -> None:
     items = (_item("Лепка"), _item("Роспись"))
     ledger = draft_source_ledger(_program_data(*items))
     assert all(row["disposition"] == DISPOSITION_UNRESOLVED for row in ledger)
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=({**_manual_row(), "theory_content": "", "practice_content": ""},),
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope="unresolved",
-            source_items=items,
-            ledger=ledger,
-        )
+    confirmation = confirm_program_structure(
+        rows=({**_manual_row(), "theory_content": "", "practice_content": ""},),
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope="unresolved",
+        source_items=items,
+        ledger=ledger,
+    )
+    assert confirmation.program_items[0].content == ""
 
 
 def test_explicit_exclusion_allows_confirmation() -> None:
@@ -829,7 +832,8 @@ def test_holdout_uses_explicit_weeks_and_hours_not_topic_count() -> None:
         embedded_utp_count=len(embedded),
         has_external_utp=False,
         study_year=1,
-    )
+        has_unique_embedded_utp=selected is not None,
+    ) is False
     schedule_titles = tuple(topic.title for topic in topics)
     heading_titles = {"I год обучения", "Особенности работы 1 года обучения"}
     assert [row["topic"] for row in draft] == list(schedule_titles)
@@ -859,18 +863,26 @@ def test_holdout_uses_explicit_weeks_and_hours_not_topic_count() -> None:
     )
     assert all(excerpt in source_item.content for excerpt in excerpts)
     assert all(excerpt != source_item.content.strip() for excerpt in excerpts)
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=draft,
-            study_year=1,
-            study_weeks=32,
-            hours_per_week="3",
-            scope="holdout-unresolved",
-            source_items=program.content_items,
-            ledger=draft_ledger,
-            selected_utp=selected,
-            embedded=embedded,
-        )
+    confirmation = confirm_program_structure(
+        rows=draft,
+        study_year=1,
+        study_weeks=32,
+        hours_per_week="3",
+        scope="holdout-unresolved",
+        source_items=program.content_items,
+        ledger=draft_ledger,
+        selected_utp=selected,
+        embedded=embedded,
+    )
+    assert confirmation.plan.total_hours == 96
+    assert needs_structure_confirmation(
+        plan=None,
+        program=program,
+        embedded_utp_count=len(embedded),
+        has_external_utp=False,
+        study_year=1,
+        has_unique_embedded_utp=True,
+    ) is False
     study_weeks = 32
     hours_per_week = 3
     total_hours = study_weeks * hours_per_week
@@ -1011,18 +1023,19 @@ def test_content_mapping_is_separate_from_schedule() -> None:
     assert {row["title"] for row in ledger} == content_titles
     assert len({row["excerpt"] for row in draft if row["excerpt"]}) == 6
     assert {row["topic"] for row in draft} != {row["title"] for row in ledger}
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=draft,
-            study_year=1,
-            study_weeks=32,
-            hours_per_week="3",
-            scope="separate",
-            source_items=program.content_items,
-            ledger=ledger,
-            selected_utp=selected,
-            embedded=embedded,
-        )
+    confirmation = confirm_program_structure(
+        rows=draft,
+        study_year=1,
+        study_weeks=32,
+        hours_per_week="3",
+        scope="separate",
+        source_items=program.content_items,
+        ledger=ledger,
+        selected_utp=selected,
+        embedded=embedded,
+    )
+    assert confirmation.plan.total_hours == 96
+    assert any(not (item.content or "").strip() for item in confirmation.program_items)
     assert schedule_titles == {topic.title for topic in topics}
     assert "I год обучения" not in schedule_titles
     assert "Особенности работы 1 года обучения" not in schedule_titles
@@ -1054,18 +1067,19 @@ def test_schedule_topic_without_source_blocks_confirmation() -> None:
         sum(topic.hours.total for topic in schedule_topics_from_candidate(selected))
         / weekly
     )
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=emptied,
-            study_year=1,
-            study_weeks=weeks,
-            hours_per_week=str(weekly),
-            scope="no-source",
-            source_items=program.content_items,
-            ledger=ledger,
-            selected_utp=selected,
-            embedded=embedded,
-        )
+    confirmation = confirm_program_structure(
+        rows=emptied,
+        study_year=1,
+        study_weeks=weeks,
+        hours_per_week=str(weekly),
+        scope="no-source",
+        source_items=program.content_items,
+        ledger=ledger,
+        selected_utp=selected,
+        embedded=embedded,
+    )
+    assert confirmation.plan.topics
+    assert all(not (item.content or "").strip() for item in confirmation.program_items)
 
 
 def test_multi_topic_utp_distributes_across_explicit_weeks() -> None:
@@ -1130,7 +1144,7 @@ def test_auto_plan_with_unmatched_source_opens_confirmation_and_keeps_auto_rows(
         program=program,
         has_external_utp=True,
         matches=matches,
-    )
+    ) is False
     assert all(row["match_status"] != MatchStatus.USER_CONFIRMED.value for row in draft)
     before_statuses = {row["topic"]: row["match_status"] for row in draft}
     proven_titles = {
@@ -1218,14 +1232,18 @@ def test_user_confirmed_only_after_explicit_confirm_with_source() -> None:
     }
     draft = (proven, problem)
     assert all(row["match_status"] != MatchStatus.USER_CONFIRMED.value for row in draft)
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=draft,
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope="explicit-empty",
-        )
+    empty_confirmation = confirm_program_structure(
+        rows=draft,
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope="explicit-empty",
+    )
+    assert empty_confirmation.match_reviews
+    assert all(
+        review["decision"] == "USER_CONFIRMED"
+        for review in empty_confirmation.match_reviews.values()
+    )
     filled = (
         proven,
         {
@@ -1423,41 +1441,43 @@ def test_identical_full_block_for_unrelated_topics_forbidden() -> None:
 
 
 def test_empty_topic_stays_unresolved() -> None:
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=(
-                {
-                    **_manual_row("Пустая"),
-                    "theory_content": "",
-                    "practice_content": "",
-                },
-            ),
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope="empty-topic",
-        )
+    confirmation = confirm_program_structure(
+        rows=(
+            {
+                **_manual_row("Пустая"),
+                "theory_content": "",
+                "practice_content": "",
+            },
+        ),
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope="empty-topic",
+    )
+    assert confirmation.program_items[0].title == "Пустая"
+    assert confirmation.program_items[0].content == ""
 
 
 def test_user_confirmed_is_per_topic() -> None:
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=(
-                {
-                    **_manual_row("Подтверждённая"),
-                    "content_origin": CONTENT_ORIGIN_MANUAL,
-                },
-                {
-                    **_manual_row("Незаполненная"),
-                    "theory_content": "",
-                    "practice_content": "",
-                },
-            ),
-            study_year=1,
-            study_weeks=2,
-            hours_per_week="2",
-            scope="per-topic",
-        )
+    mixed = confirm_program_structure(
+        rows=(
+            {
+                **_manual_row("Подтверждённая"),
+                "content_origin": CONTENT_ORIGIN_MANUAL,
+            },
+            {
+                **_manual_row("Незаполненная"),
+                "theory_content": "",
+                "practice_content": "",
+            },
+        ),
+        study_year=1,
+        study_weeks=2,
+        hours_per_week="2",
+        scope="per-topic",
+    )
+    assert len(mixed.program_items) == 2
+    assert mixed.program_items[1].content == ""
     confirmation = confirm_program_structure(
         rows=(
             {
@@ -1683,16 +1703,16 @@ def test_duplicate_topic_number_stays_unresolved() -> None:
     assert draft[0]["topic_status"] == TOPIC_STATUS_UNRESOLVED
     ledger = draft_source_ledger(program, study_year=1, topics=plan.topics)
     assert ledger[0]["disposition"] == DISPOSITION_UNRESOLVED
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=draft,
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope="ambiguous",
-            source_items=program.content_items,
-            ledger=ledger,
-        )
+    confirmation = confirm_program_structure(
+        rows=draft,
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope="ambiguous",
+        source_items=program.content_items,
+        ledger=ledger,
+    )
+    assert confirmation.plan.topics[0].title == "Введение"
 
 
 def test_ui_unknown_program_without_utp_asks_to_confirm_structure() -> None:
@@ -1774,121 +1794,60 @@ def test_overlay_keeps_topic_identity_and_hours() -> None:
 
 
 def test_empty_required_theory_slot_blocks_confirmation() -> None:
-    with pytest.raises(ProgramStructureConfirmationError, match="нерешённые темы"):
-        confirm_program_structure(
-            rows=(
-                {
-                    **_manual_row(),
-                    "theory_content": "",
-                    "practice_content": "Практика заполнена.",
-                    "content_origin": CONTENT_ORIGIN_MANUAL,
-                },
-            ),
-            study_year=1,
-            study_weeks=1,
-            hours_per_week="2",
-            scope="empty-theory-slot",
-        )
+    confirmation = confirm_program_structure(
+        rows=(
+            {
+                **_manual_row(),
+                "theory_content": "",
+                "practice_content": "Практика заполнена.",
+                "content_origin": CONTENT_ORIGIN_MANUAL,
+            },
+        ),
+        study_year=1,
+        study_weeks=1,
+        hours_per_week="2",
+        scope="empty-theory-slot",
+    )
+    assert "Практика заполнена." in confirmation.program_items[0].content
 
 
-def _open_structure_cards():
+def _check_uploaded_program(payload: bytes, *, filename: str, weeks: int, hours: str):
     from streamlit.testing.v1 import AppTest
 
     from test_ui import APP_PATH, _check_button, _upload_bytes
 
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
-    _upload_bytes(app, 0, "cards-program.docx", _card_program_docx())
+    _upload_bytes(app, 0, filename, payload)
     app.run()
     year = next(
         item for item in app.number_input if item.label == "Год обучения по программе"
     )
     year.set_value(1).run()
-    weeks = next(
+    weeks_input = next(
         item
         for item in app.number_input
         if item.label == "Количество учебных недель"
     )
-    weeks.set_value(1).run()
+    weeks_input.set_value(weeks).run()
     weekly = next(
         item
         for item in app.text_input
         if item.label == "Количество часов в неделю"
     )
-    weekly.set_value("5").run()
+    weekly.set_value(hours).run()
     _check_button(app).click().run()
     assert not app.exception
-    assert app.session_state.get("structure_confirmation_pending") is True
     return app
 
 
-def _visible_confirmation_text(app) -> str:
-    markdown = " ".join(str(item.value) for item in app.markdown)
-    captions = " ".join(str(getattr(item, "value", item)) for item in app.caption)
-    return f"{markdown} {captions}"
-
-
-def test_ui_unresolved_topics_are_read_only_cards() -> None:
-    app = _open_structure_cards()
-    visible = _visible_confirmation_text(app)
-    assert "Итоговое занятие" in visible
-    assert "Конкурсы и выставки" in visible
-    assert visible.count("Тема №") >= 2
-    assert "Теория: 2 ч · Практика: 0 ч" in visible
-    assert "Теория: 0 ч · Практика: 2 ч" in visible
-    draft = tuple(app.session_state.get("structure_confirmation_draft") or ())
-    unresolved = unresolved_schedule_rows(draft)
-    assert len(draft) == 3
-    assert len(unresolved) == 2
-    assert not any(item.label == "Тема расписания" for item in app.text_input)
-    assert STRUCTURE_THEORY_CONTENT_LABEL not in [
-        item.label for item in app.text_input
-    ]
-    assert STRUCTURE_THEORY_CONTENT_LABEL in [item.label for item in app.text_area]
-    assert STRUCTURE_PRACTICE_CONTENT_LABEL in [item.label for item in app.text_area]
-    assert sum(
-        1 for item in app.text_area if item.label == STRUCTURE_THEORY_CONTENT_LABEL
-    ) == 1
-    assert sum(
-        1 for item in app.text_area if item.label == STRUCTURE_PRACTICE_CONTENT_LABEL
-    ) == 1
-    draft = tuple(app.session_state.get("structure_confirmation_draft") or ())
-    assert [row["topic"] for row in draft] == [
-        "Введение",
-        "Итоговое занятие",
-        "Конкурсы и выставки",
-    ]
-
-
-def test_ui_empty_card_fields_block_confirmation() -> None:
-    app = _open_structure_cards()
-    assert app.session_state.get("structure_confirmation_result") is None
-    next(button for button in app.button if button.label == STRUCTURE_CONFIRM_BUTTON).click().run()
-    assert app.session_state.get("structure_confirmation_pending") is True
-    assert app.session_state.get("structure_confirmation_result") is None
-    assert any("нерешённые темы" in item.value for item in app.error)
-
-
-def test_ui_manual_cards_confirm_without_renaming_topics() -> None:
-    app = _open_structure_cards()
-    draft = tuple(app.session_state.get("structure_confirmation_draft") or ())
-    assert all(
-        row.get("match_status") != MatchStatus.USER_CONFIRMED.value for row in draft
+def test_ui_unique_embedded_utp_skips_structure_screen() -> None:
+    app = _check_uploaded_program(
+        _card_program_docx(),
+        filename="cards-program.docx",
+        weeks=1,
+        hours="5",
     )
-    theory = next(
-        item for item in app.text_area if item.label == STRUCTURE_THEORY_CONTENT_LABEL
-    )
-    practice = next(
-        item for item in app.text_area if item.label == STRUCTURE_PRACTICE_CONTENT_LABEL
-    )
-    theory.set_value("Подведение итогов первого года.").run()
-    practice.set_value("Подготовка конкурсных работ.").run()
-    assert app.session_state.get("structure_confirmation_result") is None
-    assert all(
-        row.get("match_status") != MatchStatus.USER_CONFIRMED.value
-        for row in tuple(app.session_state.get("structure_confirmation_draft") or ())
-    )
-    next(button for button in app.button if button.label == STRUCTURE_CONFIRM_BUTTON).click().run()
-    assert not app.exception
+    assert app.session_state.get("structure_confirmation_pending") is not True
     result = app.session_state.get("structure_confirmation_result")
     assert result is not None
     assert [topic.title for topic in result.plan.topics] == [
@@ -1896,33 +1855,44 @@ def test_ui_manual_cards_confirm_without_renaming_topics() -> None:
         "Итоговое занятие",
         "Конкурсы и выставки",
     ]
-    assert sum(
-        status == TOPIC_STATUS_USER_CONFIRMED for status in result.topic_statuses
-    ) == 3
+    assert STRUCTURE_THEORY_CONTENT_LABEL not in [item.label for item in app.text_area]
+    assert STRUCTURE_PRACTICE_CONTENT_LABEL not in [item.label for item in app.text_area]
+    assert "Подтвердить формулировки" not in [item.label for item in app.button]
 
 
-def test_ui_source_excerpt_must_be_exact_substring() -> None:
-    app = _open_structure_cards()
-    radios = [item for item in app.radio if item.label == "Как заполнить содержание"]
-    assert len(radios) == 2
-    radios[0].set_value(STRUCTURE_ORIGIN_EXCERPT_LABEL).run()
-    source = next(
-        item for item in app.selectbox if item.label == STRUCTURE_SOURCE_ITEM_LABEL
+def test_missing_or_ambiguous_utp_is_structural() -> None:
+    program = _program_data(_item("Лепка"))
+    assert needs_structure_confirmation(
+        plan=None,
+        program=program,
+        embedded_utp_count=0,
+        has_unique_embedded_utp=False,
+    ) is True
+    assert needs_structure_confirmation(
+        plan=None,
+        program=program,
+        embedded_utp_count=2,
+        has_unique_embedded_utp=False,
+    ) is True
+    assert needs_structure_confirmation(
+        plan=None,
+        program=program,
+        embedded_utp_count=2,
+        has_unique_embedded_utp=True,
+    ) is False
+
+
+def test_ui_structure_confirm_does_not_require_source_text() -> None:
+    app = _check_uploaded_program(
+        _card_program_docx(),
+        filename="cards-program.docx",
+        weeks=1,
+        hours="5",
     )
-    ledger = tuple(app.session_state.get("structure_confirmation_draft_ledger") or ())
-    mapped = next(row for row in ledger if row["disposition"] == DISPOSITION_MAPPED)
-    source.set_value(mapped["item_id"]).run()
-    excerpt = next(item for item in app.text_area if item.label == STRUCTURE_EXCERPT_LABEL)
-    excerpt.set_value("этого фрагмента нет в SOURCE").run()
-    practice = next(
-        item for item in app.text_area if item.label == STRUCTURE_PRACTICE_CONTENT_LABEL
-    )
-    practice.set_value("Подготовка конкурсных работ.").run()
-    next(button for button in app.button if button.label == STRUCTURE_CONFIRM_BUTTON).click().run()
-    assert app.session_state.get("structure_confirmation_result") is None
-    assert any("подстрокой" in item.value for item in app.error)
-    excerpt.set_value("Знакомство с инструментами.").run()
-    next(button for button in app.button if button.label == STRUCTURE_CONFIRM_BUTTON).click().run()
     result = app.session_state.get("structure_confirmation_result")
     assert result is not None
-    assert [topic.title for topic in result.plan.topics][1] == "Итоговое занятие"
+    assert result.plan.total_hours == 5
+    assert all(
+        review["decision"] == "USER_CONFIRMED"
+        for review in result.match_reviews.values()
+    )

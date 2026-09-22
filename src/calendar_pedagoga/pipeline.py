@@ -35,6 +35,7 @@ from calendar_pedagoga.content_engine_v2 import (
     build_lesson_content_v2,
     format_unresolved_review_block_message,
     generic_fallback_fields_for_row,
+    is_sentence_frame_closed_row,
     unresolved_mandatory_review_blocks,
 )
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
@@ -236,6 +237,9 @@ def _draft_resolved_rows(
             output.append(row)
             continue
         candidate = v2_by_week[week]
+        if is_sentence_frame_closed_row(candidate):
+            output.append(row)
+            continue
         if not review_proposal_docx_issues(candidate):
             output.append(row)
             continue

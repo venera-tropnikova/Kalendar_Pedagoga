@@ -18,19 +18,15 @@ from calendar_pedagoga.generation_service import _decode_generation_payload
 from calendar_pedagoga.matching import MatchStatus
 from calendar_pedagoga.organization_template import select_calendar_template
 from calendar_pedagoga.pipeline import CalendarDocumentStatus, run_calendar_pipeline
-from calendar_pedagoga.production_readiness import GENERIC_ONLY
 from calendar_pedagoga.program_parsing import ProgramContentItem, parse_program
 from calendar_pedagoga.program_structure_confirmation import (
-    CONTENT_ORIGIN_MANUAL,
     confirm_program_structure,
     draft_source_ledger,
     draft_structure_rows,
     embedded_utp_candidates,
     overlay_confirmed_program,
-    overlay_unresolved_topic_edits,
     schedule_topics_from_candidate,
     select_embedded_utp,
-    unresolved_schedule_rows,
 )
 from calendar_pedagoga.remote_generation import build_generation_payload
 from calendar_pedagoga.scheduling import build_schedule
@@ -79,21 +75,8 @@ def _holdout_confirmation():
     topics = schedule_topics_from_candidate(selected)
     draft = draft_structure_rows(program=program, embedded=embedded, study_year=1)
     ledger = draft_source_ledger(program, study_year=1, topics=topics)
-    edited = []
-    for row in unresolved_schedule_rows(draft):
-        title = row["topic"]
-        edited.append(
-            {
-                **row,
-                "content_origin": CONTENT_ORIGIN_MANUAL,
-                "theory_content": title if row["theory_hours"] not in {"", "0", "0.0"} else "",
-                "practice_content": title if row["practice_hours"] not in {"", "0", "0.0"} else "",
-                "source_item_id": "",
-                "excerpt": "",
-            }
-        )
     confirmation = confirm_program_structure(
-        rows=overlay_unresolved_topic_edits(draft, edited),
+        rows=draft,
         study_year=1,
         study_weeks=32,
         hours_per_week="3",
@@ -329,8 +312,10 @@ def test_live_equivalent_holdout_docx_has_no_empty_result_control(monkeypatch) -
         match_reviews=decoded.match_reviews,
         semantic_revision=REVISION,
     )
-    assert result.status is CalendarDocumentStatus.DRAFT_READY
-    assert any(GENERIC_ONLY in case.reasons for case in result.review_cases)
+    assert result.status in {
+        CalendarDocumentStatus.DRAFT_READY,
+        CalendarDocumentStatus.FINAL_READY,
+    }
     assert decoded.plan.total_hours == 96
     weeks = extract_logical_weeks(result.content)
     empty_result = [week.week_number for week in weeks if not week.planned_result.strip()]

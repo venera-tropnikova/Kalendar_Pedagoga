@@ -110,11 +110,18 @@ def format_theory_cell(
     topic_title: str,
     content: str,
     hours: int,
+    selected_clause: str = "",
 ) -> str:
     if hours <= 0:
         return ""
 
     label = f"{display_number}. {topic_title}"
+    if selected_clause.strip():
+        fragment = _normalize_spaces(selected_clause).rstrip(" .")
+        if fragment and fragment.casefold() not in label.casefold():
+            return f"{label}. {fragment} ({hours})"
+        return f"{label} ({hours})"
+
     fragment = brief_theory_fragment(content)
     if fragment and fragment.casefold() not in label.casefold():
         return f"{label}. {fragment} ({hours})"

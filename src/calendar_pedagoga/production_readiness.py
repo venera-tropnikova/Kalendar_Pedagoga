@@ -7,7 +7,12 @@ empty RESULT/CONTROL fields.  No program/topic/week/warning string matching.
 
 from __future__ import annotations
 
-from calendar_pedagoga.content_engine_v2 import LessonContentV2Row
+from calendar_pedagoga.content_engine_v2 import (
+    LessonContentV2Row,
+    PROVENANCE_UNINFORMATIVE_TOPIC_TITLE,
+    is_sentence_frame_closed_row,
+    is_utp_topic_derived_row,
+)
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
 
@@ -16,9 +21,16 @@ SOURCE_NOT_MATCHED = "SOURCE_NOT_MATCHED"
 EMPTY_RESULT = "EMPTY_RESULT"
 EMPTY_CONTROL = "EMPTY_CONTROL"
 GENERIC_ONLY = "GENERIC_ONLY"
+UNINFORMATIVE_TOPIC_TITLE = "UNINFORMATIVE_TOPIC_TITLE"
 
 READINESS_CODES = frozenset(
-    {SOURCE_NOT_MATCHED, EMPTY_RESULT, EMPTY_CONTROL, GENERIC_ONLY}
+    {
+        SOURCE_NOT_MATCHED,
+        EMPTY_RESULT,
+        EMPTY_CONTROL,
+        GENERIC_ONLY,
+        UNINFORMATIVE_TOPIC_TITLE,
+    }
 )
 
 _PROVEN_MATCH_STATUSES = frozenset(
@@ -34,6 +46,7 @@ _MISSING_FIELD_BY_CODE = {
     EMPTY_RESULT: "RESULT",
     EMPTY_CONTROL: "CONTROL",
     GENERIC_ONLY: "RESULT/CONTROL",
+    UNINFORMATIVE_TOPIC_TITLE: "название темы",
 }
 _ACTION_BY_CODE = {
     SOURCE_NOT_MATCHED: (
@@ -50,6 +63,9 @@ _ACTION_BY_CODE = {
     GENERIC_ONLY: (
         "Замените шаблонный RESULT/CONTROL текстом из SOURCE "
         "или явно подтвердите содержание недели."
+    ),
+    UNINFORMATIVE_TOPIC_TITLE: (
+        "Уточните название темы. RESULT и CONTROL писать не нужно."
     ),
 }
 
@@ -126,19 +142,33 @@ def production_readiness_codes(row: LessonContentV2Row) -> tuple[str, ...]:
 
     codes: list[str] = []
     parts = _hour_bearing_parts(row)
-    proven = all(_part_has_proven_source(part) for part in parts)
-    if not proven or not _has_source_cell_text(row):
-        codes.append(SOURCE_NOT_MATCHED)
-
+    closed = is_sentence_frame_closed_row(row)
+    closed_title = is_utp_topic_derived_row(row) and closed
+    uninformative = PROVENANCE_UNINFORMATIVE_TOPIC_TITLE in row.provenance_codes
     result = (row.planned_result or "").strip()
     control = (row.assessment_method or "").strip()
+    proven = all(_part_has_proven_source(part) for part in parts)
+    if (
+        not closed_title
+        and not uninformative
+        and (not proven or not _has_source_cell_text(row))
+    ):
+        codes.append(SOURCE_NOT_MATCHED)
+
     if not result:
         codes.append(EMPTY_RESULT)
     if not control:
         codes.append(EMPTY_CONTROL)
-    if _has_structured_generic_only(row) and not _has_covered_required_clause(row):
+    if (
+        not closed_title
+        and not uninformative
+        and _has_structured_generic_only(row)
+        and not _has_covered_required_clause(row)
+    ):
         codes.append(GENERIC_ONLY)
-    return tuple(codes)
+    if uninformative:
+        codes.append(UNINFORMATIVE_TOPIC_TITLE)
+    return tuple(dict.fromkeys(codes))
 
 
 def rows_have_production_readiness_gaps(

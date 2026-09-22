@@ -48,6 +48,9 @@ class ActionFrame:
 
 
 PROVENANCE_GENERIC_ONLY = "GENERIC_ONLY"
+PROVENANCE_SENTENCE_FRAME_CLOSED = "SENTENCE_FRAME_CLOSED"
+PROVENANCE_UTP_TOPIC_DERIVED = "UTP_TOPIC_DERIVED"
+PROVENANCE_UNINFORMATIVE_TOPIC_TITLE = "UNINFORMATIVE_TOPIC_TITLE"
 
 
 def _stamp_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
@@ -56,6 +59,32 @@ def _stamp_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, .
 
 def _drop_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
     return tuple(code for code in codes if code != PROVENANCE_GENERIC_ONLY)
+
+
+def _stamp_sentence_frame_closed(
+    codes: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*codes, PROVENANCE_SENTENCE_FRAME_CLOSED)))
+
+
+def _stamp_utp_topic_derived(
+    codes: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*codes, PROVENANCE_UTP_TOPIC_DERIVED)))
+
+
+def _stamp_uninformative_topic_title(
+    codes: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*codes, PROVENANCE_UNINFORMATIVE_TOPIC_TITLE)))
+
+
+def is_sentence_frame_closed_row(row: "LessonContentV2Row") -> bool:
+    return PROVENANCE_SENTENCE_FRAME_CLOSED in row.provenance_codes
+
+
+def is_utp_topic_derived_row(row: "LessonContentV2Row") -> bool:
+    return PROVENANCE_UTP_TOPIC_DERIVED in row.provenance_codes
 
 
 _GENERIC_FALLBACK_PROVEN_MATCH = frozenset(
@@ -340,23 +369,41 @@ def _apply_user_confirmed_sentence_frames(
     """Replace overlay RESULT/CONTROL with one SentenceFrame render. Auto-path unchanged."""
 
     from calendar_pedagoga.sentence_frame import (
-        frames_for_confirmed_row,
-        render_frames,
+        frames_by_confirmed_parts,
+        part_lacks_source_units,
+        render_confirmed_parts,
         row_uses_sentence_frame,
+        title_is_informative,
+        weekly_source_topic,
+        _bearing_parts,
     )
 
     if not row_uses_sentence_frame(row, parts):
         return candidate
-    frames = frames_for_confirmed_row(row, parts)
-    planned_result, assessment_method, week_fallback = render_frames(frames)
+    groups = frames_by_confirmed_parts(row, parts)
+    planned_result, assessment_method, week_fallback = render_confirmed_parts(groups)
     if not planned_result.strip() or not assessment_method.strip():
         return candidate
-    first = frames[0] if frames else None
-    codes = (
-        _stamp_generic_only(candidate.provenance_codes)
-        if week_fallback
-        else _drop_generic_only(candidate.provenance_codes)
+    first = next((frame for group in groups for frame in group), None)
+    title_derived = any(
+        frame.title_derived for group in groups for frame in group
     )
+    uninformative = any(
+        part_lacks_source_units(part)
+        and not title_is_informative(
+            weekly_source_topic(part) or weekly_source_topic(row)
+        )
+        for part in _bearing_parts(parts)
+    )
+    codes = candidate.provenance_codes
+    if week_fallback and not title_derived and not uninformative:
+        codes = _stamp_generic_only(codes)
+    else:
+        codes = _drop_generic_only(codes)
+    if title_derived and not uninformative:
+        codes = _stamp_utp_topic_derived(codes)
+    if uninformative:
+        codes = _stamp_uninformative_topic_title(codes)
     return replace(
         candidate,
         frame=ActionFrame(
@@ -367,7 +414,7 @@ def _apply_user_confirmed_sentence_frames(
         ),
         planned_result=planned_result,
         assessment_method=assessment_method,
-        provenance_codes=codes,
+        provenance_codes=_stamp_sentence_frame_closed(codes),
     )
 
 
@@ -392,6 +439,20 @@ def _row_is_unresolved_confirmed_slot(
 
 
 def generic_fallback_fields_for_row(row: "LessonContentV2Row") -> tuple[str, str] | None:
+    if is_sentence_frame_closed_row(row):
+        return None
+    if row.source.match_status is not MatchStatus.USER_CONFIRMED:
+        parts = row.source.week_parts
+        bearing = tuple(
+            part
+            for part in (parts or ())
+            if _positive_workload(part.theory_hours)
+            or _positive_workload(part.practice_hours)
+        ) or (parts or ())
+        if not bearing or any(
+            part.match_status is not MatchStatus.USER_CONFIRMED for part in bearing
+        ):
+            return None
     if not calendar_row_has_confirmed_source(
         row.source, theory_text=row.theory_text, practice_text=row.practice_text
     ):
@@ -10975,10 +11036,11 @@ def week_has_unresolved_mandatory_review(row: LessonContentV2Row) -> bool:
         role = role_map.get(clause, REQUIRED_ACTION)
         if _role_is_required(role):
             return True
-    if (row.planned_result or "").strip() and not _control_covers_all_result_items(
-        row.planned_result, row.assessment_method
-    ):
-        return True
+    if (row.planned_result or "").strip() and not is_sentence_frame_closed_row(row):
+        if not _control_covers_all_result_items(
+            row.planned_result, row.assessment_method
+        ):
+            return True
     if _rc_verbosity_block_reasons(row.planned_result or "", row.assessment_method or ""):
         return True
     return False
@@ -11000,8 +11062,13 @@ def unresolved_mandatory_review_blocks(
             if status == "NEEDS_REVIEW"
             and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
         )
-        if not clauses and (row.planned_result or "").strip() and not _control_covers_all_result_items(
-            row.planned_result, row.assessment_method
+        if (
+            not clauses
+            and (row.planned_result or "").strip()
+            and not is_sentence_frame_closed_row(row)
+            and not _control_covers_all_result_items(
+                row.planned_result, row.assessment_method
+            )
         ):
             clauses = ("CONTROL не покрывает финальный RESULT",)
         verbosity = _rc_verbosity_block_reasons(

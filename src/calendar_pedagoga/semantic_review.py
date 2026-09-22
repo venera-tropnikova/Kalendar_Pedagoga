@@ -29,6 +29,7 @@ from calendar_pedagoga.content_engine_v2 import (
     _role_is_required,
     derive_fields_v2,
     is_generic_lesson_fallback_row,
+    is_sentence_frame_closed_row,
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
 )
@@ -155,6 +156,8 @@ def review_proposal_docx_issues(row: LessonContentV2Row) -> tuple[str, ...]:
     from one frame; it may fill the DOCX while GENERIC_ONLY keeps DRAFT_READY.
     """
 
+    if is_sentence_frame_closed_row(row):
+        return ()
     if is_generic_lesson_fallback_row(row):
         return ()
     issues = list(draft_candidate_safety_issues(row))
@@ -209,6 +212,8 @@ def source_grounded_review_proposal(
     in SOURCE, so no generic phrase and no new meaning can enter the DOCX.
     """
 
+    if is_sentence_frame_closed_row(row):
+        return None
     role_map = dict(row.clause_roles)
     clauses = tuple(
         clause
@@ -341,7 +346,8 @@ def _case_reasons(row: LessonContentV2Row) -> tuple[str, ...]:
         and _role_is_required(role_map.get(clause, REQUIRED_ACTION))
     )
     if (
-        row.planned_result.strip()
+        not is_sentence_frame_closed_row(row)
+        and row.planned_result.strip()
         and not _control_covers_all_result_items(
             row.planned_result, row.assessment_method
         )

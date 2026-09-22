@@ -8,11 +8,12 @@ RESULT is never re-parsed into CONTROL.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import re
 from collections.abc import Sequence
 
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
-from calendar_pedagoga.lesson_content import _cap_sentence, _clause_units, _normalize_spaces
+from calendar_pedagoga.lesson_content import _cap_sentence, _normalize_spaces
 from calendar_pedagoga.matching import MatchStatus
 
 
@@ -60,7 +61,7 @@ _PREPOSITIONS = frozenset(
 )
 _SKIP_UNIT_RE = re.compile(
     r"(?i)^(теория|практика|практические\s+работы|практические\s+занятия|"
-    r"темы|содержание)(?:\s*[.:])?$"
+    r"темы|содержание|продолжение)(?:\s*[.:])?$"
 )
 _TOPIC_HEADER_RE = re.compile(r"(?i)^тема\s*№?\s*\d+")
 _PRACTICE_SPLIT_RE = re.compile(r"(?i)(?:^|\n)\s*практика\.?\s*(?:\n|$)")
@@ -73,6 +74,37 @@ _FLEETING_OK_RE = re.compile(
 _OPEN_CLOSE_QUOTES = (("«", "»"), ("„", "“"))
 
 
+class TopicIntent(Enum):
+    PARTICIPATION = "PARTICIPATION"
+    SUMMARY = "SUMMARY"
+    PRACTICAL_CREATION = "PRACTICAL_CREATION"
+    KNOWLEDGE = "KNOWLEDGE"
+    UNKNOWN = "UNKNOWN"
+
+
+_SUMMARY_HEAD_RE = re.compile(r"(?i)^(итог|заключительн|завершен)")
+_CREATION_HEAD_RE = re.compile(
+    r"(?i)^(изготовлен|создан|аппликац|плетен|сборк|композиц)"
+)
+_PARTICIPATION_HEAD_RE = re.compile(
+    r"(?i)^(конкурс|выставк|экскурси|соревнован|фестивал|сл[её]т)"
+)
+_KNOWLEDGE_HEAD_RE = re.compile(
+    r"(?i)^(поняти|истори|значен|устройств|правил[ао]|основ[аы]|свойств)"
+)
+_PRACTICAL_HEAD_RE = re.compile(r"(?i)^практическ")
+_WORK_HEAD_RE = re.compile(r"(?i)^работ")
+_CATALOG_SPLIT_RE = re.compile(r"\s*,\s*|\s+и\s+", flags=re.IGNORECASE)
+_PARTICIPATION_LOCATIVES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)^конкурс"), "конкурсах"),
+    (re.compile(r"(?i)^выставк"), "выставках"),
+    (re.compile(r"(?i)^экскурси"), "экскурсиях"),
+    (re.compile(r"(?i)^соревнован"), "соревнованиях"),
+    (re.compile(r"(?i)^фестивал"), "фестивалях"),
+    (re.compile(r"(?i)^сл[её]т"), "слётах"),
+)
+
+
 @dataclass(frozen=True)
 class SentenceFrame:
     action: str
@@ -83,6 +115,8 @@ class SentenceFrame:
     lesson_mode: str
     control_type: str
     proven: bool = False
+    title_derived: bool = False
+    intent: TopicIntent = TopicIntent.UNKNOWN
 
 
 def _positive_workload(value: object) -> bool:
@@ -104,18 +138,124 @@ def _bearing_parts(parts: Sequence[WeekTopicPart]) -> tuple[WeekTopicPart, ...]:
     return bearing or tuple(parts)
 
 
+def title_is_informative(title: str) -> bool:
+    """False for empty or structural markers. No program/week dictionaries."""
+
+    text = _normalize_spaces(title).strip(" .")
+    if not text:
+        return False
+    if _SKIP_UNIT_RE.fullmatch(text):
+        return False
+    if re.fullmatch(r"(?i)тема(?:\s*№?\s*\d+)?", text):
+        return False
+    return True
+
+
+def _normalized_heads(title: str) -> tuple[str, ...]:
+    text = _normalize_spaces(title).strip(" .")
+    if not text:
+        return ()
+    heads: list[str] = []
+    for raw in _CATALOG_SPLIT_RE.split(text):
+        for token in raw.split():
+            core = _token_core(token)
+            if core:
+                heads.append(core)
+    return tuple(heads)
+
+
+def _any_head_matches(heads: Sequence[str], pattern: re.Pattern[str]) -> bool:
+    return any(pattern.match(head) for head in heads)
+
+
+def _is_practical_work_label(heads: Sequence[str]) -> bool:
+    return _any_head_matches(heads, _PRACTICAL_HEAD_RE) and _any_head_matches(
+        heads, _WORK_HEAD_RE
+    )
+
+
+def classify_topic_intent(
+    title: str,
+    *,
+    lesson_mode: str = LESSON_MODE_THEORY,
+) -> TopicIntent:
+    """Classify a title by semantic heads and hour channel. No topic dictionaries."""
+
+    heads = _normalized_heads(title)
+    if not heads:
+        return TopicIntent.UNKNOWN
+    if _any_head_matches(heads, _SUMMARY_HEAD_RE):
+        return TopicIntent.SUMMARY
+    if _is_practical_work_label(heads) or _any_head_matches(heads, _CREATION_HEAD_RE):
+        return TopicIntent.PRACTICAL_CREATION
+    knowledge = _any_head_matches(heads, _KNOWLEDGE_HEAD_RE)
+    participation = _any_head_matches(heads, _PARTICIPATION_HEAD_RE)
+    if knowledge and lesson_mode == LESSON_MODE_THEORY:
+        return TopicIntent.KNOWLEDGE
+    if participation:
+        return TopicIntent.PARTICIPATION
+    if knowledge:
+        return TopicIntent.KNOWLEDGE
+    return TopicIntent.UNKNOWN
+
+
+def _join_and(items: Sequence[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} и {items[1]}"
+    return f"{', '.join(items[:-1])} и {items[-1]}"
+
+
+def _member_locative(member: str) -> str | None:
+    tokens = _normalize_spaces(member).split()
+    if len(tokens) != 1:
+        return None
+    core = _token_core(tokens[0])
+    if not core:
+        return None
+    for pattern, locative in _PARTICIPATION_LOCATIVES:
+        if pattern.match(core):
+            return locative
+    return None
+
+
+def participation_locative_phrase(title: str) -> str | None:
+    """Proven locative catalogue, or None when any member is unproven."""
+
+    members = tuple(
+        part.strip()
+        for part in _CATALOG_SPLIT_RE.split(_normalize_spaces(title).strip(" ."))
+        if part.strip()
+    )
+    if not members:
+        return None
+    locatives: list[str] = []
+    for member in members:
+        locative = _member_locative(member)
+        if locative is None:
+            return None
+        locatives.append(locative)
+    return _join_and(locatives)
+
+
 def row_uses_sentence_frame(
     row: CalendarContentRow,
     parts: Sequence[WeekTopicPart],
 ) -> bool:
-    """Overlay USER_CONFIRMED slots only; auto-path without weekly assignment stays on CE2."""
+    """USER_CONFIRMED overlay slots. Known auto-path without USER_CONFIRMED stays on CE2."""
 
+    del row
     bearing = _bearing_parts(parts)
     if not bearing:
         return False
-    if any(part.match_status is not MatchStatus.USER_CONFIRMED for part in bearing):
-        return False
-    return any(part.weekly_content_assigned for part in bearing)
+    return all(
+        part.match_status is MatchStatus.USER_CONFIRMED
+        and part.weekly_content_assigned
+        for part in bearing
+    )
 
 
 def weekly_source_topic(part: WeekTopicPart | CalendarContentRow) -> str:
@@ -218,6 +358,79 @@ def fallback_frame(lesson_mode: str, topic: str) -> SentenceFrame:
         lesson_mode=LESSON_MODE_THEORY,
         control_type=CONTROL_ORAL,
         proven=False,
+    )
+
+
+def title_based_frame(lesson_mode: str, topic: str) -> SentenceFrame:
+    """CLOSED frame from an informative UTP title when SOURCE is absent."""
+
+    intent = classify_topic_intent(topic, lesson_mode=lesson_mode)
+    quoted = _topic_quoted(topic)
+    if intent is TopicIntent.PARTICIPATION:
+        locative = participation_locative_phrase(topic)
+        obj = f"в {locative}" if locative else f"в мероприятиях по теме {quoted}"
+        return SentenceFrame(
+            action="участвует",
+            object=obj,
+            topic=topic,
+            activity="",
+            source_span=topic,
+            lesson_mode=lesson_mode,
+            control_type=CONTROL_OBSERVATION,
+            proven=True,
+            title_derived=True,
+            intent=intent,
+        )
+    if intent is TopicIntent.SUMMARY:
+        return SentenceFrame(
+            action="подводит",
+            object="итоги работы по программе",
+            topic=topic,
+            activity="",
+            source_span=topic,
+            lesson_mode=lesson_mode,
+            control_type=CONTROL_CHECK,
+            proven=True,
+            title_derived=True,
+            intent=intent,
+        )
+    if intent is TopicIntent.PRACTICAL_CREATION:
+        return SentenceFrame(
+            action="выполняет",
+            object=f"практическую работу по теме {quoted}",
+            topic=topic,
+            activity=f"практической работы по теме {quoted}",
+            source_span=topic,
+            lesson_mode=LESSON_MODE_PRACTICE,
+            control_type=CONTROL_OBSERVATION,
+            proven=True,
+            title_derived=True,
+            intent=intent,
+        )
+    if intent is TopicIntent.KNOWLEDGE or lesson_mode == LESSON_MODE_THEORY:
+        return SentenceFrame(
+            action="характеризует",
+            object=f"содержание темы {quoted}",
+            topic=topic,
+            activity="",
+            source_span=topic,
+            lesson_mode=LESSON_MODE_THEORY,
+            control_type=CONTROL_ORAL,
+            proven=True,
+            title_derived=True,
+            intent=intent,
+        )
+    return SentenceFrame(
+        action="выполняет",
+        object=f"практическую работу по теме {quoted}",
+        topic=topic,
+        activity=f"практической работы по теме {quoted}",
+        source_span=topic,
+        lesson_mode=LESSON_MODE_PRACTICE,
+        control_type=CONTROL_OBSERVATION,
+        proven=True,
+        title_derived=True,
+        intent=intent,
     )
 
 
@@ -470,7 +683,9 @@ def _process_frame(
     )
 
 
-def _named_work_frame(title: str, *, topic: str) -> SentenceFrame:
+def _named_work_frame(
+    title: str, *, topic: str, source_span: str
+) -> SentenceFrame:
     forms = _proven_title_forms(title)
     if forms is None:
         quoted = _topic_quoted(title)
@@ -479,7 +694,7 @@ def _named_work_frame(title: str, *, topic: str) -> SentenceFrame:
             object=f"практическую работу {quoted}",
             topic=topic,
             activity=f"практической работы {quoted}",
-            source_span=title,
+            source_span=source_span,
             lesson_mode=LESSON_MODE_PRACTICE,
             control_type=CONTROL_OBSERVATION,
             proven=True,
@@ -490,14 +705,18 @@ def _named_work_frame(title: str, *, topic: str) -> SentenceFrame:
         object=acc,
         topic=topic,
         activity=gen,
-        source_span=title,
+        source_span=source_span,
         lesson_mode=LESSON_MODE_PRACTICE,
         control_type=CONTROL_OBSERVATION,
         proven=True,
     )
 
 
-def _split_part_units(part: WeekTopicPart) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _parse_part_units_from_content(
+    part: WeekTopicPart,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    from calendar_pedagoga.confirmed_slot_allocation import _expand_channel_units
+
     content = part.program_content_full or ""
     theory_hours = _positive_workload(part.theory_hours)
     practice_hours = _positive_workload(part.practice_hours)
@@ -516,12 +735,42 @@ def _split_part_units(part: WeekTopicPart) -> tuple[tuple[str, ...], tuple[str, 
     else:
         theory_text = content
     theory_units = tuple(
-        unit for unit in _clause_units(theory_text) if not _skip_unit(unit)
+        unit for unit in _expand_channel_units(theory_text) if not _skip_unit(unit)
     )
     practice_units = tuple(
-        unit for unit in _clause_units(practice_text) if not _skip_unit(unit)
+        unit for unit in _expand_channel_units(practice_text) if not _skip_unit(unit)
     )
     return theory_units, practice_units
+
+
+def source_units_for_part(
+    part: WeekTopicPart,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Allocated weekly units shared by SOURCE display and SentenceFrame."""
+
+    stored_theory = tuple(part.theory_units or ())
+    stored_practice = tuple(part.practice_units or ())
+    if stored_theory or stored_practice:
+        theory = stored_theory if _positive_workload(part.theory_hours) else ()
+        practice = stored_practice if _positive_workload(part.practice_hours) else ()
+        return theory, practice
+    if part.weekly_content_assigned and not (part.program_content_full or "").strip():
+        return (), ()
+    return _parse_part_units_from_content(part)
+
+
+def part_lacks_source_units(part: WeekTopicPart) -> bool:
+    theory_units, practice_units = source_units_for_part(part)
+    return not theory_units and not practice_units
+
+
+def display_source_units_for_part(part: WeekTopicPart) -> tuple[str, ...]:
+    theory_units, practice_units = source_units_for_part(part)
+    return tuple(dict.fromkeys((*theory_units, *practice_units)))
+
+
+def _split_part_units(part: WeekTopicPart) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return source_units_for_part(part)
 
 
 def _frames_from_theory_units(
@@ -542,7 +791,7 @@ def _frames_from_practice_units(
     for unit in units:
         title = _quoted_work_title(unit)
         if title:
-            frames.append(_named_work_frame(title, topic=topic))
+            frames.append(_named_work_frame(title, topic=topic, source_span=unit))
             continue
         frame = _process_frame(unit, lesson_mode=LESSON_MODE_PRACTICE, topic=topic)
         if frame is not None:
@@ -550,27 +799,85 @@ def _frames_from_practice_units(
     return frames
 
 
+def frames_for_confirmed_part(
+    part: WeekTopicPart,
+    *,
+    topic: str,
+) -> tuple[SentenceFrame, ...]:
+    """Build frames for one week_part only. Mixed weeks stay unmerged here."""
+
+    frames: list[SentenceFrame] = []
+    theory_units, practice_units = source_units_for_part(part)
+    theory_frames = _frames_from_theory_units(theory_units, topic=topic)
+    practice_frames = _frames_from_practice_units(practice_units, topic=topic)
+    if _positive_workload(part.theory_hours):
+        if theory_frames:
+            frames.extend(theory_frames)
+        elif not theory_units and title_is_informative(topic):
+            frames.append(title_based_frame(LESSON_MODE_THEORY, topic))
+        else:
+            frames.append(fallback_frame(LESSON_MODE_THEORY, topic))
+    if _positive_workload(part.practice_hours):
+        if practice_frames:
+            frames.extend(practice_frames)
+        elif not practice_units and title_is_informative(topic):
+            frames.append(title_based_frame(LESSON_MODE_PRACTICE, topic))
+        else:
+            frames.append(fallback_frame(LESSON_MODE_PRACTICE, topic))
+    return tuple(frames)
+
+
+def frames_by_confirmed_parts(
+    row: CalendarContentRow,
+    parts: Sequence[WeekTopicPart],
+) -> tuple[tuple[SentenceFrame, ...], ...]:
+    groups: list[tuple[SentenceFrame, ...]] = []
+    for part in _bearing_parts(parts):
+        topic = weekly_source_topic(part) or weekly_source_topic(row)
+        groups.append(frames_for_confirmed_part(part, topic=topic))
+    return tuple(groups)
+
+
 def frames_for_confirmed_row(
     row: CalendarContentRow,
     parts: Sequence[WeekTopicPart],
 ) -> tuple[SentenceFrame, ...]:
-    frames: list[SentenceFrame] = []
-    for part in _bearing_parts(parts):
-        topic = weekly_source_topic(part) or weekly_source_topic(row)
-        theory_units, practice_units = _split_part_units(part)
-        theory_frames = _frames_from_theory_units(theory_units, topic=topic)
-        practice_frames = _frames_from_practice_units(practice_units, topic=topic)
-        if _positive_workload(part.theory_hours):
-            if theory_frames:
-                frames.extend(theory_frames)
-            else:
-                frames.append(fallback_frame(LESSON_MODE_THEORY, topic))
-        if _positive_workload(part.practice_hours):
-            if practice_frames:
-                frames.extend(practice_frames)
-            else:
-                frames.append(fallback_frame(LESSON_MODE_PRACTICE, topic))
-    return tuple(frames)
+    return tuple(
+        frame
+        for group in frames_by_confirmed_parts(row, parts)
+        for frame in group
+    )
+
+
+def render_confirmed_parts(
+    groups: Sequence[Sequence[SentenceFrame]],
+) -> tuple[str, str, bool]:
+    """Render each week_part, then join. Never merge SOURCE before renderer."""
+
+    results: list[str] = []
+    controls: list[str] = []
+    used_fallback = False
+    any_proven = False
+    for frames in groups:
+        if not frames:
+            continue
+        result, control, fell_back = render_frames(frames)
+        if result.strip():
+            results.append(result)
+        if control.strip():
+            controls.append(control)
+        if fell_back:
+            used_fallback = True
+        elif any(frame.proven for frame in frames):
+            any_proven = True
+    if not results or not controls:
+        return "", "", True
+    week_fallback = used_fallback and not any_proven
+    return (
+        " ".join(_unique_texts(results)),
+        " ".join(_unique_texts(controls)),
+        week_fallback,
+    )
 
 
 def result_from_frame(frame: SentenceFrame) -> str:
@@ -583,6 +890,18 @@ def result_from_frame(frame: SentenceFrame) -> str:
         result, _control = safe_fallback(frame.lesson_mode, frame.topic)
         return result
     return _cap_sentence(f"{frame.action} {frame.object}".strip())
+
+
+def _title_based_control(frame: SentenceFrame) -> str | None:
+    if not frame.title_derived:
+        return None
+    if frame.intent is TopicIntent.PARTICIPATION:
+        return _cap_sentence(
+            f"Педагогическое наблюдение за участием {frame.object}"
+        )
+    if frame.intent is TopicIntent.SUMMARY:
+        return _cap_sentence("Проверка итоговых работ")
+    return None
 
 
 def _closed_topic_oral(topic: str) -> str:
@@ -606,6 +925,9 @@ def control_from_frame(frame: SentenceFrame) -> str:
     """CONTROL from frame fields only. Never re-parses RESULT."""
 
     topic = frame.topic
+    titled = _title_based_control(frame)
+    if titled is not None:
+        return titled
     government = _government_for_control(frame.control_type)
     if not frame.proven:
         if frame.control_type == CONTROL_OBSERVATION and frame.lesson_mode != LESSON_MODE_PRACTICE:
@@ -640,6 +962,9 @@ def _result_matches_template(frame: SentenceFrame, result: str) -> bool:
 def _control_matches_government(frame: SentenceFrame, control: str) -> bool:
     government = _government_for_control(frame.control_type)
     text = _normalize_spaces(control)
+    titled = _title_based_control(frame)
+    if titled is not None:
+        return text == _normalize_spaces(titled)
     if text == unproven_observation_control(frame.topic):
         return True
     _result, fallback_control = safe_fallback(frame.lesson_mode, frame.topic)

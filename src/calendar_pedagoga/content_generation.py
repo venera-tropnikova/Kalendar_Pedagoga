@@ -43,6 +43,8 @@ class WeekTopicPart:
     knowledge_outcomes: tuple[str, ...] = ()
     skill_outcomes: tuple[str, ...] = ()
     weekly_content_assigned: bool = False
+    theory_units: tuple[str, ...] = ()
+    practice_units: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -351,6 +353,8 @@ def _allocate_confirmed_overlay_parts(
                     program_content_full=assignment.content,
                     warnings=tuple(dict.fromkeys((*part.warnings, *assignment.warnings))),
                     weekly_content_assigned=assignment.weekly_content_assigned,
+                    theory_units=assignment.theory_units,
+                    practice_units=assignment.practice_units,
                 ),
                 element,
             )

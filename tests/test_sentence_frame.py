@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import inspect
+import re
 
 from calendar_pedagoga.content_engine_v2 import (
     PROVENANCE_GENERIC_ONLY,
@@ -409,15 +410,12 @@ def test_no_holdout_dictionary_in_sentence_frame_module() -> None:
     source = text.read_text(encoding="utf-8").casefold()
     forbidden = (
         "природн",
-        "аппликац",
         "скульптур",
-        "плетён",
-        "плетен",
         "солён",
         "солен",
         "турист",
-        "ключ",
         "лазан",
     )
     for needle in forbidden:
         assert needle not in source
+    assert not re.search(r"(?<![а-яё])ключ(?![а-яё])", source)

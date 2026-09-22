@@ -11,8 +11,10 @@ from calendar_pedagoga.confirmed_slot_allocation import (
     split_confirmed_source,
 )
 from calendar_pedagoga.content_engine_v2 import (
+    PROVENANCE_GENERIC_ONLY,
     build_lesson_content_v2,
-    is_generic_lesson_fallback_row,
+    is_sentence_frame_closed_row,
+    is_utp_topic_derived_row,
 )
 from calendar_pedagoga.content_generation import build_content_model
 from calendar_pedagoga.matching import MatchStatus
@@ -250,8 +252,9 @@ def test_synthetic_unknown_program_unresolved_uses_generic_slot() -> None:
     )
     lessons = build_lesson_content_v2(rows)
     assert all(row.planned_result.strip() and row.assessment_method.strip() for row in lessons)
-    assert any(is_generic_lesson_fallback_row(row) for row in lessons)
-    assert all("GENERIC_ONLY" in row.provenance_codes for row in lessons)
+    assert all(is_sentence_frame_closed_row(row) for row in lessons)
+    assert all(is_utp_topic_derived_row(row) for row in lessons)
+    assert all(PROVENANCE_GENERIC_ONLY not in row.provenance_codes for row in lessons)
 
 
 def test_known_program_auto_path_is_unchanged() -> None:

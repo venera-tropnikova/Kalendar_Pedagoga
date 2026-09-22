@@ -793,17 +793,14 @@ def _row_has_required_slot_content(
     row: Mapping[str, str],
     mapping: TopicSourceMapping | None,
 ) -> bool:
-    if mapping is None:
+    """SOURCE mapping is optional. Title + hours are enough for title-based frames."""
+
+    del mapping
+    if not _cell(row.get("topic")):
         return False
-    if mapping.origin == CONTENT_ORIGIN_EXCERPT:
-        return bool(mapping.excerpt)
-    if _hours_positive(row.get("theory_hours")) and not _cell(row.get("theory_content")):
-        return False
-    if _hours_positive(row.get("practice_hours")) and not _cell(
-        row.get("practice_content")
-    ):
-        return False
-    return True
+    return _hours_positive(row.get("theory_hours")) or _hours_positive(
+        row.get("practice_hours")
+    )
 
 
 def unresolved_schedule_rows(
@@ -871,7 +868,7 @@ def _require_topics_resolved(
         leftover.append(_cell(row.get("topic")) or "без названия")
     if leftover:
         raise ProgramStructureConfirmationError(
-            "Подтверждение запрещено, пока есть нерешённые темы "
+            "Подтверждение запрещено: укажите название и часы для тем "
             f"({len(leftover)})."
         )
 
@@ -1002,22 +999,20 @@ def needs_structure_confirmation(
     has_external_utp: bool = False,
     study_year: int | None = None,
     matches: Sequence[ContentMatch] = (),
+    has_unique_embedded_utp: bool = False,
 ) -> bool:
-    """True when production cannot take the familiar auto-path.
+    """True only for structural errors. Missing SOURCE does not open the screen."""
 
-    Auto-path stays only when a confirmed plan, parsed program and every
-    hour-bearing topic already have proven SOURCE. SOURCE_NOT_MATCHED on an
-    otherwise ready plan still opens confirmation.
-    """
-
-    del study_year
-    if plan is None:
+    del study_year, matches, program, has_external_utp
+    if plan is not None:
+        return not bool(plan.topics)
+    if has_unique_embedded_utp:
+        return False
+    if embedded_utp_count > 1:
         return True
-    if program is None or not program.content_items:
-        return True
-    if embedded_utp_count > 1 and not has_external_utp:
-        return True
-    return bool(unmatched_source_topics(plan, matches))
+    if embedded_utp_count == 1:
+        return False
+    return True
 
 
 def _cell(value: object) -> str:
@@ -1474,12 +1469,11 @@ def confirm_program_structure(
     selected_utp: UtpTableCandidate | None = None,
     embedded: Sequence[UtpTableCandidate] = (),
 ) -> StructureConfirmation:
-    """Confirm schedule topics plus per-topic SOURCE mappings.
+    """Confirm schedule topics. SOURCE mapping is optional.
 
     Schedule topics come only from the selected UTP or explicit manual
-    rows.     Each topic uses only its own excerpt or manual content.
-    Broadcast mapping is forbidden. Topics without their own content
-    block confirmation.
+    rows. Topics without SOURCE keep their UTP title and hours and get
+    USER_CONFIRMED for title-based SentenceFrame.
     """
 
     if selected_utp is None:
@@ -1549,7 +1543,19 @@ def confirm_program_structure(
             statuses.append(row.get("match_status") or TOPIC_STATUS_DRAFT_READY)
             continue
         if mapping is None:
-            statuses.append(TOPIC_STATUS_DRAFT_READY)
+            item = ProgramContentItem(
+                number=topic.number,
+                title=topic.title,
+                content="",
+                parent_section=topic.parent_section,
+                study_year=study_year,
+            )
+            items.append(item)
+            reviews[topic_key(topic)] = {
+                "decision": "USER_CONFIRMED",
+                "item_ref": ProgramItemRef.from_item(item).as_dict(),
+            }
+            statuses.append(TOPIC_STATUS_USER_CONFIRMED)
             continue
         if mapping.origin == CONTENT_ORIGIN_EXCERPT and mapping.source_item_id:
             record = catalog_index[mapping.source_item_id]
@@ -1619,6 +1625,55 @@ def overlay_confirmed_program(
         if item.title not in confirmed_titles
     )
     return replace(program, content_items=confirmed + kept)
+
+
+def confirm_embedded_utp_structure(
+    *,
+    program: ProgramData | None,
+    embedded: Sequence[UtpTableCandidate],
+    study_year: int,
+    study_weeks: int,
+    hours_per_week: object,
+    scope: str,
+    source_items: Sequence[ProgramContentItem] | None = None,
+) -> StructureConfirmation:
+    """Build USER_CONFIRMED plan from a uniquely selected embedded UTP."""
+
+    selected = select_embedded_utp(embedded, study_year)
+    if selected is None:
+        raise ProgramStructureConfirmationError(
+            "Выберите один учебно-тематический план нужного года."
+        )
+    topics = schedule_topics_from_candidate(selected)
+    if not topics:
+        raise ProgramStructureConfirmationError(
+            "В выбранном учебно-тематическом плане нет тем с часами."
+        )
+    draft = draft_structure_rows(
+        program=program,
+        embedded=embedded,
+        study_year=study_year,
+    )
+    ledger = draft_source_ledger(
+        program,
+        matches=matches_for_draft(None, program, embedded, study_year=study_year),
+        study_year=study_year,
+        topics=topics,
+    )
+    items = source_items
+    if items is None and program is not None:
+        items = program.content_items
+    return confirm_program_structure(
+        rows=draft,
+        study_year=study_year,
+        study_weeks=study_weeks,
+        hours_per_week=hours_per_week,
+        scope=scope,
+        source_items=items or (),
+        ledger=ledger,
+        selected_utp=selected,
+        embedded=embedded,
+    )
 
 
 def confirmation_is_current(
