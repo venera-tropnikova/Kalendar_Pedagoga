@@ -28,6 +28,7 @@ from calendar_pedagoga.content_engine_v2 import (
     _result_sentences,
     _role_is_required,
     derive_fields_v2,
+    is_generic_lesson_fallback_row,
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
 )
@@ -150,8 +151,12 @@ def review_proposal_docx_issues(row: LessonContentV2Row) -> tuple[str, ...]:
 
     Incomplete semantic/source coverage stays in the UI. Grammar, R13/safety
     and CONTROL coverage failures blank the cells instead of inventing text.
+    The closed generic lesson frame is already a matched RESULT/CONTROL pair
+    from one frame; it may fill the DOCX while GENERIC_ONLY keeps DRAFT_READY.
     """
 
+    if is_generic_lesson_fallback_row(row):
+        return ()
     issues = list(draft_candidate_safety_issues(row))
     result = row.planned_result.strip()
     control = row.assessment_method.strip()

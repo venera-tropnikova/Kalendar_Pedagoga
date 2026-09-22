@@ -12,6 +12,7 @@ import re
 from difflib import SequenceMatcher
 
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
+from calendar_pedagoga.matching import MatchStatus
 from calendar_pedagoga.lesson_content import (
     _cap_sentence,
     _clean_source_phrase,
@@ -55,6 +56,267 @@ def _stamp_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, .
 
 def _drop_generic_only(codes: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
     return tuple(code for code in codes if code != PROVENANCE_GENERIC_ONLY)
+
+
+_GENERIC_FALLBACK_PROVEN_MATCH = frozenset(
+    {
+        MatchStatus.EXACT,
+        MatchStatus.NORMALIZED,
+        MatchStatus.TEXT_MATCH,
+        MatchStatus.USER_CONFIRMED,
+    }
+)
+_GENERIC_MODE_THEORY = "theory"
+_GENERIC_MODE_PRACTICE = "practice"
+_GENERIC_MODE_MIXED = "mixed"
+
+
+@dataclass(frozen=True)
+class GenericLessonFrame:
+    """Closed RESULT/CONTROL frame from topic + hours, not from finished strings."""
+
+    topic: str
+    mode: str
+
+    @property
+    def action(self) -> str:
+        if self.mode == _GENERIC_MODE_PRACTICE:
+            return "выполняет"
+        if self.mode == _GENERIC_MODE_MIXED:
+            return "характеризует и выполняет"
+        return "характеризует"
+
+    @property
+    def object(self) -> str:
+        topic = self.topic
+        if self.mode == _GENERIC_MODE_PRACTICE:
+            return f"практическое задание по теме «{topic}»"
+        if self.mode == _GENERIC_MODE_MIXED:
+            return f"содержание темы «{topic}» и практическое задание"
+        return f"содержание темы «{topic}»"
+
+
+def _positive_workload(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        return value > 0
+    except TypeError:
+        return False
+
+
+def generic_lesson_mode(*, theory_hours: object, practice_hours: object) -> str:
+    theory = _positive_workload(theory_hours)
+    practice = _positive_workload(practice_hours)
+    if theory and practice:
+        return _GENERIC_MODE_MIXED
+    if practice:
+        return _GENERIC_MODE_PRACTICE
+    return _GENERIC_MODE_THEORY
+
+
+def generic_lesson_fallback_frame(
+    topic_title: str,
+    *,
+    theory_hours: object,
+    practice_hours: object,
+) -> GenericLessonFrame:
+    topic = _normalize_spaces(topic_title).strip(" .")
+    return GenericLessonFrame(
+        topic=topic,
+        mode=generic_lesson_mode(
+            theory_hours=theory_hours, practice_hours=practice_hours
+        ),
+    )
+
+
+def generic_lesson_fields_from_frame(frame: GenericLessonFrame) -> tuple[str, str]:
+    topic = frame.topic
+    if frame.mode == _GENERIC_MODE_PRACTICE:
+        return (
+            f"Выполняет практическое задание по теме «{topic}».",
+            (
+                "Педагогическое наблюдение за выполнением практического "
+                f"задания по теме «{topic}»."
+            ),
+        )
+    if frame.mode == _GENERIC_MODE_MIXED:
+        return (
+            (
+                f"Характеризует содержание темы «{topic}» и выполняет "
+                "практическое задание по этой теме."
+            ),
+            (
+                "Устный опрос и педагогическое наблюдение за выполнением "
+                f"практического задания по теме «{topic}»."
+            ),
+        )
+    return (
+        f"Характеризует содержание темы «{topic}».",
+        f"Устный опрос по теме «{topic}».",
+    )
+
+
+def is_generic_lesson_fallback_pair(
+    topic_title: str,
+    *,
+    theory_hours: object,
+    practice_hours: object,
+    planned_result: str,
+    assessment_method: str,
+) -> bool:
+    expected_result, expected_control = generic_lesson_fields_from_frame(
+        generic_lesson_fallback_frame(
+            topic_title, theory_hours=theory_hours, practice_hours=practice_hours
+        )
+    )
+    return (
+        (planned_result or "").strip() == expected_result
+        and (assessment_method or "").strip() == expected_control
+    )
+
+
+def is_generic_lesson_fallback_row(row: "LessonContentV2Row") -> bool:
+    if PROVENANCE_GENERIC_ONLY not in row.provenance_codes:
+        return False
+    topic = _weekly_source_topic(row.source)
+    return is_generic_lesson_fallback_pair(
+        topic,
+        theory_hours=row.source.theory_hours,
+        practice_hours=row.source.practice_hours,
+        planned_result=row.planned_result,
+        assessment_method=row.assessment_method,
+    )
+
+
+def _generic_fallback_source_present(
+    theory_text: str, practice_text: str, program_content: str
+) -> bool:
+    return bool(
+        (theory_text or "").strip()
+        or (practice_text or "").strip()
+        or (program_content or "").strip()
+    )
+
+
+def _part_has_confirmed_source(part: WeekTopicPart) -> bool:
+    if part.match_status not in _GENERIC_FALLBACK_PROVEN_MATCH:
+        return False
+    if (part.program_content_full or "").strip():
+        return True
+    return bool(part.weekly_content_assigned)
+
+
+def calendar_row_has_confirmed_source(
+    row: CalendarContentRow,
+    *,
+    theory_text: str = "",
+    practice_text: str = "",
+) -> bool:
+    parts = row.week_parts or (
+        WeekTopicPart(
+            topic_number=row.topic_number,
+            topic_title=row.topic_title,
+            section=row.section,
+            theory_hours=row.theory_hours,
+            practice_hours=row.practice_hours,
+            match_status=row.match_status,
+            program_section=row.program_section,
+            program_topic=row.program_topic,
+            program_content_full=row.program_content_full or "",
+            weekly_content_assigned=False,
+        ),
+    )
+    bearing = tuple(
+        part
+        for part in parts
+        if _positive_workload(part.theory_hours)
+        or _positive_workload(part.practice_hours)
+    )
+    if not bearing:
+        bearing = parts
+    if not bearing or not all(_part_has_confirmed_source(part) for part in bearing):
+        return False
+    return _generic_fallback_source_present(
+        theory_text,
+        practice_text,
+        row.program_content_full or "",
+    ) or any((part.program_content_full or "").strip() for part in bearing)
+
+
+def _ce2_pair_is_proven(candidate: ContentEngineV2Result) -> bool:
+    if not (candidate.planned_result or "").strip():
+        return False
+    if not (candidate.assessment_method or "").strip():
+        return False
+    if PROVENANCE_GENERIC_ONLY in candidate.provenance_codes:
+        return False
+    if any(
+        warning.startswith("Безопасный шаблон CE2:") for warning in candidate.warnings
+    ):
+        return False
+    return True
+
+
+def _maybe_apply_generic_lesson_fallback(
+    candidate: ContentEngineV2Result,
+    *,
+    topic_title: str,
+    theory_hours: object,
+    practice_hours: object,
+    source_confirmed: bool,
+) -> ContentEngineV2Result:
+    if not source_confirmed:
+        return candidate
+    if not (
+        _positive_workload(theory_hours) or _positive_workload(practice_hours)
+    ):
+        return candidate
+    if _ce2_pair_is_proven(candidate):
+        return candidate
+    result_empty = not (candidate.planned_result or "").strip()
+    control_empty = not (candidate.assessment_method or "").strip()
+    if not result_empty and not control_empty:
+        return candidate
+    if not result_empty and PROVENANCE_GENERIC_ONLY not in candidate.provenance_codes:
+        if not any(
+            warning.startswith("Безопасный шаблон CE2:")
+            for warning in candidate.warnings
+        ):
+            return candidate
+    frame = generic_lesson_fallback_frame(
+        topic_title, theory_hours=theory_hours, practice_hours=practice_hours
+    )
+    planned_result, assessment_method = generic_lesson_fields_from_frame(frame)
+    return replace(
+        candidate,
+        frame=ActionFrame(frame.topic, frame.action, frame.object, ""),
+        planned_result=planned_result,
+        assessment_method=assessment_method,
+        provenance_codes=_stamp_generic_only(candidate.provenance_codes),
+        # Generic text is not SOURCE-backed coverage; keep P0 GENERIC_ONLY active.
+        clause_coverage=(),
+        clause_roles=(),
+    )
+
+
+def generic_fallback_fields_for_row(row: "LessonContentV2Row") -> tuple[str, str] | None:
+    if not calendar_row_has_confirmed_source(
+        row.source, theory_text=row.theory_text, practice_text=row.practice_text
+    ):
+        return None
+    if not (
+        _positive_workload(row.source.theory_hours)
+        or _positive_workload(row.source.practice_hours)
+        or _positive_workload(row.source.total_hours)
+    ):
+        return None
+    frame = generic_lesson_fallback_frame(
+        _weekly_source_topic(row.source),
+        theory_hours=row.source.theory_hours,
+        practice_hours=row.source.practice_hours,
+    )
+    return generic_lesson_fields_from_frame(frame)
 
 
 @dataclass(frozen=True)
@@ -12263,6 +12525,15 @@ def build_lesson_content_v2(
                 theory_text=theory_text,
                 practice_text=practice_text,
                 part_types=week_part_types,
+            ),
+        )
+        final = _maybe_apply_generic_lesson_fallback(
+            final,
+            topic_title=_weekly_source_topic(row),
+            theory_hours=row.theory_hours,
+            practice_hours=row.practice_hours,
+            source_confirmed=calendar_row_has_confirmed_source(
+                row, theory_text=theory_text, practice_text=practice_text
             ),
         )
         result.append(

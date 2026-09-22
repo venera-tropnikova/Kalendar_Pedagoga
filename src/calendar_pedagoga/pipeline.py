@@ -34,6 +34,7 @@ from calendar_pedagoga.content_engine_v2 import (
     LessonContentV2Row,
     build_lesson_content_v2,
     format_unresolved_review_block_message,
+    generic_fallback_fields_for_row,
     unresolved_mandatory_review_blocks,
 )
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
@@ -252,6 +253,10 @@ def _draft_resolved_rows(
             ai_review_proposal_candidate(candidate, proposal_session)
         )
         planned_result, assessment_method = rebuilt if rebuilt else ("", "")
+        if not planned_result.strip() or not assessment_method.strip():
+            generic = generic_fallback_fields_for_row(candidate)
+            if generic is not None:
+                planned_result, assessment_method = generic
         output.append(
             replace(
                 row,
