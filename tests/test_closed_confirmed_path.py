@@ -34,6 +34,7 @@ from calendar_pedagoga.semantic_review import (
 )
 from calendar_pedagoga.lesson_display import brief_allocated_work_labels
 from calendar_pedagoga.sentence_frame import (
+    allocate_repeated_title_slots,
     display_source_units_for_part,
     frames_by_confirmed_parts,
     frames_for_confirmed_part,
@@ -319,9 +320,12 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     v2_by_week = {row.source.week_number: row for row in v2}
     content_by_week = {row.week_number: row for row in content}
     docx_by_week = {week.week_number: week for week in weeks}
+    title_slots = allocate_repeated_title_slots(content)
     for number in (3, 23, 24, 30, 31, 32):
         source_row = content_by_week[number]
-        groups = frames_by_confirmed_parts(source_row, source_row.week_parts)
+        groups = frames_by_confirmed_parts(
+            source_row, source_row.week_parts, title_slots
+        )
         rendered, control, _fallback = render_confirmed_parts(groups)
         v2_row = v2_by_week[number]
         docx_row = docx_by_week[number]
@@ -392,13 +396,16 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     _assert_no_descriptive_source_dump(week23, week23_units)
 
     week24 = docx_by_week[24]
-    assert week24.practice == "5. Плетение. (3)"
+    assert week24.practice.startswith("5. Плетение.")
+    assert week24.practice.endswith("(3)")
+    assert "Этап" in week24.practice
     assert "изонить" not in week24.practice.casefold()
     _assert_no_descriptive_source_dump(week24, _units_for_week(24))
 
     week30 = v2_by_week[30]
     assert docx_by_week[30].theory == "7. Итоговое занятие. (2)"
-    assert docx_by_week[30].practice == "6. Солёное тесто. (1)"
+    assert docx_by_week[30].practice.startswith("6. Солёное тесто")
+    assert docx_by_week[30].practice.endswith("(1)")
     assert "выполняет" in week30.planned_result.casefold()
     assert "солёное тесто" in week30.planned_result.casefold()
     assert "подводит итоги работы по программе" in week30.planned_result.casefold()
@@ -407,11 +414,19 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     assert is_sentence_frame_closed_row(week30)
     _assert_no_descriptive_source_dump(docx_by_week[30], _units_for_week(30))
 
+    catalog_weeks = []
     for number in (31, 32):
         week = docx_by_week[number]
         assert week.theory == ""
-        assert week.practice == "8. Конкурсы, выставки, экскурсии. (3)"
+        assert week.practice.startswith("8. ")
+        assert week.practice.endswith("(3)")
+        catalog_weeks.append(week.practice.casefold())
         _assert_no_descriptive_source_dump(week, _units_for_week(number))
+    assert catalog_weeks[0] != catalog_weeks[1]
+    assert "конкурс" in catalog_weeks[0] and "выставк" in catalog_weeks[0]
+    assert "экскурси" not in catalog_weeks[0]
+    assert "экскурси" in catalog_weeks[1]
+    assert "конкурс" not in catalog_weeks[1]
 
     assert result.status in {
         CalendarDocumentStatus.DRAFT_READY,

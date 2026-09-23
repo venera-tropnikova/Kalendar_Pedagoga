@@ -879,28 +879,33 @@ def _topic_cells_for_lesson(
     *,
     topic_counts: dict[tuple[str | None, str, str, str], int],
     topic_occurrences: dict[tuple[str | None, str, str, str], int],
+    title_slots: dict[tuple[int, int], object] | None = None,
 ) -> tuple[str, str]:
     del topic_counts
     source_row = lesson.source.source
     theory_lines: list[str] = []
     practice_lines: list[str] = []
-    for part in _week_topic_parts(source_row):
+    slots = title_slots or {}
+    for index, part in enumerate(_week_topic_parts(source_row)):
         display_key = _topic_part_key(part)
         occurrence_key = _content_occurrence_key(part)
         if part.practice_hours:
             topic_occurrences[occurrence_key] = topic_occurrences.get(occurrence_key, 0) + 1
         display_number = display_numbers.get(display_key, part.topic_number or "?")
+        slot = slots.get((getattr(source_row, "week_number", None), index))
+        topic_title = getattr(slot, "schedule_title", "") or part.topic_title
         # Allocated SOURCE stays on the part for SentenceFrame; the table prints
-        # quoted work/catalog shorts when present, otherwise the UTP title.
+        # quoted work/catalog shorts when present, otherwise the UTP title
+        # or the same repeated-title slot the SentenceFrame used.
         theory_cell = format_schedule_channel_cell(
             display_number,
-            part.topic_title,
+            topic_title,
             part.theory_hours,
             part.theory_units,
         )
         practice_cell = format_schedule_channel_cell(
             display_number,
-            part.topic_title,
+            topic_title,
             part.practice_hours,
             part.practice_units,
         )
@@ -1357,8 +1362,13 @@ def _populate_calendar_table(
     display_numbers = _topic_display_numbers(utp)
     _ensure_data_rows(table, len(rows))
     _repeat_table_header_rows(table)
+    from calendar_pedagoga.sentence_frame import allocate_repeated_title_slots
+
     topic_counts = _practice_appearance_counts(rows)
     topic_occurrences: dict[tuple[str | None, str, str], int] = {}
+    title_slots = allocate_repeated_title_slots(
+        tuple(lesson.source.source for lesson in rows)
+    )
 
     for index, lesson in enumerate(rows):
         theory_cell, practice_cell = _topic_cells_for_lesson(
@@ -1366,6 +1376,7 @@ def _populate_calendar_table(
             display_numbers,
             topic_counts=topic_counts,
             topic_occurrences=topic_occurrences,
+            title_slots=title_slots,
         )
         source = lesson.source.source
         _write_row(

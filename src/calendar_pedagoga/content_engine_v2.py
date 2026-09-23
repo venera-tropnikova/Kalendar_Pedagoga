@@ -365,6 +365,7 @@ def _apply_user_confirmed_sentence_frames(
     candidate: ContentEngineV2Result,
     row: CalendarContentRow,
     parts: tuple[WeekTopicPart, ...],
+    slots: dict[tuple[int, int], object] | None = None,
 ) -> ContentEngineV2Result:
     """Replace overlay RESULT/CONTROL with one SentenceFrame render. Auto-path unchanged."""
 
@@ -380,7 +381,7 @@ def _apply_user_confirmed_sentence_frames(
 
     if not row_uses_sentence_frame(row, parts):
         return candidate
-    groups = frames_by_confirmed_parts(row, parts)
+    groups = frames_by_confirmed_parts(row, parts, slots)
     planned_result, assessment_method, week_fallback = render_confirmed_parts(groups)
     if not planned_result.strip() or not assessment_method.strip():
         return candidate
@@ -12583,8 +12584,11 @@ def build_lesson_content_v2(
     RESULT/CONTROL/TYPE выходят только из FINAL gate и дальше не меняются.
     """
 
+    from calendar_pedagoga.sentence_frame import allocate_repeated_title_slots
+
     result: list[LessonContentV2Row] = []
     practice_counts = _practice_appearance_counts(rows)
+    title_slots = allocate_repeated_title_slots(rows)
     practice_occurrences: dict[tuple[str | None, str, str, str], int] = {}
     for row in rows:
         parts = _row_week_parts(row)
@@ -12700,7 +12704,9 @@ def build_lesson_content_v2(
                 practice_hours=row.practice_hours,
             )
             final = _apply_unresolved_confirmed_slot_generic(final, slot)
-        final = _apply_user_confirmed_sentence_frames(final, row, parts)
+        final = _apply_user_confirmed_sentence_frames(
+            final, row, parts, title_slots
+        )
         result.append(
             LessonContentV2Row(
                 source=row,

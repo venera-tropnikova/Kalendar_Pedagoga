@@ -304,19 +304,20 @@ def test_holdout_without_manual_topics_7_8_word_qa() -> None:
     assert "выполняет" in week30.planned_result.casefold()
     assert "солёное тесто" in week30.planned_result.casefold()
     assert is_sentence_frame_closed_row(v2_by_week[30])
+    catalog_results = []
     for number in (31, 32):
         lesson = v2_by_week[number]
         docx_row = docx_by_week[number]
-        assert lesson.planned_result == "Участвует в конкурсах, выставках и экскурсиях."
-        assert lesson.assessment_method == (
-            "Педагогическое наблюдение за участием в конкурсах, "
-            "выставках и экскурсиях."
-        )
         assert docx_row.planned_result == lesson.planned_result
         assert docx_row.assessment == lesson.assessment_method
         assert is_sentence_frame_closed_row(lesson)
         assert is_utp_topic_derived_row(lesson)
         assert PROVENANCE_GENERIC_ONLY not in lesson.provenance_codes
+        catalog_results.append(lesson.planned_result)
+    assert catalog_results[0] != catalog_results[1]
+    assert "конкурсах" in catalog_results[0] and "выставках" in catalog_results[0]
+    assert "экскурсиях" not in catalog_results[0]
+    assert catalog_results[1] == "Участвует в экскурсиях."
     assert result.status in {
         CalendarDocumentStatus.DRAFT_READY,
         CalendarDocumentStatus.FINAL_READY,

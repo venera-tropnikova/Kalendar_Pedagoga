@@ -14,7 +14,7 @@ from collections.abc import Sequence
 
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.lesson_content import _cap_sentence, _normalize_spaces
-from calendar_pedagoga.matching import MatchStatus
+from calendar_pedagoga.matching import MatchStatus, normalize_title
 
 
 LESSON_MODE_THEORY = "theory"
@@ -434,6 +434,195 @@ def title_based_frame(lesson_mode: str, topic: str) -> SentenceFrame:
     )
 
 
+@dataclass(frozen=True)
+class RepeatedTitleSlot:
+    """One differentiated title-based slot. Schedule and the frame share it."""
+
+    schedule_title: str
+    catalog_title: str | None = None
+    stage_index: int | None = None
+    stage_total: int | None = None
+
+
+def _independent_catalog_member(member: str) -> bool:
+    text = _normalize_spaces(member).strip(" .")
+    if not text or any(mark in text for mark in ".:;?!"):
+        return False
+    words = text.split()
+    if not 1 <= len(words) <= 3:
+        return False
+    return all(re.fullmatch(r"[0-9A-Za-zА-Яа-яЁё-]+", word) for word in words)
+
+
+def proven_catalog_members(title: str) -> tuple[str, ...] | None:
+    """Independent nominals of one proven intent, or None when unproven."""
+
+    text = _normalize_spaces(title).strip(" .")
+    if not text:
+        return None
+    members = tuple(
+        part.strip(" .")
+        for part in _CATALOG_SPLIT_RE.split(text)
+        if part.strip(" .")
+    )
+    if len(members) < 2:
+        return None
+    if any(not _independent_catalog_member(member) for member in members):
+        return None
+    intents = tuple(
+        classify_topic_intent(member, lesson_mode=LESSON_MODE_PRACTICE)
+        for member in members
+    )
+    if any(intent is TopicIntent.UNKNOWN for intent in intents):
+        return None
+    if len(set(intents)) != 1:
+        return None
+    return members
+
+
+def _contiguous_catalog_slices(
+    members: tuple[str, ...],
+    slot_count: int,
+) -> tuple[tuple[str, ...], ...] | None:
+    """Continuous partition. Empty when a slot would be left without a member."""
+
+    if slot_count < 2 or len(members) < slot_count:
+        return None
+    base, extra = divmod(len(members), slot_count)
+    slices: list[tuple[str, ...]] = []
+    cursor = 0
+    for index in range(slot_count):
+        size = base + (1 if index < extra else 0)
+        if size < 1:
+            return None
+        slices.append(members[cursor : cursor + size])
+        cursor += size
+    if cursor != len(members):
+        return None
+    return tuple(slices)
+
+
+def stage_title_frame(
+    topic: str,
+    index: int,
+    total: int,
+    lesson_mode: str,
+) -> SentenceFrame:
+    """Neutral stage. Adds no material, product, operation, or result."""
+
+    quoted = _topic_quoted(topic)
+    return SentenceFrame(
+        action="выполняет",
+        object=f"этап {index} из {total} практической работы по теме {quoted}",
+        topic=topic,
+        activity=f"этапа {index} из {total} практической работы по теме {quoted}",
+        source_span=topic,
+        lesson_mode=lesson_mode,
+        control_type=CONTROL_OBSERVATION,
+        proven=True,
+        title_derived=True,
+        intent=TopicIntent.PRACTICAL_CREATION,
+    )
+
+
+def _channel_mode(part: WeekTopicPart) -> str:
+    theory = _positive_workload(part.theory_hours)
+    practice = _positive_workload(part.practice_hours)
+    if theory and practice:
+        return "both"
+    if practice:
+        return LESSON_MODE_PRACTICE
+    return LESSON_MODE_THEORY
+
+
+def _title_repetition_candidate(part: WeekTopicPart) -> bool:
+    if part.match_status is not MatchStatus.USER_CONFIRMED:
+        return False
+    if not part.weekly_content_assigned:
+        return False
+    if not title_is_informative(weekly_source_topic(part)):
+        return False
+    if not part_lacks_source_units(part):
+        return False
+    return _positive_workload(part.theory_hours) or _positive_workload(
+        part.practice_hours
+    )
+
+
+def _as_schedule_heading(text: str) -> str:
+    stripped = _normalize_spaces(text).strip()
+    if not stripped or not stripped[0].islower():
+        return stripped
+    return stripped[0].upper() + stripped[1:]
+
+
+def _stage_schedule_title(topic: str, index: int, total: int) -> str:
+    base = _normalize_spaces(topic).strip(" .")
+    return f"{base}. Этап {index} из {total}"
+
+
+def allocate_repeated_title_slots(
+    rows: Sequence[CalendarContentRow],
+) -> dict[tuple[int, int], RepeatedTitleSlot]:
+    """Differentiate repeated title-based slots that would otherwise match.
+
+    Key is (week_number, index in week_parts). SOURCE-backed parts are absent.
+    """
+
+    grouped: dict[tuple[str, str], list[tuple[int, int, str]]] = {}
+    for row in rows:
+        for index, part in enumerate(row.week_parts):
+            if not _title_repetition_candidate(part):
+                continue
+            topic = weekly_source_topic(part)
+            key = (normalize_title(topic), _channel_mode(part))
+            grouped.setdefault(key, []).append((row.week_number, index, topic))
+    allocated: dict[tuple[int, int], RepeatedTitleSlot] = {}
+    for slots in grouped.values():
+        if len(slots) < 2:
+            continue
+        members = proven_catalog_members(slots[0][2])
+        slices = (
+            _contiguous_catalog_slices(members, len(slots))
+            if members is not None
+            else None
+        )
+        if slices is not None:
+            for (week_number, index, _topic), member_slice in zip(slots, slices):
+                schedule_title = _as_schedule_heading(", ".join(member_slice))
+                allocated[(week_number, index)] = RepeatedTitleSlot(
+                    schedule_title=schedule_title,
+                    catalog_title=schedule_title,
+                )
+            continue
+        total = len(slots)
+        for position, (week_number, index, topic) in enumerate(slots, start=1):
+            allocated[(week_number, index)] = RepeatedTitleSlot(
+                schedule_title=_stage_schedule_title(topic, position, total),
+                stage_index=position,
+                stage_total=total,
+            )
+    return allocated
+
+
+def _frame_for_repeated_slot(
+    frame: SentenceFrame,
+    slot: RepeatedTitleSlot,
+) -> SentenceFrame:
+    if not frame.title_derived:
+        return frame
+    if slot.catalog_title:
+        return title_based_frame(frame.lesson_mode, slot.catalog_title)
+    if slot.stage_index is None or slot.stage_total is None:
+        return frame
+    return stage_title_frame(
+        frame.topic,
+        slot.stage_index,
+        slot.stage_total,
+        frame.lesson_mode,
+    )
+
+
 def _iya_forms(token: str) -> dict[str, str] | None:
     """Regular -ия noun: nom -ия, acc -ию, gen sg/nom-acc pl -ии, gen pl -ий."""
 
@@ -803,6 +992,7 @@ def frames_for_confirmed_part(
     part: WeekTopicPart,
     *,
     topic: str,
+    repetition: RepeatedTitleSlot | None = None,
 ) -> tuple[SentenceFrame, ...]:
     """Build frames for one week_part only. Mixed weeks stay unmerged here."""
 
@@ -824,17 +1014,32 @@ def frames_for_confirmed_part(
             frames.append(title_based_frame(LESSON_MODE_PRACTICE, topic))
         else:
             frames.append(fallback_frame(LESSON_MODE_PRACTICE, topic))
-    return tuple(frames)
+    if repetition is None:
+        return tuple(frames)
+    return tuple(_frame_for_repeated_slot(frame, repetition) for frame in frames)
 
 
 def frames_by_confirmed_parts(
     row: CalendarContentRow,
     parts: Sequence[WeekTopicPart],
+    slots: dict[tuple[int, int], RepeatedTitleSlot] | None = None,
 ) -> tuple[tuple[SentenceFrame, ...], ...]:
     groups: list[tuple[SentenceFrame, ...]] = []
-    for part in _bearing_parts(parts):
+    sequence = tuple(parts)
+    bearing_indexes = [
+        index
+        for index, part in enumerate(sequence)
+        if _positive_workload(part.theory_hours)
+        or _positive_workload(part.practice_hours)
+    ]
+    chosen = bearing_indexes or list(range(len(sequence)))
+    for index in chosen:
+        part = sequence[index]
         topic = weekly_source_topic(part) or weekly_source_topic(row)
-        groups.append(frames_for_confirmed_part(part, topic=topic))
+        repetition = None if slots is None else slots.get((row.week_number, index))
+        groups.append(
+            frames_for_confirmed_part(part, topic=topic, repetition=repetition)
+        )
     return tuple(groups)
 
 
