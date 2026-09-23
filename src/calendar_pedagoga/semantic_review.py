@@ -33,7 +33,10 @@ from calendar_pedagoga.content_engine_v2 import (
     validate_manual_lesson_content,
     week_has_unresolved_mandatory_review,
 )
-from calendar_pedagoga.production_readiness import production_readiness_codes
+from calendar_pedagoga.production_readiness import (
+    production_readiness_codes,
+    row_blocks_final_delivery,
+)
 from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import ScheduleResult
 
@@ -55,6 +58,7 @@ class SemanticReviewCase:
     proposed_control: str
     reasons: tuple[str, ...]
     status: ReviewStatus = "REVIEW_REQUIRED"
+    blocks_delivery: bool = True
 
 
 @dataclass(frozen=True)
@@ -401,6 +405,7 @@ def build_semantic_review_cases(
                 proposed_result=row.planned_result,
                 proposed_control=row.assessment_method,
                 reasons=_case_reasons(row),
+                blocks_delivery=row_blocks_final_delivery(row),
             )
         )
     return tuple(cases)
@@ -455,17 +460,10 @@ def apply_manual_semantic_confirmations(
         output.append(validation.row)
 
     output_rows = tuple(output)
-    accepted_weeks = {
-        case.week_number for case in cases if case.review_id in accepted
-    }
     pending_weeks = {
         row.source.week_number
         for row in output_rows
-        if week_has_unresolved_mandatory_review(row)
-        or (
-            row.source.week_number not in accepted_weeks
-            and production_readiness_codes(row)
-        )
+        if row_blocks_final_delivery(row)
     }
     return SemanticReviewApplication(
         rows=output_rows,

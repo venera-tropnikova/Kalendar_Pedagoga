@@ -820,13 +820,15 @@ def _quoted_work_title(unit: str) -> str | None:
     whole = _WHOLE_QUOTE_RE.fullmatch(text)
     if whole:
         title = whole.group(1).strip()
-        return title or None
+        if not title or re.search(r"[«»„“”\"]", title):
+            return None
+        return title
     match = _QUOTED_TITLE_RE.search(text)
     if not match:
         return None
     prefix = text[: match.start()].strip()
     title = match.group(1).strip()
-    if not title:
+    if not title or re.search(r"[«»„“”\"]", title):
         return None
     if prefix:
         from calendar_pedagoga.content_engine_v2 import _conjugate_verbal_noun

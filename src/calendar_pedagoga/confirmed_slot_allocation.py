@@ -38,6 +38,10 @@ _MARKER_RE = re.compile(
     r")\s*(?P<sep>[.:])?\s*(?P<rest>.*)$"
 )
 _QUOTED_RE = re.compile(r"«([^»]+)»|“([^”]+)”|\"([^\"]+)\"")
+# Next catalog item starts at `», «` or at a comma before the next opening quote.
+_CATALOG_BOUNDARY_RE = re.compile(r"(?:»\s*)?,\s*(?=«)")
+_QUOTE_CHARS_RE = re.compile(r"[«»„“”\"]")
+_CATALOG_LABEL_RE = re.compile(r"(?i)^темы?$")
 _SKIP_UNITS = frozenset(
     {
         "теория",
@@ -118,8 +122,46 @@ def _quoted_titles(text: str) -> tuple[str, ...]:
     titles: list[str] = []
     for match in _QUOTED_RE.finditer(text):
         title = next((group for group in match.groups() if group), "").strip()
-        if title:
+        if title and not _QUOTE_CHARS_RE.search(title):
             titles.append(f"«{title}»")
+    return tuple(titles)
+
+
+def _safe_recovered_work_title(title: str) -> bool:
+    """A recovered catalog item is a nominal title, not a sentence or a short quote."""
+
+    if not title or not title[0].isupper():
+        return False
+    if re.search(r"[.!?]", title):
+        return False
+    words = title.split()
+    return 2 <= len(words) <= 12
+
+
+def recover_quoted_catalog_works(text: str) -> tuple[str, ...] | None:
+    """Split a quoted work list on the next `«` so one broken quote cannot swallow it.
+
+    Returns None unless at least two items share that boundary. A lone unclosed
+    quote, a short incidental quote, and descriptive prose stay on the ordinary
+    path and are not promoted to work titles.
+    """
+
+    cleaned = _normalize_spaces(text)
+    if "«" not in cleaned or _CATALOG_BOUNDARY_RE.search(cleaned) is None:
+        return None
+    first = cleaned.find("«")
+    prefix = cleaned[:first].strip(" .;:")
+    if prefix and _CATALOG_LABEL_RE.fullmatch(prefix) is None:
+        return None
+    parts = _CATALOG_BOUNDARY_RE.split(cleaned[first:])
+    if len(parts) < 2:
+        return None
+    titles: list[str] = []
+    for part in parts:
+        title = _normalize_spaces(_QUOTE_CHARS_RE.sub(" ", part)).strip(" .,;:")
+        if not _safe_recovered_work_title(title):
+            return None
+        titles.append(f"«{title}»")
     return tuple(titles)
 
 
@@ -160,6 +202,19 @@ def _expand_segment(segment: str) -> tuple[str, ...]:
     catalog_units = _catalog_item_units(cleaned)
     if catalog_units is not None:
         return catalog_units
+    recovered = recover_quoted_catalog_works(cleaned)
+    if recovered is not None:
+        remainder = _QUOTE_CHARS_RE.sub(" ", _QUOTED_RE.sub(" ", cleaned))
+        extra: list[str] = []
+        for raw in _clause_units(remainder):
+            if _skip_structural_unit(raw):
+                continue
+            nested = _catalog_item_units(raw)
+            if nested is not None:
+                extra.extend(nested)
+                continue
+            extra.append(raw)
+        return tuple((*recovered, *extra))
     quoted = _quoted_titles(cleaned)
     if quoted:
         remainder = _QUOTED_RE.sub(" ", cleaned)

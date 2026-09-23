@@ -395,6 +395,27 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     assert "Открытка" in week23.practice or "Открытка" in week23.planned_result
     _assert_no_descriptive_source_dump(week23, week23_units)
 
+    week15 = docx_by_week[15]
+    week15_row = v2_by_week[15]
+    assert week15.practice == "«Украшения в технике папье-маше» (3)"
+    assert (
+        week15_row.planned_result
+        == "Выполняет практическую работу «Украшения в технике папье-маше»."
+    )
+    assert (
+        week15_row.assessment_method
+        == "Педагогическое наблюдение за выполнением практической работы "
+        "«Украшения в технике папье-маше»."
+    )
+    assert week15.planned_result == week15_row.planned_result
+    assert week15.assessment == week15_row.assessment_method
+    assert PROVENANCE_GENERIC_ONLY not in week15_row.provenance_codes
+    assert result.status is CalendarDocumentStatus.FINAL_READY
+    assert [case.week_number for case in result.review_cases if case.blocks_delivery] == []
+    assert sorted(
+        case.week_number for case in result.review_cases if not case.blocks_delivery
+    ) == [1, 2, 8, 23]
+
     week24 = docx_by_week[24]
     assert week24.practice.startswith("5. Плетение.")
     assert week24.practice.endswith("(3)")

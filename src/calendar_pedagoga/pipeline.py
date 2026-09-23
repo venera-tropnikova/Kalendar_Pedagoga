@@ -36,7 +36,6 @@ from calendar_pedagoga.content_engine_v2 import (
     format_unresolved_review_block_message,
     generic_fallback_fields_for_row,
     is_sentence_frame_closed_row,
-    unresolved_mandatory_review_blocks,
 )
 from calendar_pedagoga.lesson_content import LessonContentRow, build_lesson_content
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow, resolve_lesson_content
@@ -46,12 +45,10 @@ from calendar_pedagoga.program_parsing import ProgramData
 from calendar_pedagoga.scheduling import build_schedule
 from calendar_pedagoga.generator_revision import generator_revision
 from calendar_pedagoga.knowledge_case_repair import try_repair_review_candidate
-from calendar_pedagoga.production_readiness import (
-    rows_have_production_readiness_gaps,
-)
 from calendar_pedagoga.semantic_review import (
     ManualSemanticConfirmation,
     SemanticReviewCase,
+    _week_needs_semantic_review,
     apply_manual_semantic_confirmations,
     build_review_context_fingerprint,
     build_semantic_review_cases,
@@ -154,9 +151,7 @@ def _build_pipeline_lesson_content_outcome(
         )
 
     v2_rows = build_lesson_content_v2(content_rows)
-    blocks = unresolved_mandatory_review_blocks(v2_rows)
-    readiness_gaps = rows_have_production_readiness_gaps(v2_rows)
-    if not blocks and not readiness_gaps:
+    if not any(_week_needs_semantic_review(row) for row in v2_rows):
         return _LessonContentBuild(
             rows=_lesson_rows_from_v2(v2_rows),
             v2_rows=v2_rows,
@@ -173,6 +168,13 @@ def _build_pipeline_lesson_content_outcome(
         cases,
         manual_confirmations,
     )
+    pending_ids = {case.review_id for case in application.pending_cases}
+    accepted_ids = set(application.accepted_review_ids)
+    notices = tuple(
+        case
+        for case in cases
+        if case.review_id not in pending_ids and case.review_id not in accepted_ids
+    )
     status = (
         CalendarDocumentStatus.DRAFT_READY
         if application.pending_cases
@@ -182,7 +184,7 @@ def _build_pipeline_lesson_content_outcome(
         rows=_lesson_rows_from_v2(application.rows),
         v2_rows=application.rows,
         status=status,
-        review_cases=application.pending_cases,
+        review_cases=(*application.pending_cases, *notices),
         accepted_review_ids=application.accepted_review_ids,
         confirmation_errors=application.errors,
     )

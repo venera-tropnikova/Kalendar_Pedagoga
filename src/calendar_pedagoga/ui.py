@@ -3626,12 +3626,38 @@ _STATUS_CHECK_DOCX = "Проверяем готовый документ…"
 _STATUS_READY = "Календарный план готов"
 
 
-def _review_week_count(cases: object | None = None) -> int:
+def _review_cases(cases: object | None = None) -> tuple[object, ...]:
     if cases is None:
         cases = st.session_state.get("semantic_review_pipeline_cases") or ()
+    return tuple(cases)
+
+
+def _review_week_count(cases: object | None = None) -> int:
     weeks = {
         getattr(case, "week_number", None)
-        for case in cases
+        for case in _review_cases(cases)
+    }
+    weeks.discard(None)
+    return len(weeks)
+
+
+def _blocking_review_week_count(cases: object | None = None) -> int:
+    """Weeks that keep the plan in draft. Informational notices are excluded."""
+
+    weeks = {
+        getattr(case, "week_number", None)
+        for case in _review_cases(cases)
+        if getattr(case, "blocks_delivery", True)
+    }
+    weeks.discard(None)
+    return len(weeks)
+
+
+def _notice_review_week_count(cases: object | None = None) -> int:
+    weeks = {
+        getattr(case, "week_number", None)
+        for case in _review_cases(cases)
+        if not getattr(case, "blocks_delivery", True)
     }
     weeks.discard(None)
     return len(weeks)
@@ -4618,7 +4644,7 @@ def _render_teacher_analysis_screen(
     title_col, edit_col = st.columns((3.4, 1.1), gap="small")
     with title_col:
         if generated:
-            review_weeks = _review_week_count()
+            review_weeks = _blocking_review_week_count()
             if review_weeks:
                 st.markdown(
                     f'<p class="kp-status-title">{html.escape(_ready_plan_message(review_weeks))}</p>',
@@ -4776,7 +4802,9 @@ def _store_generation_result(result) -> None:
         st.session_state["calendar_plan_snapshot"] = (
             _calendar_plan_snapshot(resolved_lessons, result.content)
         )
-    _set_work_status(_ready_plan_message(_review_week_count(result.review_cases)))
+    _set_work_status(
+        _ready_plan_message(_blocking_review_week_count(result.review_cases))
+    )
     st.session_state["calendar_generation_succeeded"] = True
 
 
@@ -4875,13 +4903,19 @@ def _render_generation_result(*, show_status: bool = True) -> None:
     if download is not None and not generation_error:
         context = st.session_state.get("calendar_context") or {}
         academic_year = str(context.get("academic_year") or APPROVED_ACADEMIC_YEAR)
-        review_weeks = _review_week_count()
+        blocking_weeks = _blocking_review_week_count()
+        notice_weeks = _notice_review_week_count()
         status = st.session_state.get("calendar_document_status")
         is_draft = (
             status == CalendarDocumentStatus.DRAFT_READY.value
-            or bool(review_weeks)
+            or bool(blocking_weeks)
         )
-        st.markdown(_ready_plan_message(review_weeks))
+        st.markdown(_ready_plan_message(blocking_weeks))
+        if notice_weeks and not blocking_weeks:
+            st.markdown(
+                f"Есть замечания: {notice_weeks} {_count_weeks_word(notice_weeks)}. "
+                "Ручное подтверждение не требуется."
+            )
         empty_weeks = _empty_review_week_count()
         if empty_weeks:
             st.markdown(_fill_required_message(empty_weeks))
@@ -4898,8 +4932,11 @@ def _render_generation_result(*, show_status: bool = True) -> None:
             type="primary",
             use_container_width=True,
         )
-        if review_weeks:
-            if st.button("Проверить замечания", key="kp_open_semantic_review"):
+        if blocking_weeks or notice_weeks:
+            button_label = (
+                "Проверить замечания" if blocking_weeks else "Показать замечания"
+            )
+            if st.button(button_label, key="kp_open_semantic_review"):
                 st.session_state["calendar_show_semantic_review"] = True
                 st.rerun()
 

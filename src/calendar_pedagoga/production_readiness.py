@@ -10,8 +10,10 @@ from __future__ import annotations
 from calendar_pedagoga.content_engine_v2 import (
     LessonContentV2Row,
     PROVENANCE_UNINFORMATIVE_TOPIC_TITLE,
+    _rc_verbosity_block_reasons,
     is_sentence_frame_closed_row,
     is_utp_topic_derived_row,
+    week_has_unresolved_mandatory_review,
 )
 from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
 from calendar_pedagoga.matching import MatchStatus
@@ -169,6 +171,27 @@ def production_readiness_codes(row: LessonContentV2Row) -> tuple[str, ...]:
     if uninformative:
         codes.append(UNINFORMATIVE_TOPIC_TITLE)
     return tuple(dict.fromkeys(codes))
+
+
+def row_blocks_final_delivery(row: LessonContentV2Row) -> bool:
+    """True when the week must keep the document in draft.
+
+    A filled closed row whose only leftover is informational NEEDS_REVIEW is
+    a notice. Empty cells, GENERIC_ONLY, unmatched SOURCE, verbosity, and a
+    non-closed unresolved row stay blocking.
+    """
+
+    if production_readiness_codes(row):
+        return True
+    result = (row.planned_result or "").strip()
+    control = (row.assessment_method or "").strip()
+    if not result or not control:
+        return True
+    if _rc_verbosity_block_reasons(result, control):
+        return True
+    if is_sentence_frame_closed_row(row):
+        return False
+    return week_has_unresolved_mandatory_review(row)
 
 
 def rows_have_production_readiness_gaps(
