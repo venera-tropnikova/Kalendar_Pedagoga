@@ -23,4 +23,4 @@ RUN python -m pip install --upgrade pip \
 
 EXPOSE 8501
 
-CMD if [ "$APP_ROLE" = "api" ]; then python render_api.py; else streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8501}; fi
+CMD if [ "$APP_ROLE" = "api" ]; then python render_api.py; else python -m calendar_pedagoga.render_supervisor; fi

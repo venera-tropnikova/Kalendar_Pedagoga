@@ -40,6 +40,7 @@ from calendar_pedagoga.semantic_review import ManualSemanticConfirmation
 DEFAULT_GENERATION_API_URL = "http://127.0.0.1:8000"
 GENERATION_API_URL_ENV = "CALENDAR_GENERATION_API_URL"
 GENERATION_API_TOKEN_ENV = "CALENDAR_GENERATION_API_TOKEN"
+EMBEDDED_GENERATION_ENV = "CALENDAR_GENERATION_EMBEDDED"
 DEFAULT_POLL_INTERVAL_SECONDS = 0.4
 DEFAULT_WAIT_TIMEOUT_SECONDS = 12 * 60.0
 _HTTP_TIMEOUT_SECONDS = 60.0
@@ -72,6 +73,14 @@ def public_remote_mode() -> bool:
     )
 
 
+def embedded_generation_mode() -> bool:
+    """True only when the production supervisor explicitly opted into loopback."""
+
+    return (os.environ.get(EMBEDDED_GENERATION_ENV) or "").strip().casefold() in (
+        _PUBLIC_REMOTE_FLAGS
+    )
+
+
 def generation_api_token() -> str:
     return (os.environ.get(GENERATION_API_TOKEN_ENV) or "").strip()
 
@@ -85,7 +94,10 @@ def generation_api_url(explicit: str | None = None) -> str:
     raw = explicit if explicit is not None else os.environ.get(GENERATION_API_URL_ENV)
     value = (raw or "").strip().rstrip("/")
     if public_remote_mode():
-        if not value or _is_loopback_url(value):
+        loopback_blocked = bool(value) and _is_loopback_url(value) and not embedded_generation_mode()
+        if not value or loopback_blocked:
+            raise PipelineError(_PUBLIC_REMOTE_BLOCK)
+        if not generation_api_token():
             raise PipelineError(_PUBLIC_REMOTE_BLOCK)
         return value
     return value or DEFAULT_GENERATION_API_URL
@@ -704,6 +716,7 @@ def run_remote_calendar_generation(
 __all__ = [
     "DEFAULT_GENERATION_API_URL",
     "DEFAULT_WAIT_TIMEOUT_SECONDS",
+    "EMBEDDED_GENERATION_ENV",
     "GENERATION_API_TOKEN_ENV",
     "GENERATION_API_URL_ENV",
     "REMOTE_JOB_EXPIRED_MESSAGE",
@@ -713,6 +726,7 @@ __all__ = [
     "advance_remote_generation_job",
     "build_generation_payload",
     "delete_remote_calendar_job",
+    "embedded_generation_mode",
     "download_remote_calendar_document",
     "fetch_remote_calendar_job",
     "generation_api_token",

@@ -308,8 +308,9 @@ def test_dockerfile_copies_render_api_and_keeps_libreoffice() -> None:
     assert "render_api.py" in text
     assert "APP_ROLE" in text
     assert "python render_api.py" in text
+    assert "python -m calendar_pedagoga.render_supervisor" in text
     assert "libreoffice-writer-nogui" in text
-    assert "streamlit run app.py" in text
+    assert "EXPOSE 8000" not in text
 
 
 def test_health_allows_missing_token_and_jobs_require_bearer() -> None:

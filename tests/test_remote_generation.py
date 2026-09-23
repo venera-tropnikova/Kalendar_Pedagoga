@@ -16,6 +16,7 @@ from calendar_pedagoga.parsing import parse_utp
 from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineError, PipelineResult
 from calendar_pedagoga.remote_generation import (
     DEFAULT_GENERATION_API_URL,
+    EMBEDDED_GENERATION_ENV,
     GENERATION_API_TOKEN_ENV as REMOTE_TOKEN_ENV,
     GENERATION_API_URL_ENV,
     REMOTE_JOB_EXPIRED_MESSAGE,
@@ -43,6 +44,7 @@ def _generation_api_token(monkeypatch) -> None:
     monkeypatch.setenv(GENERATION_API_TOKEN_ENV, TEST_API_TOKEN)
     monkeypatch.delenv("RENDER", raising=False)
     monkeypatch.delenv("CALENDAR_GENERATION_REMOTE", raising=False)
+    monkeypatch.delenv(EMBEDDED_GENERATION_ENV, raising=False)
 
 
 def _plan():
@@ -214,6 +216,63 @@ def test_public_remote_mode_without_url_or_token_is_fail_closed(monkeypatch) -> 
             http_request=http_request,
         )
     assert calls == []
+
+
+def test_render_loopback_without_embedded_flag_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv(EMBEDDED_GENERATION_ENV, raising=False)
+    monkeypatch.setenv(GENERATION_API_URL_ENV, "http://127.0.0.1:8000")
+    with pytest.raises(PipelineError, match="CALENDAR_GENERATION_API_URL"):
+        generation_api_url()
+
+
+def test_render_embedded_loopback_with_token_is_allowed(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(EMBEDDED_GENERATION_ENV, "1")
+    monkeypatch.setenv(GENERATION_API_URL_ENV, "http://127.0.0.1:8000")
+    monkeypatch.setenv(REMOTE_TOKEN_ENV, TEST_API_TOKEN)
+    assert generation_api_url() == "http://127.0.0.1:8000"
+    seen: list[dict[str, str]] = []
+
+    def http_request(method, url, *, json_body=None, headers=None, timeout=60):
+        seen.append(dict(headers or {}))
+        body = (
+            '{"job_id":"abc","job_state":"SUCCEEDED","phase":"DOCX",'
+            '"pipeline_status":"FINAL_READY","review_cases":[],'
+            '"confirmation_errors":[],"warnings":[],"docx_available":true,'
+            '"filename":"Plan.docx","error":null}'
+        ).encode("utf-8")
+        if method == "POST":
+            return 202, {}, body
+        if method == "GET" and url.endswith("/document"):
+            return 200, {"Content-Disposition": "attachment; filename*=UTF-8''Plan.docx"}, b"PK\x03\x04docx"
+        if method == "DELETE":
+            return 204, {}, b""
+        return 200, {}, body
+
+    result = run_remote_calendar_generation(
+        _plan(),
+        academic_year="2026–2027",
+        template=_template(),
+        source_utp_name=UTP_PATH.name,
+        program_filename=PROGRAM_PATH.name,
+        program_content=PROGRAM_PATH.read_bytes(),
+        semantic_revision=REVISION,
+        http_request=http_request,
+        poll_interval=0.01,
+    )
+    assert result.status is CalendarDocumentStatus.FINAL_READY
+    assert seen
+    assert all(item.get("Authorization") == f"Bearer {TEST_API_TOKEN}" for item in seen)
+
+
+def test_render_embedded_loopback_without_token_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(EMBEDDED_GENERATION_ENV, "1")
+    monkeypatch.setenv(GENERATION_API_URL_ENV, "http://127.0.0.1:8000")
+    monkeypatch.delenv(REMOTE_TOKEN_ENV, raising=False)
+    with pytest.raises(PipelineError, match="CALENDAR_GENERATION_API_TOKEN"):
+        generation_api_url()
 
 
 def test_build_payload_uses_contract_and_json_safe_reviews() -> None:
