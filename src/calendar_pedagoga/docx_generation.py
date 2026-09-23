@@ -16,14 +16,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
-from calendar_pedagoga.confirmed_slot_allocation import format_allocated_units
 from calendar_pedagoga.lesson_resolution import ResolvedLessonRow
-from calendar_pedagoga.lesson_display import (
-    format_practice_cell,
-    format_theory_cell,
-    selected_practice_clause,
-    week_practice_content,
-)
+from calendar_pedagoga.lesson_display import format_schedule_channel_cell
 from calendar_pedagoga.organization_template import CalendarTemplateSelection, CalendarTemplateSource
 from calendar_pedagoga.parsing import UtpParseResult
 from calendar_pedagoga.content_generation import WeekTopicPart
@@ -886,76 +880,30 @@ def _topic_cells_for_lesson(
     topic_counts: dict[tuple[str | None, str, str, str], int],
     topic_occurrences: dict[tuple[str | None, str, str, str], int],
 ) -> tuple[str, str]:
+    del topic_counts
     source_row = lesson.source.source
     theory_lines: list[str] = []
     practice_lines: list[str] = []
     for part in _week_topic_parts(source_row):
         display_key = _topic_part_key(part)
         occurrence_key = _content_occurrence_key(part)
-        occurrence_index = 0
         if part.practice_hours:
-            occurrence_index = topic_occurrences.get(occurrence_key, 0)
-            topic_occurrences[occurrence_key] = occurrence_index + 1
+            topic_occurrences[occurrence_key] = topic_occurrences.get(occurrence_key, 0) + 1
         display_number = display_numbers.get(display_key, part.topic_number or "?")
-        allocated = part.weekly_content_assigned and (
-            part.theory_units or part.practice_units
-        )
-        theory_clause = (
-            format_allocated_units(part.theory_units)
-            if allocated and part.theory_hours
-            else ""
-        )
-        theory_cell = format_theory_cell(
+        # Allocated SOURCE stays on the part for SentenceFrame; the table prints
+        # quoted work/catalog shorts when present, otherwise the UTP title.
+        theory_cell = format_schedule_channel_cell(
             display_number,
             part.topic_title,
-            part.program_content_full,
             part.theory_hours,
-            theory_clause,
+            part.theory_units,
         )
-        selected_clause = ""
-        appearance_count = topic_counts.get(occurrence_key, 0)
-        if allocated and part.practice_hours:
-            selected_clause = format_allocated_units(part.practice_units)
-        elif part.practice_hours and appearance_count > 1:
-            # Слоты распределяются только между повторами темы: неделя с одним
-            # вхождением показывает всё назначенное практическое содержание.
-            selected_clause = selected_practice_clause(
-                topic_title=part.topic_title,
-                content=part.program_content_full,
-                theory_hours=part.theory_hours,
-                practice_hours=part.practice_hours,
-                occurrence_index=occurrence_index,
-                appearance_count=appearance_count,
-            )
-        practice_cell = format_practice_cell(
+        practice_cell = format_schedule_channel_cell(
             display_number,
             part.topic_title,
-            part.program_content_full,
             part.practice_hours,
-            selected_clause,
+            part.practice_units,
         )
-        generic_practice_cell = (
-            f"{display_number}. {part.topic_title} ({part.practice_hours})"
-        )
-        if (
-            not allocated
-            and part.weekly_content_assigned
-            and practice_cell == generic_practice_cell
-        ):
-            # Заголовок программы — только когда содержания недели нет совсем.
-            body = week_practice_content(
-                part.program_content_full,
-                theory_hours=part.theory_hours,
-                practice_hours=part.practice_hours,
-            ) or part.program_topic.strip()
-            if body:
-                practice_cell = format_practice_cell(
-                    display_number,
-                    part.topic_title,
-                    part.program_content_full,
-                    part.practice_hours,
-                    body,
-                )
         if theory_cell:
             theory_lines.append(theory_cell)
         if practice_cell:
@@ -1432,7 +1380,7 @@ def _populate_calendar_table(
             planned_result=lesson.planned_result,
             assessment_method=lesson.assessment_method,
         )
-        _allow_row_split(table.rows[index + 2])
+        _prevent_row_split(table.rows[index + 2])
 
     if not uses_organization_template:
         _apply_standard_compact_table_layout(table)
@@ -1740,7 +1688,9 @@ def _measure_preview_layouts(
     document = _load_template(template)
     table, columns, _ = _populate_calendar_table(document, utp, rows, **header)
     for index, row in enumerate(table.rows[2:]):
-        if index not in splittable:
+        if index in splittable:
+            _allow_row_split(row)
+        else:
             _prevent_row_split(row)
         if index in page_break_before:
             _set_page_break_before_row(row, columns)

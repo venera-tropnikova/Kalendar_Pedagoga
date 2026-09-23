@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 import re
 
 from calendar_pedagoga.lesson_content import _strip_leading_item_colon
@@ -25,10 +27,141 @@ _PRACTICE_SENTENCE_RE = re.compile(
     r"закупк|фасовк|упаковк|сдач|подготовк|выступлен)",
     re.IGNORECASE,
 )
+_WHOLE_QUOTED_UNIT_RE = re.compile(r"^[«„\"](.+)[»“\"]$")
+_TOPIC_HEADER_LABEL_RE = re.compile(r"(?i)^тема\s*№?\s*\d+")
+_BRIEF_WORK_WORD_LIMIT = 12
 
 
 def _normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def format_display_hours(hours: object) -> str:
+    """Compact hour label for DOCX: 2 → 2, 1.50 → 1.5."""
+
+    token = str(hours).strip().replace(",", ".")
+    try:
+        value = Decimal(token)
+    except (InvalidOperation, ValueError):
+        return token
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _positive_display_hours(hours: object) -> bool:
+    token = str(hours).strip().replace(",", ".")
+    try:
+        return Decimal(token) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def normalize_display_topic_title(title: str) -> str:
+    """Display-only punctuation: no double periods, no nested/unclosed quotes."""
+
+    text = _normalize_spaces(title)
+    if not text:
+        return ""
+    text = (
+        text.replace("“", "«")
+        .replace("”", "»")
+        .replace("„", "«")
+        .replace("‟", "»")
+    )
+    chars: list[str] = []
+    pending_open = False
+    for char in text:
+        if char != '"':
+            chars.append(char)
+            continue
+        if pending_open:
+            chars.append("»")
+            pending_open = False
+        else:
+            chars.append("«")
+            pending_open = True
+    text = "".join(chars)
+    while "««" in text:
+        text = text.replace("««", "«")
+    while "»»" in text:
+        text = text.replace("»»", "»")
+    opens = text.count("«")
+    closes = text.count("»")
+    if opens > closes:
+        text += "»" * (opens - closes)
+    elif closes > opens:
+        text = ("«" * (closes - opens)) + text
+    first = text.find("«")
+    last = text.rfind("»")
+    if first != -1 and last > first and (text.count("«") > 1 or text.count("»") > 1):
+        inner = text[first + 1 : last].replace("«", "").replace("»", "")
+        text = f"{text[:first]}«{inner}»{text[last + 1 :]}"
+    text = re.sub(r"\.{2,}", ".", text)
+    text = re.sub(r"\s+\.", ".", text)
+    text = re.sub(r"\.\s*\.", ".", text)
+    return text.strip()
+
+
+def format_schedule_topic_cell(
+    display_number: str,
+    topic_title: str,
+    hours: object,
+) -> str:
+    """DOCX theory/practice label: topic title and hours, never full SOURCE."""
+
+    if not _positive_display_hours(hours):
+        return ""
+    title = normalize_display_topic_title(topic_title).rstrip(" .")
+    if not title:
+        return ""
+    number = str(display_number).strip().rstrip(".")
+    return f"{number}. {title}. ({format_display_hours(hours)})"
+
+
+def brief_allocated_work_labels(units: Sequence[str]) -> tuple[str, ...]:
+    """Short quoted work/catalog names from allocated units, if they are titles."""
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for unit in units:
+        text = normalize_display_topic_title(_normalize_spaces(unit).rstrip(" .;:"))
+        if not text:
+            continue
+        match = _WHOLE_QUOTED_UNIT_RE.fullmatch(text)
+        if match is None:
+            continue
+        inner = normalize_display_topic_title(match.group(1)).strip(" «»").strip()
+        if not inner or not inner[0].isupper():
+            continue
+        if len(inner.split()) > _BRIEF_WORK_WORD_LIMIT:
+            continue
+        if _TOPIC_HEADER_LABEL_RE.match(inner):
+            continue
+        label = f"«{inner}»"
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return tuple(labels)
+
+
+def format_schedule_channel_cell(
+    display_number: str,
+    topic_title: str,
+    hours: object,
+    units: Sequence[str] = (),
+) -> str:
+    """DOCX theory/practice: quoted work names if allocated, else UTP title."""
+
+    if not _positive_display_hours(hours):
+        return ""
+    labels = brief_allocated_work_labels(units)
+    if labels:
+        return f"{'. '.join(labels)} ({format_display_hours(hours)})"
+    return format_schedule_topic_cell(display_number, topic_title, hours)
 
 
 def _split_sentences(text: str) -> tuple[str, ...]:

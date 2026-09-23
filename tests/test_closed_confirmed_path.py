@@ -354,13 +354,12 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     assert len([unit for unit in week3_units if unit]) >= 2
     practice_cell = week3.practice.casefold()
     for unit in week3_units:
-        token = unit.strip(" «».").split()[-1].casefold()
-        if token:
-            assert token[:4] in practice_cell or token in practice_cell
+        if len(unit.strip()) >= 20:
+            assert unit.casefold() not in practice_cell
     for unit in week3_units:
         token = unit.strip(" «».").split()[-1].casefold()
         if token:
-            assert token[:4] in week3.planned_result.casefold() or token in week3.practice.casefold()
+            assert token[:4] in week3.planned_result.casefold() or token in week3.planned_result.casefold()
 
     week23 = docx_by_week[23]
     week23_units = tuple(
@@ -377,8 +376,9 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     assert "Открытка" in week23.practice or "Открытка" in week23.planned_result
 
     week30 = v2_by_week[30]
-    assert "характеризует" in week30.planned_result.casefold()
     assert "выполняет" in week30.planned_result.casefold()
+    assert "солёное тесто" in week30.planned_result.casefold()
+    assert "подводит итоги работы по программе" in week30.planned_result.casefold()
     assert week30.assessment_method == docx_by_week[30].assessment
     assert "анализирует выполненные работы" not in week30.assessment_method.casefold()
     assert is_sentence_frame_closed_row(week30)

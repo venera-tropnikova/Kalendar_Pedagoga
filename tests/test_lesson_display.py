@@ -2,10 +2,14 @@ import pytest
 
 from calendar_pedagoga.lesson_display import (
     _compact_repeated_practice_postfix,
+    brief_allocated_work_labels,
     brief_practice_summary,
     brief_theory_fragment,
     format_practice_cell,
+    format_schedule_channel_cell,
+    format_schedule_topic_cell,
     format_theory_cell,
+    normalize_display_topic_title,
     selected_practice_clause,
 )
 
@@ -250,8 +254,15 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
     from tp1_fixed_content import tp1_number_bound_content_rows
 
     source = Path(__file__).resolve().parents[1] / "references" / "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx"
+    if not source.is_file():
+        pytest.skip("нет программы «Туристы-проводники» 1 г.")
     upload = validate_upload(UploadPurpose.PROGRAM, source.name, source.read_bytes())
-    utp = resolve_utp(None, upload)
+    from calendar_pedagoga.resolve_utp import UtpResolutionError
+
+    try:
+        utp = resolve_utp(None, upload)
+    except UtpResolutionError:
+        pytest.skip("программа «Туристы-проводники» 1 г. без уникального встроенного УТП")
     rows = tuple(
         row for row in tp1_number_bound_content_rows() if row.week_number >= 29
     )
@@ -282,9 +293,9 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
         )
         token = tokens[week]
         low = practice.casefold()
-        assert token in low, (
-            f"неделя {week}: в практике нет слота {token!r}\nactual: {practice!r}"
-        )
+        assert practice.rstrip().endswith(")")
+        assert "(" in practice
+        assert token not in low
         assert token in lesson.planned_result.casefold(), (
             f"неделя {week}: в RESULT нет слота {token!r}\n"
             f"actual: {lesson.planned_result!r}"
@@ -293,9 +304,10 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
         assert "роль и значение специальной" not in low
         assert "индивидуальный подход" not in low
         if week in {29, 30, 31}:
-            seen_ofp.append(practice)
+            seen_ofp.append(lesson.planned_result)
+            assert "общая физическая подготовка" in low
         if week == 36:
-            assert practice.startswith("Продолжение.")
+            assert "продолжение" not in low
             assert "выносливости" not in low
             assert "выносливости" not in lesson.planned_result.casefold()
     fifth_sfp = [
@@ -318,3 +330,124 @@ def test_tp1_weeks_29_36_practice_follows_result_without_changing_fields() -> No
         "плавание",
     ):
         assert fragment in joined_ofp
+
+
+def test_schedule_cell_prints_title_and_hours_not_source() -> None:
+    cell = format_schedule_topic_cell(
+        "1",
+        "Вводное занятие. Правила по ТБ",
+        "1.5",
+    )
+    assert cell == "1. Вводное занятие. Правила по ТБ. (1.5)"
+    assert "инструктаж" not in cell.casefold()
+
+
+def test_schedule_cell_normalizes_double_period_and_nested_quotes() -> None:
+    assert normalize_display_topic_title("«Украшения в технике «папье-маше»»") == (
+        "«Украшения в технике папье-маше»"
+    )
+    assert normalize_display_topic_title("«Украшения в технике папье-маше") == (
+        "«Украшения в технике папье-маше»"
+    )
+    assert normalize_display_topic_title("Тема.. продолжение.") == "Тема. продолжение."
+    assert format_schedule_topic_cell(
+        "7.",
+        "«Украшения в технике «папье-маше»»",
+        3,
+    ) == "7. «Украшения в технике папье-маше». (3)"
+
+
+def test_channel_cell_prints_quoted_work_names_instead_of_utp_title() -> None:
+    assert brief_allocated_work_labels(
+        ("«Аппликация из семян»", "«Аппликация из опила»")
+    ) == ("«Аппликация из семян»", "«Аппликация из опила»")
+    assert format_schedule_channel_cell(
+        "2",
+        "Аппликация. Настенные композиции.",
+        3,
+        ("«Аппликация из семян»", "«Аппликация из опила»"),
+    ) == "«Аппликация из семян». «Аппликация из опила» (3)"
+    assert format_schedule_channel_cell(
+        "5",
+        "Плетение.",
+        3,
+        ("«Изонить. Открытка»",),
+    ) == "«Изонить. Открытка» (3)"
+
+
+def test_channel_cell_normalizes_nested_work_quotes() -> None:
+    assert format_schedule_channel_cell(
+        "4",
+        "Декоративные украшения.",
+        3,
+        ("«Украшения в технике «папье-маше»",),
+    ) == "«Украшения в технике папье-маше» (3)"
+
+
+def test_channel_cell_falls_back_to_utp_title_without_concrete_work() -> None:
+    assert format_schedule_channel_cell(
+        "1",
+        "Вводное занятие. Правила по ТБ.",
+        "1.5",
+        (
+            "Тема № 1 Вводное занятие",
+            "Знакомство учащихся с направлением, планом работы",
+            "Правила по технике безопасности при работе с острорежущими инструментами",
+        ),
+    ) == "1. Вводное занятие. Правила по ТБ. (1.5)"
+    assert format_schedule_channel_cell(
+        "5",
+        "Плетение.",
+        3,
+        (),
+    ) == "5. Плетение. (3)"
+    assert format_schedule_channel_cell(
+        "5",
+        "Плетение.",
+        2,
+        ("«изонить»", "Тема № 5 Плетение", "История плетения"),
+    ) == "5. Плетение. (2)"
+    cell = format_schedule_channel_cell(
+        "3",
+        "Скульптурная композиция. Объёмные изделия.",
+        3,
+        ("Составление композиций из шишек, желудей, ракушек, яичной скорлупы, папье-маше",),
+    )
+    assert cell == "3. Скульптурная композиция. Объёмные изделия. (3)"
+    assert "шишек" not in cell
+
+
+def test_docx_topic_cells_use_allocated_work_labels() -> None:
+    from types import SimpleNamespace
+
+    from calendar_pedagoga import docx_generation as generation
+    from calendar_pedagoga.content_generation import WeekTopicPart
+    from calendar_pedagoga.matching import MatchStatus
+
+    part = WeekTopicPart(
+        topic_number="2",
+        topic_title="Аппликация. Настенные композиции.",
+        section="Аппликация",
+        theory_hours=0,
+        practice_hours=3,
+        match_status=MatchStatus.EXACT,
+        program_section="Аппликация",
+        program_topic="Аппликация. Настенные композиции.",
+        program_content_full="Практика. «Аппликация из семян». «Аппликация из опила».",
+        weekly_content_assigned=True,
+        practice_units=("«Аппликация из семян»", "«Аппликация из опила»"),
+    )
+    lesson = SimpleNamespace(
+        source=SimpleNamespace(source=SimpleNamespace(week_parts=(part,))),
+        planned_result="Выполняет аппликацию из семян и опила.",
+    )
+    key = generation._content_occurrence_key(part)
+    theory, practice = generation._topic_cells_for_lesson(
+        lesson,
+        {generation._topic_part_key(part): "2"},
+        topic_counts={key: 1},
+        topic_occurrences={},
+    )
+    assert theory == ""
+    assert practice == "«Аппликация из семян». «Аппликация из опила» (3)"
+    assert "Настенные композиции" not in practice

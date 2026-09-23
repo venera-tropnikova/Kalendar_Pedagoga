@@ -433,8 +433,8 @@ def test_docx_uses_assigned_week_content_even_for_single_occurrence() -> None:
         topic_occurrences={},
     )
 
-    assert "Выполнение упражнений на координацию" in practice
-    assert practice != "3. Общая физическая подготовка (2)"
+    assert practice == "3. Общая физическая подготовка. (2)"
+    assert "Выполнение упражнений на координацию" not in practice
 
 
 def test_docx_falls_back_to_grounded_week_topic_when_clause_is_not_safe() -> None:
@@ -469,8 +469,8 @@ def test_docx_falls_back_to_grounded_week_topic_when_clause_is_not_safe() -> Non
         topic_occurrences={},
     )
 
-    assert "Лазание учебных трасс" in practice
-    assert practice != "Техника лазания по активам (2)"
+    assert practice == "5. Основы скалолазания. (2)"
+    assert "Лазание учебных трасс" not in practice
 
 
 def test_docx_uses_source_clause_that_matches_the_week_result() -> None:
@@ -507,8 +507,9 @@ def test_docx_uses_source_clause_that_matches_the_week_result() -> None:
         topic_occurrences={},
     )
 
-    assert "Изучение упражнений для улучшения осанки" in practice
-    assert "Игры на развитие внимания" in practice
+    assert practice == "3. Общая физическая подготовка. (2)"
+    assert "Изучение упражнений для улучшения осанки" not in practice
+    assert "Игры на развитие внимания" not in practice
 def test_training_nominal_produces_observable_grounded_triad() -> None:
     result = derive_fields_v2(
         topic_title="Постановка ног",
