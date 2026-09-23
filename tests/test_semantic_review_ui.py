@@ -168,7 +168,7 @@ def test_filled_review_weeks_are_notices_without_manual_input() -> None:
     assert "Неделя №17" in text
     assert "Ручное подтверждение не требуется." in "\n".join(writes)
     assert text_areas == ["Результат педагога", "Контроль педагога"]
-    assert buttons == ["Подтвердить"]
+    assert buttons == ["Изменить формулировку", "Подтвердить"]
 
 
 def test_valid_confirmation_is_saved_and_revalidated() -> None:
@@ -237,7 +237,7 @@ def test_valid_card_is_read_only_and_offers_change() -> None:
         ("Результат педагога", True),
         ("Контроль педагога", True),
     ]
-    assert buttons == ["Изменить"]
+    assert buttons == ["Изменить формулировку"]
 
 
 def test_invalid_confirmation_remains_blocked_with_issues() -> None:

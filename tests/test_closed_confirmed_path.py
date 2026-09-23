@@ -32,6 +32,7 @@ from calendar_pedagoga.semantic_review import (
     review_proposal_docx_issues,
     source_grounded_review_proposal,
 )
+from calendar_pedagoga.lesson_display import brief_allocated_work_labels
 from calendar_pedagoga.sentence_frame import (
     display_source_units_for_part,
     frames_by_confirmed_parts,
@@ -318,7 +319,7 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
     v2_by_week = {row.source.week_number: row for row in v2}
     content_by_week = {row.week_number: row for row in content}
     docx_by_week = {week.week_number: week for week in weeks}
-    for number in (3, 23, 30):
+    for number in (3, 23, 24, 30, 31, 32):
         source_row = content_by_week[number]
         groups = frames_by_confirmed_parts(source_row, source_row.week_parts)
         rendered, control, _fallback = render_confirmed_parts(groups)
@@ -343,45 +344,75 @@ def test_holdout_live_equivalent_closed_path_word_qa() -> None:
         assert docx_row.assessment == v2_row.assessment_method
         assert is_sentence_frame_closed_row(v2_row)
 
-    week3 = docx_by_week[3]
-    week3_units = display_source_units_for_part(content_by_week[3].week_parts[0])
-    if len(content_by_week[3].week_parts) > 1:
-        week3_units = tuple(
+    def _units_for_week(number: int) -> tuple[str, ...]:
+        return tuple(
             unit
-            for part in content_by_week[3].week_parts
+            for part in content_by_week[number].week_parts
             for unit in display_source_units_for_part(part)
         )
+
+    def _assert_no_descriptive_source_dump(week, units: tuple[str, ...]) -> None:
+        blob = f"{week.theory}\n{week.practice}".casefold()
+        for unit in units:
+            text = unit.strip()
+            if not text:
+                continue
+            if brief_allocated_work_labels((text,)):
+                continue
+            if text.startswith(("«", "„", '"')) and text.endswith(("»", "“", '"')):
+                continue
+            if len(text.split()) < 8:
+                continue
+            assert text.casefold() not in blob
+
+    week3 = docx_by_week[3]
+    week3_units = _units_for_week(3)
     assert len([unit for unit in week3_units if unit]) >= 2
-    practice_cell = week3.practice.casefold()
-    for unit in week3_units:
-        if len(unit.strip()) >= 20:
-            assert unit.casefold() not in practice_cell
+    assert brief_allocated_work_labels(week3_units) == (
+        "«Аппликация из семян»",
+        "«Аппликация из опила»",
+    )
+    assert week3.practice == "«Аппликация из семян». «Аппликация из опила» (3)"
+    _assert_no_descriptive_source_dump(week3, week3_units)
     for unit in week3_units:
         token = unit.strip(" «».").split()[-1].casefold()
         if token:
             assert token[:4] in week3.planned_result.casefold() or token in week3.planned_result.casefold()
 
     week23 = docx_by_week[23]
-    week23_units = tuple(
-        unit
-        for part in content_by_week[23].week_parts
-        for unit in display_source_units_for_part(part)
-    )
+    week23_units = _units_for_week(23)
     assert any("Открытка" in unit for unit in week23_units)
     assert all(unit.count("«") == unit.count("»") for unit in week23_units)
     assert not any(
         "Открытка" in unit and ("«" not in unit or unit.strip().startswith("Открытка»"))
         for unit in week23_units
     )
+    assert week23.practice == "«Изонить. Открытка» (3)"
     assert "Открытка" in week23.practice or "Открытка" in week23.planned_result
+    _assert_no_descriptive_source_dump(week23, week23_units)
+
+    week24 = docx_by_week[24]
+    assert week24.practice == "5. Плетение. (3)"
+    assert "изонить" not in week24.practice.casefold()
+    _assert_no_descriptive_source_dump(week24, _units_for_week(24))
 
     week30 = v2_by_week[30]
+    assert docx_by_week[30].theory == "7. Итоговое занятие. (2)"
+    assert docx_by_week[30].practice == "6. Солёное тесто. (1)"
     assert "выполняет" in week30.planned_result.casefold()
     assert "солёное тесто" in week30.planned_result.casefold()
     assert "подводит итоги работы по программе" in week30.planned_result.casefold()
     assert week30.assessment_method == docx_by_week[30].assessment
     assert "анализирует выполненные работы" not in week30.assessment_method.casefold()
     assert is_sentence_frame_closed_row(week30)
+    _assert_no_descriptive_source_dump(docx_by_week[30], _units_for_week(30))
+
+    for number in (31, 32):
+        week = docx_by_week[number]
+        assert week.theory == ""
+        assert week.practice == "8. Конкурсы, выставки, экскурсии. (3)"
+        _assert_no_descriptive_source_dump(week, _units_for_week(number))
+
     assert result.status in {
         CalendarDocumentStatus.DRAFT_READY,
         CalendarDocumentStatus.FINAL_READY,

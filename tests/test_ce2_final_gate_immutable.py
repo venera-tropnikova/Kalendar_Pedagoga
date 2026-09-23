@@ -12,6 +12,7 @@ import pytest
 from calendar_pedagoga.content_engine_v2 import (
     ActionFrame,
     ContentEngineV2Result,
+    PROVENANCE_GENERIC_ONLY,
     REQUIRED_ACTION,
     _apply_blocking_grammar_gate,
     _apply_result_grammar_gate,
@@ -22,9 +23,6 @@ from calendar_pedagoga.content_engine_v2 import (
     _normalize_factored_result_grammar,
     _semantic_labels_control,
     derive_fields_v2,
-    format_unresolved_review_block_message,
-    unresolved_mandatory_review_blocks,
-    week_has_unresolved_mandatory_review,
 )
 from calendar_pedagoga.content_generation import CalendarContentRow
 from calendar_pedagoga.lesson_content import LessonContentRow
@@ -87,11 +85,7 @@ def test_unknown_multi_clause_practice_needs_review_and_blocks_ready_docx() -> N
     from calendar_pedagoga.content_engine_v2 import build_lesson_content_v2
 
     v2 = build_lesson_content_v2(content)
-    blocks = unresolved_mandatory_review_blocks(v2)
-    assert blocks
-    assert week_has_unresolved_mandatory_review(v2[0])
-    message = format_unresolved_review_block_message(blocks)
-    assert "незакрытые" in message
+    assert PROVENANCE_GENERIC_ONLY in v2[0].provenance_codes
     with pytest.raises(PipelineError, match="не готов"):
         _build_pipeline_lesson_content(content, use_content_engine_v2=True)
 
