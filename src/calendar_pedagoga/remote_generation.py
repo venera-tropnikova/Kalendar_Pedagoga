@@ -40,7 +40,6 @@ from calendar_pedagoga.semantic_review import ManualSemanticConfirmation
 DEFAULT_GENERATION_API_URL = "http://127.0.0.1:8000"
 GENERATION_API_URL_ENV = "CALENDAR_GENERATION_API_URL"
 GENERATION_API_TOKEN_ENV = "CALENDAR_GENERATION_API_TOKEN"
-EMBEDDED_GENERATION_ENV = "CALENDAR_GENERATION_EMBEDDED"
 DEFAULT_POLL_INTERVAL_SECONDS = 0.4
 DEFAULT_WAIT_TIMEOUT_SECONDS = 12 * 60.0
 _HTTP_TIMEOUT_SECONDS = 60.0
@@ -48,6 +47,11 @@ _PUBLIC_REMOTE_FLAGS = {"1", "true", "yes", "on"}
 _PUBLIC_REMOTE_BLOCK = (
     "Удалённая генерация недоступна: задайте "
     "CALENDAR_GENERATION_API_URL и CALENDAR_GENERATION_API_TOKEN."
+)
+PARTIAL_GENERATION_CONFIGURATION_MESSAGE = (
+    "Неполная конфигурация генерации: задайте одновременно "
+    "CALENDAR_GENERATION_API_URL и CALENDAR_GENERATION_API_TOKEN "
+    "или уберите обе переменные."
 )
 
 _PHASE_LABELS = {
@@ -73,16 +77,30 @@ def public_remote_mode() -> bool:
     )
 
 
-def embedded_generation_mode() -> bool:
-    """True only when the production supervisor explicitly opted into loopback."""
-
-    return (os.environ.get(EMBEDDED_GENERATION_ENV) or "").strip().casefold() in (
-        _PUBLIC_REMOTE_FLAGS
-    )
-
-
 def generation_api_token() -> str:
     return (os.environ.get(GENERATION_API_TOKEN_ENV) or "").strip()
+
+
+def configured_generation_api_url() -> str:
+    return (os.environ.get(GENERATION_API_URL_ENV) or "").strip().rstrip("/")
+
+
+def select_generation_route() -> str:
+    """Choose remote HTTP only when both credentials are explicit and valid.
+
+    Both variables absent means the Streamlit process runs the pipeline itself.
+    Exactly one variable is a configuration error, not a silent fallback.
+    """
+
+    url = configured_generation_api_url()
+    token = generation_api_token()
+    if url and token:
+        if public_remote_mode() and _is_loopback_url(url):
+            raise PipelineError(_PUBLIC_REMOTE_BLOCK)
+        return "remote"
+    if not url and not token:
+        return "in_process"
+    raise PipelineError(PARTIAL_GENERATION_CONFIGURATION_MESSAGE)
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -94,10 +112,7 @@ def generation_api_url(explicit: str | None = None) -> str:
     raw = explicit if explicit is not None else os.environ.get(GENERATION_API_URL_ENV)
     value = (raw or "").strip().rstrip("/")
     if public_remote_mode():
-        loopback_blocked = bool(value) and _is_loopback_url(value) and not embedded_generation_mode()
-        if not value or loopback_blocked:
-            raise PipelineError(_PUBLIC_REMOTE_BLOCK)
-        if not generation_api_token():
+        if not value or _is_loopback_url(value) or not generation_api_token():
             raise PipelineError(_PUBLIC_REMOTE_BLOCK)
         return value
     return value or DEFAULT_GENERATION_API_URL
@@ -716,22 +731,23 @@ def run_remote_calendar_generation(
 __all__ = [
     "DEFAULT_GENERATION_API_URL",
     "DEFAULT_WAIT_TIMEOUT_SECONDS",
-    "EMBEDDED_GENERATION_ENV",
     "GENERATION_API_TOKEN_ENV",
     "GENERATION_API_URL_ENV",
+    "PARTIAL_GENERATION_CONFIGURATION_MESSAGE",
     "REMOTE_JOB_EXPIRED_MESSAGE",
     "REMOTE_JOB_LOST_MESSAGE",
     "REMOTE_JOB_TIMEOUT_MESSAGE",
     "RemoteJobAdvance",
     "advance_remote_generation_job",
     "build_generation_payload",
+    "configured_generation_api_url",
     "delete_remote_calendar_job",
-    "embedded_generation_mode",
     "download_remote_calendar_document",
     "fetch_remote_calendar_job",
     "generation_api_token",
     "generation_api_url",
     "public_remote_mode",
+    "select_generation_route",
     "remote_job_progress_label",
     "run_remote_calendar_generation",
     "submit_remote_calendar_job",

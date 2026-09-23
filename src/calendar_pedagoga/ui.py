@@ -72,6 +72,7 @@ from calendar_pedagoga.pipeline import (
     USE_CONTENT_ENGINE_V2,
     _build_pipeline_lesson_content,
     _lesson_rows_from_v2,
+    run_calendar_pipeline,
 )
 from calendar_pedagoga.content_engine_v2 import (
     LessonContentV2Row,
@@ -86,6 +87,7 @@ from calendar_pedagoga.remote_generation import (
     download_remote_calendar_document,
     fetch_remote_calendar_job,
     remote_job_progress_label,
+    select_generation_route,
     submit_remote_calendar_job,
 )
 from calendar_pedagoga.production_readiness import (
@@ -4782,6 +4784,8 @@ def _fail_remote_generation(message: str, error: BaseException | None = None) ->
     if error is not None:
         _emit_generation_error_to_stderr(error)
     st.session_state["calendar_generation_error"] = message
+    st.session_state.pop("calendar_download", None)
+    st.session_state.pop("calendar_generation_succeeded", None)
     st.session_state.pop("calendar_remote_job", None)
     st.session_state.pop("calendar_remote_started_at", None)
     _clear_work_busy()
@@ -4931,6 +4935,32 @@ def _execute_calendar_generation(
         status_widget = None
         with _work_status_block(status_slot, _STATUS_BUILD_PLAN) as status_widget:
             _set_work_status(_STATUS_BUILD_PLAN)
+            if select_generation_route() == "in_process":
+                result = run_calendar_pipeline(
+                    utp,
+                    program,
+                    academic_year=academic_year,
+                    template=template_selection,
+                    source_utp_name=validated_utp.filename,
+                    use_ai=False,
+                    program_filename=(
+                        validated_program.filename
+                        if validated_program is not None
+                        else None
+                    ),
+                    group_number=group_number,
+                    class_name=class_name,
+                    teacher_name=teacher_name,
+                    match_reviews=reviews,
+                    manual_confirmations=manual_confirmations,
+                    semantic_revision=_generator_revision(),
+                    on_progress=_progress,
+                )
+                _store_generation_result(result)
+                ready = str(st.session_state.get("calendar_work_status") or _STATUS_BUILD_PLAN)
+                status_widget.update(label=ready, state="complete")
+                _clear_work_busy()
+                return
             created = submit_remote_calendar_job(
                 utp,
                 program,

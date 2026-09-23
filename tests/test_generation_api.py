@@ -308,9 +308,34 @@ def test_dockerfile_copies_render_api_and_keeps_libreoffice() -> None:
     assert "render_api.py" in text
     assert "APP_ROLE" in text
     assert "python render_api.py" in text
-    assert "python -m calendar_pedagoga.render_supervisor" in text
+    assert "python -m streamlit run app.py" in text
+    assert "--server.address" in text
+    assert "0.0.0.0" in text
+    assert "--server.port" in text
+    assert '"$PORT"' in text
+    assert "render_supervisor" not in text
     assert "libreoffice-writer-nogui" in text
     assert "EXPOSE 8000" not in text
+
+
+def test_api_bind_keeps_standalone_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("CALENDAR_GENERATION_API_HOST", raising=False)
+    monkeypatch.delenv("CALENDAR_GENERATION_API_PORT", raising=False)
+    monkeypatch.setenv("PORT", "10000")
+    import render_api
+
+    assert render_api.api_bind_host() == "0.0.0.0"
+    assert render_api.api_bind_port() == 10000
+
+
+def test_api_bind_explicit_host_and_port_override_public_port(monkeypatch) -> None:
+    monkeypatch.setenv("CALENDAR_GENERATION_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_PORT", "8000")
+    monkeypatch.setenv("PORT", "10000")
+    import render_api
+
+    assert render_api.api_bind_host() == "127.0.0.1"
+    assert render_api.api_bind_port() == 8000
 
 
 def test_health_allows_missing_token_and_jobs_require_bearer() -> None:

@@ -2,6 +2,7 @@ from datetime import date
 from contextlib import contextmanager
 import hashlib
 import inspect
+import os
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -295,20 +296,34 @@ def patch_instant_remote_generation(result, *, target: str = "calendar_pedagoga.
             label="Календарный план готов",
         )
 
-    with (
-        patch(f"{target}.submit_remote_calendar_job", side_effect=submit) as submit_mock,
-        patch(f"{target}.advance_remote_generation_job", side_effect=advance),
-        patch(
-            f"{target}.fetch_remote_calendar_job",
-            return_value=_remote_job_status(result, job_id=job_id),
-        ),
-        patch(
-            f"{target}.download_remote_calendar_document",
-            return_value=(result.filename, result.content),
-        ),
-        patch(f"{target}.delete_remote_calendar_job", return_value=None),
-    ):
-        yield submit_mock
+    previous_url = os.environ.get("CALENDAR_GENERATION_API_URL")
+    previous_token = os.environ.get("CALENDAR_GENERATION_API_TOKEN")
+    os.environ["CALENDAR_GENERATION_API_URL"] = "http://generation.test"
+    os.environ["CALENDAR_GENERATION_API_TOKEN"] = "test-token"
+    try:
+        with (
+            patch(f"{target}.submit_remote_calendar_job", side_effect=submit) as submit_mock,
+            patch(f"{target}.advance_remote_generation_job", side_effect=advance),
+            patch(
+                f"{target}.fetch_remote_calendar_job",
+                return_value=_remote_job_status(result, job_id=job_id),
+            ),
+            patch(
+                f"{target}.download_remote_calendar_document",
+                return_value=(result.filename, result.content),
+            ),
+            patch(f"{target}.delete_remote_calendar_job", return_value=None),
+        ):
+            yield submit_mock
+    finally:
+        if previous_url is None:
+            os.environ.pop("CALENDAR_GENERATION_API_URL", None)
+        else:
+            os.environ["CALENDAR_GENERATION_API_URL"] = previous_url
+        if previous_token is None:
+            os.environ.pop("CALENDAR_GENERATION_API_TOKEN", None)
+        else:
+            os.environ["CALENDAR_GENERATION_API_TOKEN"] = previous_token
 
 
 def _check_and_resolve(
@@ -1426,9 +1441,12 @@ def test_year_conflict_block_does_not_generate() -> None:
     assert not _analysis_ready(app)
 
 
-def test_generation_failure_hides_download() -> None:
+def test_generation_failure_hides_download(monkeypatch) -> None:
     from calendar_pedagoga.pipeline import PipelineError
 
+    monkeypatch.setenv("CALENDAR_GENERATION_API_URL", "http://generation.test")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_TOKEN", "token")
+    monkeypatch.delenv("RENDER", raising=False)
     app = AppTest.from_file(str(APP_PATH), default_timeout=30).run()
     _upload(app, 0, _program_file())
     app.run()

@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from calendar_pedagoga import ui
-from calendar_pedagoga.pipeline import CalendarDocumentStatus
+from calendar_pedagoga.pipeline import CalendarDocumentStatus, PipelineError, PipelineResult
 from calendar_pedagoga.remote_generation import (
     DEFAULT_WAIT_TIMEOUT_SECONDS,
     REMOTE_JOB_EXPIRED_MESSAGE,
@@ -109,7 +109,10 @@ def _fragment(state, **patches):
         )
 
 
-def test_execute_submit_returns_without_polling() -> None:
+def test_execute_submit_returns_without_polling(monkeypatch) -> None:
+    monkeypatch.setenv("CALENDAR_GENERATION_API_URL", "http://generation.test")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_TOKEN", "token")
+    monkeypatch.delenv("RENDER", raising=False)
     fetched: list[bool] = []
 
     def fetch(*_args, **_kwargs):
@@ -431,4 +434,148 @@ def test_in_flight_job_skips_fingerprint_rehash() -> None:
         ui._render_generation_result()
     revision.assert_not_called()
     assert state["calendar_remote_job"]["job_id"] == "abc"
+
+
+def _run_execute(state, *, pipeline):
+    validated_utp = SimpleNamespace(filename="plan.docx", parsed=_Plan())
+    validated_program = SimpleNamespace(
+        filename="program.docx", content=b"original-doc", parsed=_Program()
+    )
+    template = object()
+    reviews = {("1", "Тема", None): {"decision": "USER_CONFIRMED"}}
+    with (
+        patch.object(ui.st, "session_state", state),
+        patch.object(ui, "_generator_revision", return_value="revision"),
+        patch.object(ui, "run_calendar_pipeline", side_effect=pipeline) as pipeline_mock,
+        patch.object(ui, "submit_remote_calendar_job") as submit,
+        patch.object(ui, "parse_program", side_effect=AssertionError("reparse")),
+        patch.object(ui, "_work_status_block") as status_block,
+        patch.object(ui, "ConfirmedStudyPlan", _Plan),
+        patch.object(ui, "UtpParseResult", _Plan),
+        patch.object(ui, "ProgramData", _Program),
+    ):
+        widget = SimpleNamespace(update=lambda **_kwargs: None)
+        status_block.return_value.__enter__.return_value = widget
+        status_block.return_value.__exit__.return_value = None
+        ui._execute_calendar_generation(
+            validated_utp=validated_utp,
+            validated_program=validated_program,
+            template_selection=template,
+            academic_year="2026–2027",
+            group_number="1",
+            class_name="А",
+            teacher_name="Иванова",
+            reviews=reviews,
+        )
+    return pipeline_mock, submit, validated_utp, validated_program, template, reviews
+
+
+def test_render_without_credentials_runs_in_process_without_http(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("CALENDAR_GENERATION_API_URL", raising=False)
+    monkeypatch.delenv("CALENDAR_GENERATION_API_TOKEN", raising=False)
+    state = {"calendar_generation_fingerprint": ("inputs", "revision"), "calendar_work_status": ""}
+
+    def pipeline(*_args, **_kwargs):
+        return PipelineResult(
+            filename="plan.docx",
+            content=b"docx-bytes",
+            warnings=(),
+            resolved_lessons=(),
+        )
+
+    pipeline_mock, submit, plan, program, template, reviews = _run_execute(state, pipeline=pipeline)
+    submit.assert_not_called()
+    pipeline_mock.assert_called_once()
+    assert pipeline_mock.call_args.args[0] is plan.parsed
+    assert pipeline_mock.call_args.args[1] is program.parsed
+    assert pipeline_mock.call_args.kwargs["template"] is template
+    assert pipeline_mock.call_args.kwargs["match_reviews"] is reviews
+    assert pipeline_mock.call_args.kwargs["match_reviews"][("1", "Тема", None)]["decision"] == "USER_CONFIRMED"
+    assert pipeline_mock.call_args.kwargs["use_ai"] is False
+    assert "program_content" not in pipeline_mock.call_args.kwargs
+    assert state["calendar_download"].content == b"docx-bytes"
+    assert state["calendar_generation_succeeded"] is True
+    assert "calendar_remote_job" not in state
+
+
+def test_explicit_credentials_keep_remote_submit(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_URL", "https://generation.example")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_TOKEN", "token")
+    state = {"calendar_generation_fingerprint": ("inputs", "revision"), "calendar_work_status": ""}
+
+    def pipeline(*_args, **_kwargs):
+        raise AssertionError("in-process pipeline must not run")
+
+    with (
+        patch.object(ui.st, "session_state", state),
+        patch.object(ui, "_generator_revision", return_value="revision"),
+        patch.object(ui, "run_calendar_pipeline", side_effect=pipeline),
+        patch.object(
+            ui,
+            "submit_remote_calendar_job",
+            return_value={"job_id": "abc", "job_state": "QUEUED", "phase": None},
+        ) as submit,
+        patch.object(ui, "_work_status_block") as status_block,
+        patch.object(ui, "ConfirmedStudyPlan", _Plan),
+        patch.object(ui, "UtpParseResult", _Plan),
+        patch.object(ui, "ProgramData", _Program),
+    ):
+        widget = SimpleNamespace(update=lambda **_kwargs: None)
+        status_block.return_value.__enter__.return_value = widget
+        status_block.return_value.__exit__.return_value = None
+        ui._execute_calendar_generation(
+            validated_utp=SimpleNamespace(filename="plan.docx", parsed=_Plan()),
+            validated_program=SimpleNamespace(
+                filename="program.docx", content=b"original-doc", parsed=_Program()
+            ),
+            template_selection=object(),
+            academic_year="2026–2027",
+            group_number="",
+            class_name="",
+            teacher_name="",
+            reviews={},
+        )
+    submit.assert_called_once()
+    assert state["calendar_remote_job"]["job_id"] == "abc"
+    assert "calendar_download" not in state
+
+
+def test_partial_configuration_is_shown_and_does_not_generate(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("CALENDAR_GENERATION_API_URL", "https://generation.example")
+    monkeypatch.delenv("CALENDAR_GENERATION_API_TOKEN", raising=False)
+    state = {
+        "calendar_generation_fingerprint": ("inputs", "revision"),
+        "calendar_work_status": "",
+        "calendar_download": SimpleNamespace(content=b"old"),
+        "calendar_generation_succeeded": True,
+    }
+
+    def pipeline(*_args, **_kwargs):
+        raise AssertionError("pipeline must not run")
+
+    _pipeline_mock, submit, *_rest = _run_execute(state, pipeline=pipeline)
+    submit.assert_not_called()
+    assert "CALENDAR_GENERATION_API_URL" in state["calendar_generation_error"]
+    assert "calendar_download" not in state
+    assert "calendar_generation_succeeded" not in state
+
+
+def test_in_process_pipeline_error_does_not_create_download(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("CALENDAR_GENERATION_API_URL", raising=False)
+    monkeypatch.delenv("CALENDAR_GENERATION_API_TOKEN", raising=False)
+    state = {"calendar_generation_fingerprint": ("inputs", "revision"), "calendar_work_status": ""}
+
+    def pipeline(*_args, **_kwargs):
+        raise PipelineError("сбой конвейера")
+
+    pipeline_mock, submit, *_rest = _run_execute(state, pipeline=pipeline)
+    pipeline_mock.assert_called_once()
+    submit.assert_not_called()
+    assert state["calendar_generation_error"] == "сбой конвейера"
+    assert "calendar_download" not in state
+    assert "calendar_generation_succeeded" not in state
 
