@@ -1,0 +1,37 @@
+[
+  {
+    "id": "key",
+    "label": "КЛЮЧ",
+    "location": "references",
+    "filename": "Программа КЛЮЧ.DOC",
+    "sha256": "c81788305191bbabf7eb911f2b12a4ce0115c3e44a76316dd0b449feea75fd21"
+  },
+  {
+    "id": "tour",
+    "label": "Туристы",
+    "location": "references",
+    "filename": "Программа ТУРИСТЫ-ПРОВОДНИКИ 1 г.docx",
+    "sha256": "f985490b127b4ce13e86b68a08a4973b2a6d92191c554934f4dc431a92626dcd"
+  },
+  {
+    "id": "climb",
+    "label": "Скалолазание",
+    "location": "downloads",
+    "filename": "Программа Скалолазание .docx",
+    "sha256": "1832c30a8f2ef6e3d48d4a2b3f15444d474fa9915a515002c6efa1506802cc94"
+  },
+  {
+    "id": "nature",
+    "label": "Природный материал",
+    "location": "downloads",
+    "filename": "Работа с природным материалом.doc",
+    "sha256": "403893733ff5409d366b201a54f3ca8aa7168d1ba51f685d497d094d6616ef00"
+  },
+  {
+    "id": "orientation",
+    "label": "Ориентирование",
+    "location": "downloads",
+    "filename": "Программа по Ориентированию для нач.кл..doc",
+    "sha256": "8b97f98735cde648cba3970283b1a58cd2bf17459d626cf15ba3018df096a02b"
+  }
+]
