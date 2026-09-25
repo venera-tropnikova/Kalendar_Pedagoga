@@ -5147,6 +5147,9 @@ def run_app() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
+    from calendar_pedagoga.canonical_wiring import run_if_enabled
+    if run_if_enabled():
+        return
     status_slot = st.empty()
     current_status = str(
         st.session_state.get("calendar_work_status") or ""
