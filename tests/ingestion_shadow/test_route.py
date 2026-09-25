@@ -58,6 +58,51 @@ def test_unconfirmed_model_does_not_create_docx():
     assert caught.value.code == "UNCONFIRMED"
 
 
+def mixed_training_practice_model():
+    values = [
+        ("1", "Тема Смешанная", "4", "0", "2", "2"),
+        ("", "Итого", "4", "0", "2", "2"),
+    ]
+    body = p("Учебно-тематический план 1 года обучения", bold=True)
+    body += table(values=values)
+    body += p("Содержание программы 1 года обучения", bold=True)
+    body += p("1. Тема Смешанная", bold=True) + p("Изучает устройство компаса.")
+    return interpret(body)
+
+
+def docx_channel_hours(content: bytes) -> tuple[int, int]:
+    from io import BytesIO
+    import re
+
+    from docx import Document
+
+    table = Document(BytesIO(content)).tables[0]
+    pattern = re.compile(r"\((\d+)\)")
+    theory = practice = 0
+    for row in table.rows[2:]:
+        cells = [cell.text for cell in row.cells]
+        theory += sum(int(value) for value in pattern.findall(cells[2]))
+        practice += sum(int(value) for value in pattern.findall(cells[4]))
+    return theory, practice
+
+
+def test_mixed_training_and_practice_slot_keeps_every_hour_in_docx():
+    result = run_shadow(
+        confirm(build_model(mixed_training_practice_model())),
+        academic_year=YEAR,
+        workload=ExplicitWorkload(1, Fraction(4), "explicit"),
+    )
+    totals = {key: value.arithmetic_value for key, value in result.packet.plan.canonical_plan.totals}
+    assert totals["THEORY"] == 0
+    assert totals["TRAINING"] == 2
+    assert totals["PRACTICE"] == 2
+    assert totals["TOTAL"] == 4
+    theory, practice = docx_channel_hours(result.docx)
+    assert theory == 2
+    assert practice == 2
+    assert theory + practice == totals["TOTAL"]
+
+
 def test_confirmed_route_reaches_docx_without_training_loss():
     result = run_shadow(
         confirm(build_model(confirmed_model())),
@@ -121,6 +166,12 @@ def test_corpus_ready_stops_on_existing_downstream_defects_and_blocked_states_do
             assert totals["THEORY"] == 36
             assert totals["TRAINING"] == 36
             assert totals["PRACTICE"] == 72
+            cell_hours = sum(
+                int(part.theory_hours) + int(part.practice_hours)
+                for lesson in result.lessons
+                for part in lesson.source.source.week_parts
+            )
+            assert cell_hours == totals["TOTAL"]
             identities = [
                 (
                     lesson.source.source.topic_number,

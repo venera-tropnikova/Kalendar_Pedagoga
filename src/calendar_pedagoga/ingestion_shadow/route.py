@@ -342,12 +342,13 @@ def _content_rows(packet, elements, utp):
     parts_by_week = {}
     traces = []
     for source in sources:
-        theory_hours = source.theory
+        # The calendar table has a theory column and a practice column.
+        # Training stays on the slot. The theory column is where non-practice
+        # hours are shown, including when the same week also has practice.
+        # Practice hours are not increased by training, and training is not
+        # omitted from the cells.
+        theory_hours = source.theory + source.training
         practice_hours = source.practice
-        if source.training and not source.theory and not source.practice:
-            # CE2 reads source text only from the theory or practice cell.
-            # The trace below keeps the hours on the training channel.
-            theory_hours = source.training
         # Title-only and identical sources have no distinguishing atom.
         # Empty SOURCE units let the existing repeated-title allocator supply
         # phase or catalog data. The canonical text stays on the trace.
@@ -406,6 +407,17 @@ def _content_rows(packet, elements, utp):
         rows.append(row)
     if sum(row.total_hours for row in rows) != utp.metadata.hours_per_year:
         raise ShadowBlocked("HOURS_DO_NOT_RECONCILE", "Calendar rows lost confirmed hours", ledger=packet.ledger)
+    cell_hours = sum(
+        int(part.theory_hours) + int(part.practice_hours)
+        for row in rows
+        for part in row.week_parts
+    )
+    if cell_hours != int(utp.metadata.hours_per_year):
+        raise ShadowBlocked(
+            "HOURS_DO_NOT_RECONCILE",
+            "DOCX cell hours differ from the confirmed plan total",
+            ledger=packet.ledger,
+        )
     return tuple(rows), tuple(traces)
 
 
