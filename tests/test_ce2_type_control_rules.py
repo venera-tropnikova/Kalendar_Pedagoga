@@ -66,6 +66,49 @@ def test_audit_snapshot_preserves_results_and_untouched_rows():
     assert 1 not in remaining_weeks
 
 
+def test_excursion_week_is_not_a_contest_and_contest_and_exhibition_stay():
+    excursion = type_from_frame(
+        ActionFrame("Конкурсы, выставки, экскурсии", "", "", ""),
+        planned_result="Участвует в экскурсиях.",
+        theory_hours=0,
+        practice_hours=1,
+        theory_text="",
+        practice_text="Экскурсии",
+        program_content="Конкурсы, выставки, экскурсии",
+    )
+    contest = type_from_frame(
+        ActionFrame("Конкурсы, выставки, экскурсии", "", "", ""),
+        planned_result="Участвует в конкурсах.",
+        theory_hours=0,
+        practice_hours=1,
+        theory_text="",
+        practice_text="Конкурсы",
+        program_content="Конкурсы, выставки, экскурсии",
+    )
+    exhibition = type_from_frame(
+        ActionFrame("Выставки", "", "", ""),
+        planned_result="Участвует в выставках.",
+        theory_hours=0,
+        practice_hours=1,
+        theory_text="",
+        practice_text="Выставки",
+        program_content="Выставки",
+    )
+    catalog_contest = type_from_frame(
+        ActionFrame("Конкурсы, выставки, экскурсии", "", "", ""),
+        planned_result="Участвует в конкурсах, выставках и экскурсиях.",
+        theory_hours=0,
+        practice_hours=1,
+        theory_text="",
+        practice_text="Конкурсы, выставки, экскурсии",
+        program_content="Конкурсы, выставки, экскурсии",
+    )
+    assert excursion == "экскурсия"
+    assert contest == "конкурс"
+    assert catalog_contest == "конкурс"
+    assert exhibition == "практическое занятие"
+
+
 @pytest.mark.parametrize(("result", "clause", "expected"), [
     ("Выступает в туристских соревнованиях в качестве участника.",
      "Выступление в туристских соревнованиях в качестве участников.",

@@ -6142,6 +6142,14 @@ def _activity_event_type(result: str, clause: str) -> str:
     blob = _normalize_spaces(f"{result} {clause}")
     if not _has_event_participation(blob):
         return ""
+    # «Экскурсии» is not a contest stem. A neighbouring «конкурс» in the
+    # shared catalogue must not replace a result that names only an excursion.
+    if (
+        re.search(r"(?i)(?<![0-9a-zа-яё])экскурси", result_low)
+        and "конкурс" not in result_low
+        and "выставк" not in result_low
+    ):
+        return "экскурсия"
     event_src = result_low if any(
         stem in result_low for stem in _EVENT_KIND_STEMS
     ) else clause_low
