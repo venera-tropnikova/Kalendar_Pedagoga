@@ -5,7 +5,14 @@ import json
 
 import pytest
 
-from calendar_pedagoga.content_engine_v2 import ActionFrame, control_from_frame, type_from_frame
+from calendar_pedagoga.content_engine_v2 import (
+    ActionFrame,
+    build_lesson_content_v2,
+    control_from_frame,
+    type_from_frame,
+)
+from calendar_pedagoga.content_generation import CalendarContentRow, WeekTopicPart
+from calendar_pedagoga.matching import MatchStatus
 from test_ce2_grounded_triad import CE2_TP1_WEEK_SNAPSHOT
 
 
@@ -107,6 +114,78 @@ def test_excursion_week_is_not_a_contest_and_contest_and_exhibition_stay():
     assert contest == "конкурс"
     assert catalog_contest == "конкурс"
     assert exhibition == "практическое занятие"
+
+
+def _confirmed_practice_row(week_number: int, topic: str, practice_hours: int) -> CalendarContentRow:
+    part = WeekTopicPart(
+        topic_number="8",
+        topic_title=topic,
+        section="Раздел",
+        theory_hours=0,
+        practice_hours=practice_hours,
+        match_status=MatchStatus.USER_CONFIRMED,
+        program_section="Раздел",
+        program_topic=topic,
+        program_content_full="",
+        weekly_content_assigned=True,
+        theory_units=(),
+        practice_units=(),
+    )
+    return CalendarContentRow(
+        week_number=week_number,
+        date_range="01–07.09",
+        month="Май",
+        section=part.section,
+        topic_number=part.topic_number,
+        topic_title=topic,
+        source_topic_title=topic,
+        theory_hours=0,
+        practice_hours=practice_hours,
+        total_hours=practice_hours,
+        match_status=MatchStatus.USER_CONFIRMED,
+        program_section=part.program_section,
+        program_topic=topic,
+        program_content_full="",
+        program_content_preview="",
+        source_program_name="Программа",
+        source_utp_name="synthetic.docx",
+        week_parts=(part,),
+    )
+
+
+def test_sliced_catalog_excursion_week_keeps_excursion_type():
+    """Closed confirmed catalogue: type is chosen before the slice.
+
+    Week 32 renders «Участвует в экскурсиях.» from the second slice. That
+    result must not keep the contest type of the unsliced catalogue.
+    """
+    topic = "Конкурсы, выставки, экскурсии"
+    lessons = {
+        row.source.week_number: row
+        for row in build_lesson_content_v2((
+            _confirmed_practice_row(31, topic, 3),
+            _confirmed_practice_row(32, topic, 3),
+        ))
+    }
+    assert lessons[31].planned_result == "Участвует в конкурсах и выставках."
+    assert lessons[31].lesson_type == "конкурс"
+    assert lessons[32].planned_result == "Участвует в экскурсиях."
+    assert lessons[32].assessment_method == (
+        "Педагогическое наблюдение за участием в экскурсиях."
+    )
+    assert lessons[32].lesson_type == "экскурсия"
+
+    exhibition = build_lesson_content_v2((
+        _confirmed_practice_row(1, "Выставки", 2),
+    ))[0]
+    assert exhibition.planned_result == "Участвует в выставках."
+    assert exhibition.lesson_type == "практическое занятие"
+
+    whole = build_lesson_content_v2((
+        _confirmed_practice_row(1, topic, 2),
+    ))[0]
+    assert whole.planned_result == "Участвует в конкурсах, выставках и экскурсиях."
+    assert whole.lesson_type == "конкурс"
 
 
 @pytest.mark.parametrize(("result", "clause", "expected"), [

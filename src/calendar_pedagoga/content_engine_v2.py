@@ -405,6 +405,17 @@ def _apply_user_confirmed_sentence_frames(
         codes = _stamp_utp_topic_derived(codes)
     if uninformative:
         codes = _stamp_uninformative_topic_title(codes)
+    # TYPE is fixed from the unsliced catalogue before this render. A sliced
+    # result that names only an excursion must take that type; contest and
+    # exhibition results keep the type already chosen.
+    lesson_type = candidate.lesson_type
+    if row.practice_hours:
+        event_type = _activity_event_type(
+            planned_result,
+            first.source_span if first else candidate.frame.clause,
+        )
+        if event_type == "экскурсия":
+            lesson_type = event_type
     return replace(
         candidate,
         frame=ActionFrame(
@@ -413,6 +424,7 @@ def _apply_user_confirmed_sentence_frames(
             first.object if first else candidate.frame.object,
             "",
         ),
+        lesson_type=lesson_type,
         planned_result=planned_result,
         assessment_method=assessment_method,
         provenance_codes=_stamp_sentence_frame_closed(codes),
