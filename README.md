@@ -89,3 +89,15 @@ references/                    неизменяемые исходные и эт
 - сумма тем сверяется с итоговой строкой таблицы;
 - годовой объём сверяется между информационной справкой, недельной нагрузкой и итогом таблицы;
 - противоречия показываются как предупреждения и не исправляются автоматически.
+
+## Russian OCR for scanned program PDFs
+
+Textual PDF pages use their existing text layer. Scanned pages use the OCR engine
+bundled with PyMuPDF and the Russian `rus.traineddata` language model.
+On Debian/Ubuntu install `tesseract-ocr tesseract-ocr-rus` (included in the Dockerfile).
+On Windows install Russian Tesseract language data under
+`C:/Program Files/Tesseract-OCR/tessdata`, or place `rus.traineddata` under
+`%LOCALAPPDATA%/CalendarPedagoga/tessdata`. Alternatively set `TESSDATA_PREFIX`
+to the directory containing that model before starting the app.
+Missing OCR data or unreadable pages produce an error with page numbers;
+the application does not download models or silently omit failed pages.

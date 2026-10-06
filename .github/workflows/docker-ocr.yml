@@ -1,0 +1,22 @@
+name: Verify Docker Russian OCR
+on:
+  push:
+    branches: [verify/docker-ocr-build-20261006]
+permissions:
+  contents: read
+jobs:
+  docker-ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: docker build -t calendar-ocr:verify .
+      - name: Check Russian OCR and synthetic scanned PDF inside container
+        run: |
+          docker run --rm -v "$PWD/tests:/verification/tests:ro" calendar-ocr:verify sh -ec '
+            tesseract --version
+            tesseract --list-langs | grep -x rus
+            python -m pip install "pytest>=8,<9"
+            python -m pytest /verification/tests/test_program_import_formats.py /verification/tests/test_program_import_confirmation_ui.py -q
+          '

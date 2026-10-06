@@ -2602,8 +2602,8 @@ def _render_upload_fields() -> tuple[object | None, object | None, object | None
         program_file = _file_uploader_with_clear(
             "program",
             label="Загрузите образовательную программу",
-            type=("doc", "docx"),
-            help="Программа — образовательная программа, DOC/DOCX, до 10 МБ.",
+            type=("doc", "docx", "pdf"),
+            help="Программа — DOC, DOCX или PDF с текстовым слоем, до 10 МБ.",
         )
         st.markdown(
             '<div class="kp-field-title">Учебно-тематический план'
@@ -3603,6 +3603,39 @@ def _show_generation_result() -> None:
         )
 
 
+def _render_program_content_confirmation(program_file) -> bool:
+    """Keep uncertain boundaries out of analysis until the teacher chooses."""
+    pending = st.session_state.get("program_content_pending")
+    if not pending:
+        return False
+    digest = hashlib.sha256(program_file.getvalue()).hexdigest() if program_file else None
+    if digest != pending["digest"]:
+        st.session_state.pop("program_content_pending", None)
+        st.session_state.pop("program_content_decision", None)
+        return False
+    parsed = pending["upload"].parsed
+    choices = {r.id: r for r in parsed.content_candidates}
+    st.subheader("Уточните содержание программы")
+    st.info("Выберите год и фрагмент, в котором описаны занятия. Часы и темы не будут дополнены автоматически.")
+    selected = st.selectbox("Год и начало содержания", list(choices),
+                            format_func=lambda key: choices[key].label,
+                            key="program_content_choice_" + digest)
+    region = choices[selected]
+    st.caption("Основание: " + region.evidence)
+    if region.heading_indices:
+        st.write("Предполагаемые разделы: " + "; ".join(
+            parsed.source_blocks[i].text for i in region.heading_indices))
+    if st.button("Подтвердить содержание", key="confirm_program_content"):
+        st.session_state["program_content_decision"] = {"digest": digest, "selection": selected}
+        st.session_state.pop("program_content_pending", None)
+        st.session_state["calendar_check_pending"] = True
+        st.session_state["calendar_busy"] = True
+        st.rerun()
+    with st.expander("Показать найденное содержание", expanded=True):
+        st.text("\n".join(b.text for b in parsed.source_blocks[region.start:region.end]))
+    return True
+
+
 def run_app() -> None:
     """Показать экран загрузки, анализа и формирования календарного плана."""
     st.set_page_config(
@@ -3628,6 +3661,8 @@ def run_app() -> None:
         utp_file, program_file, organization_template_file,
         academic_year, group_number, class_name, teacher_name,
     )
+    if _render_program_content_confirmation(program_file):
+        return
     if st.session_state.get("calendar_generation_invalidated") and not st.session_state.get("analysis_ready"):
         st.info("План устарел. Нажмите «Проверить документы» заново.")
 
@@ -3664,6 +3699,25 @@ def run_app() -> None:
                         transient_program.filename,
                         transient_program.content,
                     )
+                    if validated_program.parsed.import_needs_confirmation:
+                        digest = hashlib.sha256(program_file.getvalue()).hexdigest()
+                        decision = st.session_state.get("program_content_decision", {})
+                        if decision.get("digest") == digest:
+                            confirmed = parse_program(
+                                validated_program.content, validated_program.filename,
+                                content_selection=decision["selection"],
+                            )
+                            validated_program = ValidatedUpload(
+                                validated_program.purpose, validated_program.filename,
+                                validated_program.content, confirmed,
+                            )
+                        else:
+                            st.session_state["program_content_pending"] = {
+                                "digest": digest, "upload": validated_program,
+                            }
+                            st.session_state["calendar_check_pending"] = False
+                            st.session_state["calendar_busy"] = False
+                            st.rerun()
                     transient_utp = uploads.get(UploadPurpose.UTP)
                     validated_utp_upload = (
                         validate_upload(
@@ -3720,11 +3774,18 @@ def run_app() -> None:
                 ),
                 resolved_utp,
             )
-            program = parse_program(
-                validated_program.content,
-                validated_program.filename,
-                study_year=study_year_for_matching(resolved_utp),
-            )
+            try:
+                program = parse_program(
+                    validated_program.content,
+                    validated_program.filename,
+                    study_year=study_year_for_matching(resolved_utp),
+                    content_selection=validated_program.parsed.selected_content,
+                )
+            except ValueError as error:
+                st.session_state["calendar_busy"] = False
+                st.session_state["calendar_check_pending"] = False
+                st.error(str(error))
+                return
             validated_program = ValidatedUpload(
                 validated_program.purpose,
                 validated_program.filename,

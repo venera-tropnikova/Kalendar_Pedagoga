@@ -12,6 +12,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer-nogui \
         fonts-liberation \
+        tesseract-ocr \
+        tesseract-ocr-rus \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md requirements.txt app.py ./

@@ -11,6 +11,10 @@ import subprocess
 import tempfile
 
 from docx import Document
+from calendar_pedagoga.program_extraction import (
+    ProgramReadError, ContentRegion, TextBlock, read_docx, read_pdf,
+    content_regions, is_heading, year_of, STOP,
+)
 
 
 class LegacyDocUnsupportedError(RuntimeError):
@@ -24,6 +28,8 @@ class ProgramContentItem:
     content: str
     parent_section: str | None = None
     study_year: int | None = None
+    source_locations: tuple[str, ...] = ()
+    nested_titles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,10 @@ class ProgramData:
     attestation_statements: tuple[str, ...] = ()
     academic_year: str | None = None
     academic_year_mentions: tuple = ()
+    source_blocks: tuple[TextBlock, ...] = ()
+    content_candidates: tuple[ContentRegion, ...] = ()
+    selected_content: str | None = None
+    import_needs_confirmation: bool = False
 
 
 def find_libreoffice() -> Path | None:
@@ -85,13 +95,15 @@ def convert_legacy_doc(data: bytes, soffice: Path | None = None) -> bytes:
             str(temp_dir),
             str(source),
         ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise LegacyDocUnsupportedError(
+                "Не удалось преобразовать DOC: LibreOffice недоступен или превышено время ожидания (120 с). "
+                "Исходный файл не изменён."
+            ) from error
         if completed.returncode != 0 or not output.is_file():
             message = (completed.stderr or completed.stdout).strip()
             raise LegacyDocUnsupportedError(
@@ -147,47 +159,6 @@ def _collect_after(
 def _is_bold_heading(paragraph) -> bool:
     runs = [run for run in paragraph.runs if _clean(run.text)]
     return bool(runs) and all(run.bold is True for run in runs)
-
-
-def _find_content_start(paragraphs, study_year: int | None) -> int | None:
-    texts = [_clean(paragraph.text) for paragraph in paragraphs]
-    if study_year is not None:
-        specific = next(
-            (
-                index
-                for index, text in enumerate(texts)
-                if re.search(
-                    rf"содержание\s+программы\s+{study_year}-го\s+года\s+обучения",
-                    text,
-                    re.I,
-                )
-            ),
-            None,
-        )
-        if specific is not None:
-            return specific
-    numbered = next(
-        (
-            index
-            for index, text in enumerate(texts)
-            if re.search(
-                r"содержание\s+программы\s+\d+-го\s+года\s+обучения",
-                text,
-                re.I,
-            )
-        ),
-        None,
-    )
-    if numbered is not None:
-        return numbered
-    return next(
-        (
-            index
-            for index, text in enumerate(texts)
-            if re.search(r"содержание\s+программы", text, re.I)
-        ),
-        None,
-    )
 
 
 def _year_number_from_text(text: str) -> int | None:
@@ -347,60 +318,70 @@ def _structured_expected_outcomes(
     return tuple(dict.fromkeys(knowledge)), tuple(dict.fromkeys(skills))
 
 
-def _content_items(document, study_year: int | None = None) -> tuple[ProgramContentItem, ...]:
-    paragraphs = document.paragraphs
-    start = _find_content_start(paragraphs, study_year)
-    if start is None:
-        return ()
-    items: list[ProgramContentItem] = []
-    current_number: str | None = None
-    current_title: str | None = None
-    current_parent: str | None = None
-    content: list[str] = []
+_SECTION_HEADING_RE = re.compile(r"(?i)^раздел\s+(\d+(?:\.\d+)*)\.?\s+(.+)$")
 
-    def flush() -> None:
-        if current_title:
-            items.append(
-                ProgramContentItem(
-                    current_number,
-                    current_title,
-                    "\n".join(content).strip(),
-                    current_parent,
-                    study_year,
-                )
-            )
 
-    for paragraph in paragraphs[start + 1 :]:
-        text = _clean(paragraph.text)
+def _is_section_heading(text: str) -> bool:
+    return bool(_SECTION_HEADING_RE.match(_clean(text)))
+
+
+def _content_items(document, region) -> tuple[ProgramContentItem, ...]:
+    items = []
+    number = title = parent = None
+    content, locations, nested_titles = [], [], []
+    section_scope = False
+    labels = document.source_labels
+
+    def flush():
+        if title:
+            items.append(ProgramContentItem(number, title, "\n".join(content).strip(),
+                                            parent, region.year, tuple(locations), tuple(nested_titles)))
+
+    for index in range(region.start, region.end):
+        block = document.paragraphs[index]
+        text = _clean(block.text)
         if not text:
             continue
-        if re.search(r"содержание\s+программы\s+\d+-го\s+года\s+обучения", text, re.I):
-            break
-        if re.search(r"^\(\d+-й\s+год\s+обучения\)", text, re.I):
-            continue
-        if re.search(r"по окончани[юя].*года обучения", text, re.I):
-            break
-        if re.search(r"^(?:ожидаемые|планируемые)\s+результаты", text, re.I):
-            break
-        number, title = _number_title(text)
-        if _is_bold_heading(paragraph):
+        if section_scope and re.match(r"(?i)^тема\s+\d+[.:\s]", text) and not block.bold:
+            nested_titles.append(text)
+            content.append(text)
+            locations.append(block.location)
+        elif is_heading(block, labels) or index in region.heading_indices:
             flush()
-            current_number, current_title, content = number, title, []
+            number, title = _number_title(text)
+            section_scope = _is_section_heading(text)
             if number and "." not in number:
-                current_parent = title
-            elif number is None and paragraph.alignment == 1:
-                current_parent = title
-            continue
-        if current_title is None:
-            continue
-        content.append(text)
+                parent = title
+            elif block.alignment == 1:
+                parent = title
+            content, locations, nested_titles = [], [block.location], []
+        elif title is not None:
+            content.append(text)
+            locations.append(block.location)
     flush()
     return tuple(items)
 
 
-def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramData:
+def parse_program_docx(data: bytes, study_year: int | None = None, *, content_selection: str | None = None) -> ProgramData:
+    return _parse_program_document(read_docx(data), study_year, content_selection)
+
+
+def _parse_program_document(document, study_year=None, content_selection=None) -> ProgramData:
     """Извлечь только явно присутствующие формулировки из DOCX."""
-    document = Document(BytesIO(data))
+    regions = content_regions(document)
+    eligible = tuple(r for r in regions if study_year is None or r.year in (None, study_year))
+    selected = None
+    if content_selection is not None:
+        selected = next((r for r in eligible if r.id == content_selection), None)
+        if selected is None:
+            raise ProgramReadError("Выбранная область содержания отсутствует или относится к другому году. Подтвердите выбор заново.")
+    elif len(eligible) == 1 and not eligible[0].needs_confirmation:
+        selected = eligible[0]
+    content_items = _content_items(document, selected) if selected else ()
+    if selected and not content_items:
+        raise ProgramReadError("В выбранной области не найдены заголовки тем или разделов: "
+                               + document.paragraphs[selected.start].location + ". "
+                               "Уточните структуру исходного документа.")
     paragraphs = [_clean(p.text) for p in document.paragraphs if _clean(p.text)]
     text = "\n".join(paragraphs)
     stop = (
@@ -468,7 +449,11 @@ def parse_program_docx(data: bytes, study_year: int | None = None) -> ProgramDat
         expected_results=results,
         knowledge_outcomes=knowledge,
         skill_outcomes=skills,
-        content_items=_content_items(document, study_year),
+        content_items=content_items,
+        source_blocks=document.paragraphs,
+        content_candidates=eligible,
+        selected_content=selected.id if selected else None,
+        import_needs_confirmation=selected is None and bool(eligible),
         duration_years=parse_duration_years(duration_text),
         age_min=age_min,
         age_max=age_max,
@@ -584,11 +569,14 @@ def parse_program(
     data: bytes,
     filename: str,
     study_year: int | None = None,
+    *, content_selection: str | None = None,
 ) -> ProgramData:
     """Разобрать загруженную программу с безопасной обработкой расширения."""
     suffix = Path(filename).suffix.lower()
     if suffix == ".doc":
-        return parse_program_docx(convert_legacy_doc(data), study_year=study_year)
+        return parse_program_docx(convert_legacy_doc(data), study_year=study_year, content_selection=content_selection)
     if suffix == ".docx":
-        return parse_program_docx(data, study_year=study_year)
-    raise ValueError("Поддерживаются только файлы DOC и DOCX.")
+        return parse_program_docx(data, study_year=study_year, content_selection=content_selection)
+    if suffix == ".pdf":
+        return _parse_program_document(read_pdf(data), study_year, content_selection)
+    raise ValueError("Поддерживаются только файлы DOC, DOCX и PDF.")

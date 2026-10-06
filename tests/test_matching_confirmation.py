@@ -841,9 +841,9 @@ def test_parsed_two_year_document_keeps_year_isolation_in_content_model():
     assert "традиции первого года" not in year2_blob
     assert all(item.study_year == 1 for item in year1.content_items)
     assert all(item.study_year == 2 for item in year2.content_items)
-    assert all(item.study_year is None for item in unknown.content_items)
-    assert "традиции первого года" in unknown_blob
-    assert "профессии родителей второго года" not in unknown_blob
+    assert unknown.import_needs_confirmation
+    assert {r.year for r in unknown.content_candidates} == {1, 2}
+    assert not unknown_blob and not unknown.content_items
     assert not any(
         "содержание программы" in item.title.casefold() for item in year1.content_items
     )
@@ -858,9 +858,9 @@ def test_parsed_two_year_document_keeps_year_isolation_in_content_model():
     assert row2.match_status in confirmed
     assert "профессии родителей второго года" in row2.program_content_full.casefold()
     assert "традиции первого года" not in row2.program_content_full.casefold()
-    assert row_unknown.match_status in confirmed
-    assert "традиции первого года" in row_unknown.program_content_full.casefold()
-    assert all(item.study_year is None for item in unknown.content_items)
+    assert row_unknown.match_status is MatchStatus.NOT_MATCHED
+    assert row_unknown.program_content_full == ""
+    assert not unknown.content_items
 
 
 def test_build_content_model_passes_study_year_to_matching():

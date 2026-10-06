@@ -39,7 +39,7 @@ class ValidatedUpload:
 
 _ALLOWED_EXTENSIONS = {
     UploadPurpose.UTP: frozenset({".docx"}),
-    UploadPurpose.PROGRAM: frozenset({".doc", ".docx"}),
+    UploadPurpose.PROGRAM: frozenset({".doc", ".docx", ".pdf"}),
     UploadPurpose.CALENDAR_TEMPLATE: frozenset({".docx"}),
 }
 
@@ -57,7 +57,7 @@ def _validate_container(filename: str, data: bytes, purpose: UploadPurpose) -> s
         raise UploadValidationError(
             f"Файл слишком большой: «{filename}». Максимальный размер — 10 МБ."
         )
-    expected_magic = _DOC_MAGIC if suffix == ".doc" else _DOCX_MAGIC
+    expected_magic = {".doc": _DOC_MAGIC, ".pdf": b"%PDF-", ".docx": _DOCX_MAGIC}[suffix]
     if not data.startswith(expected_magic):
         raise UploadValidationError(
             f"Неправильный формат: содержимое файла «{filename}» не соответствует расширению {suffix}."
@@ -166,12 +166,17 @@ def _validate_program(filename: str, data: bytes) -> ProgramData:
         raise
     except Exception as error:
         raise UploadValidationError(
-            f"Неправильный тип документа: файл «{filename}» не удалось прочитать как образовательную программу."
+            f"Не удалось прочитать программу «{filename}»: {error}"
         ) from error
-    if not result.content_items or not (result.title or result.goal or result.tasks):
+    source_text = " ".join(b.text for b in result.source_blocks).casefold()
+    _reject_normative(source_text, filename)
+    _reject_calendar_in_wrong_slot(source_text, filename, UploadPurpose.PROGRAM)
+    if not result.content_items and not result.content_candidates:
         raise UploadValidationError(
             f"Неправильный тип документа: файл «{filename}» не распознан как образовательная программа — "
-            "не найдены программные разделы и содержательная часть."
+            "не найдены границы содержательной части и заголовки разделов. "
+            + ("Последнее прочитанное место: " + result.source_blocks[-1].location + "."
+               if result.source_blocks else "В документе нет читаемых абзацев.")
         )
     return result
 
